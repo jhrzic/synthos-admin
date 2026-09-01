@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { ActiveTab } from '../types';
+import { useHermesHealth } from '../hooks/useHermesHealth';
 import { 
   Sparkles, Database, Bot, Zap, Cpu, Terminal, 
   Globe, Radio, Shield, CheckCircle2, ExternalLink, 
@@ -53,6 +54,7 @@ export const AirbyteHeader: React.FC<AirbyteHeaderProps> = ({
   };
 
   const wsInfo = getWorkspaceDetails();
+  const { health: hermesHealth } = useHermesHealth(15000);
 
   useEffect(() => {
     const updateClock = () => {
@@ -78,9 +80,28 @@ export const AirbyteHeader: React.FC<AirbyteHeaderProps> = ({
     },
     {
       name: 'HERMES',
-      state: 'CONNECTED',
-      stateColor: '#615EFF',
-      metric: 'Local',
+      state:
+        hermesHealth.status === 'UP'
+          ? 'CONNECTED'
+          : hermesHealth.status === 'DEGRADED'
+            ? 'DEGRADED'
+            : hermesHealth.status === 'DOWN'
+              ? 'DOWN'
+              : 'NOT_CONNECTED',
+      stateColor:
+        hermesHealth.status === 'UP'
+          ? '#00D26A'
+          : hermesHealth.status === 'DEGRADED'
+            ? '#F59E0B'
+            : hermesHealth.status === 'DOWN'
+              ? '#EF4444'
+              : '#64748B',
+      metric:
+        hermesHealth.status === 'UP'
+          ? (hermesHealth.runtime_version !== 'NOT_AVAILABLE'
+              ? hermesHealth.runtime_version
+              : 'Runtime')
+          : 'Offline',
       onClick: () => setActiveTab('hermes-core'),
     },
     {
