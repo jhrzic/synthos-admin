@@ -1,0 +1,206 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --airbyte-bg: #06070B;
+    --airbyte-card: #0C0D16;
+    --airbyte-card-hover: #121422;
+    --airbyte-border: #1E2138;
+    --airbyte-border-hover: #615EFF;
+    --airbyte-purple: #615EFF;
+    --airbyte-purple-glow: rgba(97, 94, 255, 0.35);
+    --airbyte-text: #F3F4F9;
+    --airbyte-muted: #8E94B8;
+  }
+
+  body {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background-color: #06070B;
+    color: #F3F4F9;
+  }
+
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+/* Airbyte Dark Faux-3D Dashboard Box */
+.dashboard-box {
+  /* Dark background matching the theme */
+  background-color: #0b0f19; 
+  
+  /* Semi-transparent border adds a crisp, faux-3D glass edge */
+  border: 1px solid rgba(255, 255, 255, 0.05); 
+  
+  /* Faux-3D elevation styling */
+  box-shadow: 
+    0px 4px 20px rgba(0, 0, 0, 0.4),       /* Soft deep shadow underneath */
+    inset 0px 1px 0px rgba(255, 255, 255, 0.1); /* Subtle top inner highlight */
+}
+
+/* Mission Control Widescreen Layout Fixes */
+main {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 1.5rem 2rem;
+}
+
+/* Ensure metric cards don't clip text on smaller frames */
+.airbyte-card {
+  background-color: var(--airbyte-card, #0C0D16);
+  border: 1px solid var(--airbyte-border, #1E2138);
+  border-radius: 1rem;
+  padding: 1.25rem;
+  transition: all 0.2s ease;
+}
+
+.airbyte-card:hover {
+  border-color: var(--airbyte-border-hover, #615EFF);
+}
+
+/* Fix grid auto-fit layout alignment for sections 2, 3, and 4 */
+.grid-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+/* Airbyte Monospace Badges */
+.airbyte-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.25rem 0.65rem;
+  border: 1px solid rgba(97, 94, 255, 0.3);
+  background-color: rgba(97, 94, 255, 0.08);
+  color: #A5A2FF;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.airbyte-badge-subtle {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid #1E2138;
+  background-color: #0E101B;
+  color: #8C92B5;
+  border-radius: 4px;
+}
+
+/* Dot Grid Pattern for Mission Control */
+.bg-grid-dots {
+  background-image: radial-gradient(rgba(142, 148, 184, 0.12) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+.bg-radial-vignette {
+  background: radial-gradient(circle at 50% 10%, rgba(97, 94, 255, 0.08) 0%, rgba(5, 6, 10, 0.95) 70%);
+}
+
+/* Hero KPI Gradient Top Borders */
+.hero-card-emerald {
+  border: 1px solid rgba(0, 210, 106, 0.25);
+  box-shadow: 0 -4px 16px -2px rgba(0, 210, 106, 0.25), inset 0 1px 0 rgba(0, 210, 106, 0.4);
+}
+.hero-card-cyan {
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  box-shadow: 0 -4px 16px -2px rgba(56, 189, 248, 0.25), inset 0 1px 0 rgba(56, 189, 248, 0.4);
+}
+.hero-card-purple {
+  border: 1px solid rgba(139, 92, 246, 0.25);
+  box-shadow: 0 -4px 16px -2px rgba(139, 92, 246, 0.25), inset 0 1px 0 rgba(139, 92, 246, 0.4);
+}
+.hero-card-gold {
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  box-shadow: 0 -4px 16px -2px rgba(245, 158, 11, 0.25), inset 0 1px 0 rgba(245, 158, 11, 0.4);
+}
+.hero-card-pink {
+  border: 1px solid rgba(236, 72, 153, 0.25);
+  box-shadow: 0 -4px 16px -2px rgba(236, 72, 153, 0.25), inset 0 1px 0 rgba(236, 72, 153, 0.4);
+}
+
+/* Custom glowing borders */
+.airbyte-glow-border {
+  border: 1px solid #615EFF;
+  box-shadow: 0 0 16px -2px rgba(97, 94, 255, 0.3);
+}
+
+/* Airbyte Purple Button */
+.airbyte-btn-primary {
+  background: linear-gradient(135deg, #615EFF 0%, #7672FE 100%);
+  color: #FFFFFF;
+  font-weight: 600;
+  border-radius: 8px;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 12px rgba(97, 94, 255, 0.35);
+}
+
+.airbyte-btn-primary:hover {
+  background: linear-gradient(135deg, #716EFE 0%, #8884FE 100%);
+  box-shadow: 0 4px 20px rgba(97, 94, 255, 0.5);
+  transform: translateY(-1px);
+}
+
+.airbyte-btn-secondary {
+  background: rgba(18, 20, 34, 0.8);
+  border: 1px solid #232742;
+  color: #D6DAEC;
+  border-radius: 8px;
+  transition: all 0.2s ease;
+}
+
+.airbyte-btn-secondary:hover {
+  background: rgba(30, 33, 56, 0.9);
+  border-color: #615EFF;
+  color: #FFFFFF;
+}
+
+/* Airbyte Purple Glow Pulse Animation */
+@keyframes airbyte-glow-pulse {
+  0%, 100% {
+    box-shadow: 0 0 12px rgba(97, 94, 255, 0.4), 0 0 25px rgba(97, 94, 255, 0.2), inset 0 0 8px rgba(97, 94, 255, 0.15);
+    border-color: rgba(97, 94, 255, 0.7);
+    opacity: 0.95;
+  }
+  50% {
+    box-shadow: 0 0 28px rgba(97, 94, 255, 0.85), 0 0 55px rgba(118, 114, 254, 0.55), inset 0 0 18px rgba(165, 162, 255, 0.35);
+    border-color: #A5A2FF;
+    opacity: 1;
+  }
+}
+
+.airbyte-pulse-glow {
+  animation: airbyte-glow-pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* Custom Airbyte Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #07080E;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1F233B;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #615EFF;
+}
+
