@@ -1080,6 +1080,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       let toolCalls: string[] = [];
       let lastProviderError: string | null = null;
       let hadProviderError = false;
+      let providerUsageMetadata: any = null;
 
       // Step 1: Execute tool/model logic based on role with Live Gemini Model
       const candidateModels = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.7-flash"];
@@ -1174,6 +1175,9 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
             if (resp?.text && resp.text.trim().length > 0) {
               executionOutput = resp.text;
               modelUsed = m;
+              if (resp.usageMetadata) {
+                providerUsageMetadata = resp.usageMetadata;
+              }
               break;
             }
           } catch (e: any) {
@@ -1231,7 +1235,11 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
         taskId,
         eventType: "PROVIDER_COMPLETED",
         agentId: assignedAgent,
-        payload: { model: modelUsed, outputLength: executionOutput.length }
+        payload: { 
+          model: modelUsed, 
+          outputLength: executionOutput.length,
+          usage: providerUsageMetadata || null 
+        }
       });
 
       const elapsedMs = Date.now() - startTime;
@@ -1282,6 +1290,15 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
       const activityEvents = getTaskActivityEvents(taskId);
       const artifactsList = getTaskArtifacts(taskId);
 
+      // Real execution metrics from provider SDK metadata (or null if unavailable - no random/fabricated numbers)
+      const realTokensConsumed = providerUsageMetadata?.totalTokenCount ?? providerUsageMetadata?.totalTokens ?? null;
+      const executionMetrics = {
+        latencyMs: elapsedMs,
+        tokensConsumed: realTokensConsumed,
+        costEstimate: null,
+        metricsStatus: realTokensConsumed !== null ? "LIVE_PROVIDER_METADATA" : "NOT_AVAILABLE"
+      };
+
       return res.json({
         success: true,
         taskId,
@@ -1307,18 +1324,42 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
         statusHistory,
         activityEvents,
         artifacts: artifactsList,
-        executionMetrics: {
-          latencyMs: elapsedMs,
-          tokensConsumed: Math.floor(Math.random() * 450) + 120,
-          costEstimate: "$0.0004"
-        }
+        executionMetrics
       });
     } catch (err: any) {
       console.error("[Agent Execution Error]:", err);
+
+      const errorMessage = err?.message || String(err) || "Task execution pipeline failure";
+      const errorTaskId = req.body?.taskId;
+
+      // Attempt to persist internal execution failure if taskId exists
+      if (errorTaskId) {
+        try {
+          const { task } = getTaskWithHistory(errorTaskId);
+          // Only update if not already in a terminal failed state
+          if (task && task.status !== "FAILED") {
+            updateTaskStatus(errorTaskId, "FAILED");
+            recordActivityEvent({
+              taskId: errorTaskId,
+              eventType: "EXECUTION_FAILED",
+              agentId: req.body?.assignedAgent || "orchestrator",
+              payload: {
+                error: errorMessage,
+                stage: "INTERNAL_PIPELINE_ERROR"
+              }
+            });
+          }
+        } catch (persistErr: any) {
+          console.error("[Failed to persist execution error state]:", persistErr);
+        }
+      }
+
       return res.status(500).json({
         success: false,
-        status: "BLOCKED",
-        error: err?.message || "Task execution failed"
+        status: "FAILED",
+        reason: "INTERNAL_EXECUTION_FAILURE",
+        error: errorMessage,
+        taskId: errorTaskId
       });
     }
   });
