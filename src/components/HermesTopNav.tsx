@@ -45,7 +45,7 @@ export const HermesTopNav: React.FC<HermesTopNavProps> = ({
   // Primary Visible Tabs
   const primaryTabs: NavItem[] = [
     { id: 'hermes-core', label: 'Overview', icon: LayoutDashboard, color: '#A5A2FF' },
-    { id: 'hermes-chat', label: 'Chat', icon: MessageSquare, color: '#615EFF', badge: 'LIVE', badgeColor: '#00D26A' },
+    { id: 'hermes-chat', label: 'Chat', icon: MessageSquare, color: '#615EFF' },
     { id: 'hermes-terminal', label: 'Terminal', icon: Terminal, color: '#00D26A' },
     { id: 'hermes-apollo', label: 'Apollo Voice', shortLabel: 'Apollo', icon: Radio, color: '#FF5E8E' },
     { id: 'hermes-sessions', label: 'Sessions', icon: Layers, color: '#38BDF8' },

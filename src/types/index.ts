@@ -236,8 +236,8 @@ export interface SynthOSRun {
   stages: RunStage[];
   costTokens: { costUSD: number; promptTokens: number; completionTokens: number };
   artifacts: Array<{ id: string; name: string; type: string; url?: string; content?: string }>;
-  guardianResult: { status: 'PASS' | 'WARN' | 'BLOCK' | 'SIMULATED'; policy: string; checks: string[] };
-  aegisResult: { status: 'PASS' | 'WARN' | 'FAIL' | 'SIMULATED'; hash: string; auditTrace: string };
+  guardianResult: { status: 'PASS' | 'WARN' | 'BLOCK' | 'SIMULATED' | 'NOT_AVAILABLE'; policy: string; checks: string[] };
+  aegisResult: { status: 'PASS' | 'WARN' | 'FAIL' | 'SIMULATED' | 'NOT_AVAILABLE'; hash: string; auditTrace: string };
   receipt: { receiptId: string; signature: string; timestamp: string };
   activityHistory: Array<{ timestamp: string; event: string; actor: string; level: 'info' | 'warn' | 'success' | 'error' }>;
 }

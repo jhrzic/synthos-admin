@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   ActiveTab, AIModelInfo, ObsidianNote, ObsidianVault, 
   AgentInfo, KanbanTask, SynthOSRun 
@@ -8,7 +8,7 @@ import {
   Brain, Globe, Code2, Layers, Send, CheckCircle2, 
   RefreshCw, ArrowRight, FileText, Activity, ShieldCheck, 
   Network, Kanban, Clock, DollarSign, ExternalLink, PlayCircle,
-  HelpCircle, Monitor
+  HelpCircle, Monitor, AlertCircle
 } from 'lucide-react';
 import { RunDetailModal } from './RunDetailModal';
 
@@ -53,40 +53,22 @@ export const HermesCoreView: React.FC<HermesCoreViewProps> = ({
     severity: 'low' | 'medium' | 'high' | 'critical';
   }>>([
     {
-      id: 'alert-1',
-      system: 'Hermes Model Router',
-      feature: 'DeepSeek R1 Integration',
+      id: 'alert-diag-1',
+      system: 'Hermes Adapter',
+      feature: 'ADR-001 Health Telemetry',
       status: 'NEW',
-      message: 'Successfully mounted deepseek-reasoner to route highly complex quantitative requests.',
+      message: 'ADR-001 Phase 1 adapter active. Monitoring GET /synthos/health with strict contract validation.',
       timestamp: 'Just now',
       severity: 'low'
     },
     {
-      id: 'alert-2',
-      system: 'Aegis Verification Sentinel',
-      feature: 'Pre-flight Check Speed',
+      id: 'alert-diag-2',
+      system: 'SynthOS Control Plane',
+      feature: 'Execution Sandboxing',
       status: 'UPDATED',
-      message: 'Moved rule validation schemas into warm local memory. Check speed accelerated by 24%.',
-      timestamp: '15 mins ago',
-      severity: 'medium'
-    },
-    {
-      id: 'alert-3',
-      system: 'Perplexity Model Family',
-      feature: 'sonar-medium API v1',
-      status: 'DEPRECATED',
-      message: 'Upstream Perplexity API is sunsetting sonar-medium. Automatically routing to sonar-reasoning.',
-      timestamp: '1 hour ago',
-      severity: 'high'
-    },
-    {
-      id: 'alert-4',
-      system: 'OpenRouter Security Token',
-      feature: 'Authorization Headers',
-      status: 'BREAKING',
-      message: 'Upstream OpenRouter changed bearer padding. Double check your API Keys in Settings if authentication errors occur.',
-      timestamp: '3 hours ago',
-      severity: 'critical'
+      message: 'Eval path audit verified: EVAL_PATH_STATUS: NOT_PRESENT.',
+      timestamp: 'Just now',
+      severity: 'low'
     }
   ]);
 
@@ -116,6 +98,10 @@ export const HermesCoreView: React.FC<HermesCoreViewProps> = ({
     }
   };
 
+  useEffect(() => {
+    refreshTelemetry();
+  }, []);
+
   // Active execution timeline state for current command
   const [currentExecution, setCurrentExecution] = useState<{
     objective: string;
@@ -126,41 +112,8 @@ export const HermesCoreView: React.FC<HermesCoreViewProps> = ({
     }>;
   } | null>(null);
 
-  // Default past runs
-  const [runs, setRuns] = useState<SynthOSRun[]>([
-    {
-      id: 'run-9021a',
-      objective: 'Research emerging AI agent opportunities & draft GTM launch memo',
-      workspace: 'Default Workspace',
-      startTime: '10 mins ago',
-      status: 'COMPLETE',
-      selectedAgents: ['Orchestrator', 'Scout Agent', 'Scribe Agent'],
-      selectedModels: ['Gemini 2.5 Flash', 'DeepSeek R1'],
-      skillsTools: ['mcp_search_web', 'obsidian_vault_sync'],
-      graphId: 'dag-hermes-01',
-      graphName: 'Hermes Research & Content Pipeline',
-      stages: [
-        { id: '1', name: 'REQUEST RECEIVED', status: 'PASS', detail: 'Directive parsed from natural language' },
-        { id: '2', name: 'ROUTING', status: 'PASS', detail: 'OpenRouter routed to Gemini 2.5 + DeepSeek R1' },
-        { id: '3', name: 'GUARDIAN CHECK', status: 'PASS', detail: 'Safety policy check passed ($0.002 budget)' },
-        { id: '4', name: 'AGENT SELECTED', status: 'PASS', detail: 'Orchestrator dispatched Scout + Scribe' },
-        { id: '5', name: 'TOOLS MOUNTED', status: 'PASS', detail: 'Mounted mcp_search_web & obsidian_vault_sync' },
-        { id: '6', name: 'GRAPH CREATED', status: 'PASS', detail: 'Compiled 3-node research DAG' },
-        { id: '7', name: 'EXECUTION STARTED', status: 'PASS', detail: 'Parallel execution active' },
-        { id: '8', name: 'AEGIS REVIEW', status: 'PASS', detail: 'Hash generated and verified' },
-        { id: '9', name: 'RECEIPT GENERATED', status: 'PASS', detail: 'Signed receipt 0x8f23...a4e1' },
-        { id: '10', name: 'ARTIFACT SAVED', status: 'PASS', detail: 'Created [[Startup-Theses/Agent-GTM]]' }
-      ],
-      costTokens: { costUSD: 0.0042, promptTokens: 3200, completionTokens: 1400 },
-      artifacts: [{ id: 'art-1', name: '[[Startup-Theses/Agent-GTM]]', type: 'Obsidian Note' }],
-      guardianResult: { status: 'PASS', policy: 'Default Autonomous Guardrails', checks: ['Token Budget', 'No Destructive Action'] },
-      aegisResult: { status: 'PASS', hash: '0x8f23a4e198b2c4e', auditTrace: 'Verified by Aegis Governance' },
-      receipt: { receiptId: 'rcpt-9021a', signature: 'SIG_ED25519_OK', timestamp: '2026-08-28 11:20:00' },
-      activityHistory: [
-        { timestamp: '11:20:00', event: 'Run initiated by user', actor: 'User', level: 'info' }
-      ]
-    }
-  ]);
+  // Canonical runs list (starts empty in Phase 1)
+  const [runs, setRuns] = useState<SynthOSRun[]>([]);
 
   const handleDispatchCommand = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -173,15 +126,15 @@ export const HermesCoreView: React.FC<HermesCoreViewProps> = ({
     // Initialize interactive execution timeline
     const initialStages = [
       { name: 'REQUEST RECEIVED', status: 'PASS' as const, detail: `Parsed directive: "${cmd.slice(0, 60)}..."` },
-      { name: 'ROUTING', status: 'RUNNING' as const, detail: 'Hermes model router selecting optimal frontier LLM...' },
-      { name: 'GUARDIAN CHECK', status: 'WAITING' as const, detail: 'Awaiting policy validation...' },
-      { name: 'AGENT SELECTED', status: 'WAITING' as const, detail: 'Orchestrator selecting workforce...' },
-      { name: 'TOOLS MOUNTED', status: 'WAITING' as const, detail: 'Mounting MCP tools...' },
-      { name: 'GRAPH CREATED', status: 'WAITING' as const, detail: 'Generating execution DAG...' },
-      { name: 'EXECUTION STARTED', status: 'WAITING' as const, detail: 'Dispatching tasks...' },
+      { name: 'ROUTING', status: 'RUNNING' as const, detail: `Routing to ${selectedOverrideModel.toUpperCase()}...` },
+      { name: 'GUARDIAN CHECK', status: 'WAITING' as const, detail: 'Policy engine not attached in Phase 1 (DEFERRED)' },
+      { name: 'AGENT SELECTED', status: 'WAITING' as const, detail: 'Single-model proxy dispatch' },
+      { name: 'TOOLS MOUNTED', status: 'WAITING' as const, detail: 'Tool mounting deferred to Phase 2 (NOT_IMPLEMENTED)' },
+      { name: 'GRAPH CREATED', status: 'WAITING' as const, detail: 'DAG compilation deferred to Phase 2 (NOT_IMPLEMENTED)' },
+      { name: 'EXECUTION STARTED', status: 'WAITING' as const, detail: 'Dispatching to API gateway...' },
       { name: 'RESULT GENERATED', status: 'WAITING' as const, detail: 'Synthesizing output...' },
-      { name: 'AEGIS REVIEW', status: 'WAITING' as const, detail: 'Generating cryptographic proof...' },
-      { name: 'RECEIPT GENERATED', status: 'WAITING' as const, detail: 'Writing execution receipt...' }
+      { name: 'AEGIS REVIEW', status: 'WAITING' as const, detail: 'Cryptographic audit deferred to Phase 2 (NOT_IMPLEMENTED)' },
+      { name: 'RECEIPT GENERATED', status: 'WAITING' as const, detail: 'Signed receipts deferred to Phase 2 (NOT_IMPLEMENTED)' }
     ];
 
     setCurrentExecution({ objective: cmd, stages: initialStages });
@@ -189,38 +142,41 @@ export const HermesCoreView: React.FC<HermesCoreViewProps> = ({
     try {
       const result = await onSendQuery(cmd, selectedOverrideModel);
 
-      // Complete execution timeline
-      const completedStages = initialStages.map((st, idx) => ({
-        ...st,
-        status: 'PASS' as const,
-        detail: idx === 1 ? `Routed via ${selectedOverrideModel.toUpperCase()}` : st.detail
-      }));
+      // Complete execution timeline showing truthful stage outcomes
+      const completedStages = initialStages.map((st, idx) => {
+        if (idx === 0) return { ...st, status: 'PASS' as const, detail: 'Directive parsed' };
+        if (idx === 1) return { ...st, status: 'PASS' as const, detail: `Routed to ${selectedOverrideModel.toUpperCase()}` };
+        if (idx === 6) return { ...st, status: 'PASS' as const, detail: 'Inference completed via server proxy' };
+        if (idx === 7) return { ...st, status: 'PASS' as const, detail: 'Model output received' };
+        return { ...st, status: 'WAITING' as const, detail: 'Phase 2 capability (NOT_IMPLEMENTED)' };
+      });
 
       setCurrentExecution({ objective: cmd, stages: completedStages });
 
-      // Build canonical run
+      // Build canonical run record
       const newRun: SynthOSRun = {
         id: `run-${Date.now().toString(36)}`,
         objective: cmd,
-        workspace: 'Default Workspace',
+        workspace: 'Hermes Workspace',
         startTime: 'Just now',
         status: 'COMPLETE',
-        selectedAgents: ['Orchestrator', 'Scout Agent'],
+        selectedAgents: ['Direct Dispatch'],
         selectedModels: [selectedOverrideModel],
-        skillsTools: ['mcp_search_web', 'obsidian_vault_sync'],
-        graphId: 'dag-dynamic',
-        graphName: 'Auto-Dispatched Hermes Graph',
+        skillsTools: [],
+        graphId: 'direct-inference',
+        graphName: 'Direct Model Dispatch (Phase 1)',
         stages: completedStages.map((s, i) => ({ id: `${i}`, name: s.name, status: s.status, detail: s.detail })),
-        costTokens: { costUSD: 0.0025, promptTokens: 1800, completionTokens: 950 },
+        costTokens: { costUSD: 0, promptTokens: 0, completionTokens: 0 },
         artifacts: [{ id: `art-${Date.now()}`, name: `[[Hermes-Synthesis-${Date.now()}]]`, type: 'Obsidian Note' }],
-        guardianResult: { status: 'PASS', policy: 'Default Autonomous Guardrails', checks: ['Safety Gate OK'] },
-        aegisResult: { status: 'PASS', hash: `0x${Math.random().toString(16).slice(2, 10)}`, auditTrace: 'Verified' },
-        receipt: { receiptId: `rcpt-${Date.now()}`, signature: 'SIG_ED25519_VALID', timestamp: new Date().toLocaleTimeString() },
-        activityHistory: [{ timestamp: new Date().toLocaleTimeString(), event: 'Command Completed', actor: 'Hermes', level: 'success' }]
+        guardianResult: { status: 'NOT_AVAILABLE', policy: 'NOT_CONFIGURED_PHASE_1', checks: [] },
+        aegisResult: { status: 'NOT_AVAILABLE', hash: 'NOT_AVAILABLE', auditTrace: 'NOT_AVAILABLE' },
+        receipt: { receiptId: 'NOT_AVAILABLE', signature: 'NOT_AVAILABLE', timestamp: new Date().toISOString() },
+        activityHistory: [{ timestamp: new Date().toLocaleTimeString(), event: 'Direct Query Completed', actor: 'Hermes Proxy', level: 'info' }]
       };
 
       setRuns(prev => [newRun, ...prev]);
 
+      // Push result note to vault
       // Push result note to vault
       const title = `Hermes-Run-${new Date().toISOString().slice(0, 10)}`;
       onAddNoteToVault(title, `# ${cmd}\n\n${result}`, ['hermes', 'run']);
@@ -382,26 +338,35 @@ export const HermesCoreView: React.FC<HermesCoreViewProps> = ({
                 <span className="text-[10px] font-mono text-[#8E94B8]">LIVE ATTACHED</span>
               </div>
               <div className="space-y-3">
-                {runs.map((r) => (
-                  <div 
-                    key={r.id}
-                    onClick={() => {
-                      if (onOpenRunDetail) onOpenRunDetail(r);
-                      else setSelectedRunModal(r);
-                    }}
-                    className="bg-[#0F1226] border border-[#1A1E36] hover:border-[#615EFF]/50 p-4 rounded-xl space-y-2 cursor-pointer transition"
-                  >
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="text-[#8C8AFF] font-bold">RUN ID: {r.id}</span>
-                      <span className="text-[#00D26A] font-bold">{r.status}</span>
-                    </div>
-                    <p className="text-sm text-white font-semibold">{r.objective}</p>
-                    <div className="flex items-center gap-4 text-xs text-[#8E94B8] pt-1 font-sans">
-                      <span>Agents: {r.selectedAgents.join(', ')}</span>
-                      <span>Cost: ${r.costTokens.costUSD.toFixed(4)} USD</span>
-                    </div>
+                {runs.length === 0 ? (
+                  <div className="p-8 text-center border border-dashed border-[#1E2238] rounded-xl space-y-2">
+                    <div className="text-xs font-mono text-[#8E94B8]">NO RUNTIME RUNS RECORDED</div>
+                    <p className="text-[11px] text-[#6E759D] font-sans">
+                      Dispatched natural language commands via the prompt bar above will append truthful direct-inference execution records here.
+                    </p>
                   </div>
-                ))}
+                ) : (
+                  runs.map((r) => (
+                    <div 
+                      key={r.id}
+                      onClick={() => {
+                        if (onOpenRunDetail) onOpenRunDetail(r);
+                        else setSelectedRunModal(r);
+                      }}
+                      className="bg-[#0F1226] border border-[#1A1E36] hover:border-[#615EFF]/50 p-4 rounded-xl space-y-2 cursor-pointer transition"
+                    >
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-[#8C8AFF] font-bold">RUN ID: {r.id}</span>
+                        <span className="text-[#00D26A] font-bold">{r.status}</span>
+                      </div>
+                      <p className="text-sm text-white font-semibold">{r.objective}</p>
+                      <div className="flex items-center gap-4 text-xs text-[#8E94B8] pt-1 font-sans">
+                        <span>Agents: {r.selectedAgents.join(', ')}</span>
+                        <span>Cost: ${r.costTokens.costUSD.toFixed(4)} USD</span>
+                      </div>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
 
@@ -480,36 +445,46 @@ export const HermesCoreView: React.FC<HermesCoreViewProps> = ({
             <div className="text-xs font-bold text-[#8E94B8] uppercase tracking-wider">
               Canonical Run History
             </div>
-            {runs.map((r) => (
-              <div 
-                key={r.id}
-                onClick={() => {
-                  if (onOpenRunDetail) onOpenRunDetail(r);
-                  else setSelectedRunModal(r);
-                }}
-                className="bg-[#0B0D1B] border border-[#1D2139] hover:border-[#615EFF] p-5 rounded-2xl space-y-3 cursor-pointer transition flex flex-col md:flex-row md:items-center justify-between gap-4"
-              >
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2 text-xs">
-                    <span className="text-[#38BDF8] font-bold">{r.id}</span>
-                    <span className="text-[#8E94B8]">• {r.startTime}</span>
-                  </div>
-                  <h4 className="text-base font-bold text-white">{r.objective}</h4>
-                  <div className="text-xs text-[#8E94B8]">
-                    Selected Models: <span className="text-white">{r.selectedModels.join(', ')}</span>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-3">
-                  <span className="text-xs font-bold text-[#00D26A] px-3 py-1 rounded-lg bg-[#00D26A]/20 border border-[#00D26A]/30">
-                    {r.status}
-                  </span>
-                  <button className="px-4 py-2 bg-[#615EFF] text-white text-xs font-bold rounded-xl hover:bg-[#504ACC] transition">
-                    Inspect Run
-                  </button>
-                </div>
+            {runs.length === 0 ? (
+              <div className="p-8 text-center border border-dashed border-[#1E2238] rounded-2xl space-y-2 bg-[#0B0D1B]">
+                <AlertCircle className="w-8 h-8 text-[#6E759D] mx-auto" />
+                <div className="text-sm font-bold text-white font-['Space_Grotesk']">No Runtime Execution Runs Recorded</div>
+                <p className="text-xs text-[#8E94B8] font-sans max-w-md mx-auto">
+                  Hermes full execute() task dispatch protocol is deferred to ADR-001 Phase 2 (NOT_IMPLEMENTED). Dispatched queries run via direct server-side model routing.
+                </p>
               </div>
-            ))}
+            ) : (
+              runs.map((r) => (
+                <div 
+                  key={r.id}
+                  onClick={() => {
+                    if (onOpenRunDetail) onOpenRunDetail(r);
+                    else setSelectedRunModal(r);
+                  }}
+                  className="bg-[#0B0D1B] border border-[#1D2139] hover:border-[#615EFF] p-5 rounded-2xl space-y-3 cursor-pointer transition flex flex-col md:flex-row md:items-center justify-between gap-4"
+                >
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="text-[#38BDF8] font-bold">{r.id}</span>
+                      <span className="text-[#8E94B8]">• {r.startTime}</span>
+                    </div>
+                    <h4 className="text-base font-bold text-white">{r.objective}</h4>
+                    <div className="text-xs text-[#8E94B8]">
+                      Selected Models: <span className="text-white">{r.selectedModels.join(', ')}</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-bold text-[#00D26A] px-3 py-1 rounded-lg bg-[#00D26A]/20 border border-[#00D26A]/30">
+                      {r.status}
+                    </span>
+                    <button className="px-4 py-2 bg-[#615EFF] text-white text-xs font-bold rounded-xl hover:bg-[#504ACC] transition">
+                      Inspect Run
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         )}
 

@@ -37,9 +37,7 @@ export const BotModeView: React.FC<BotModeViewProps> = ({
   const handleExecuteSingle = (id: string) => {
     setRunningTaskId(id);
     onRunTaskNow(id);
-    setTimeout(() => {
-      setRunningTaskId(null);
-    }, 1500);
+    setRunningTaskId(null);
   };
 
   const handleFormSubmit = (e: React.FormEvent) => {
@@ -52,8 +50,8 @@ export const BotModeView: React.FC<BotModeViewProps> = ({
       model: taskModel,
       targetVaultNote: taskTarget,
       status: 'running',
-      nextRun: 'in 15 mins',
-      description: taskDesc || 'Automated swarm daemon running via Hermes OS.'
+      nextRun: 'NOT_AVAILABLE',
+      description: taskDesc || 'Bot task template configured for Hermes OS.'
     });
 
     setIsModalOpen(false);
@@ -68,7 +66,7 @@ export const BotModeView: React.FC<BotModeViewProps> = ({
         <div>
           <div className="inline-flex items-center gap-2 mb-2">
             <span className="airbyte-badge">
-              AUTONOMOUS BOT SWARM ENGINE
+              AUTONOMOUS BOT SWARM ENGINE (TEMPLATES)
             </span>
           </div>
           <h1 className="text-2xl sm:text-4xl font-extrabold text-white tracking-tight font-['Space_Grotesk']">
@@ -80,21 +78,14 @@ export const BotModeView: React.FC<BotModeViewProps> = ({
         </div>
 
         <div className="flex items-center gap-3">
-          <button
-            onClick={() => setIsArmingAll(!isArmingAll)}
-            className={`px-4 py-2.5 rounded-lg text-xs font-bold font-mono uppercase tracking-wider flex items-center gap-2 transition ${
-              isArmingAll
-                ? 'bg-[#00D26A]/20 border border-[#00D26A] text-[#00D26A] shadow-lg shadow-[#00D26A]/20'
-                : 'bg-[#181B2E] border border-[#2B304E] text-[#8E94B8]'
-            }`}
-          >
-            <span className={`w-2 h-2 rounded-full ${isArmingAll ? 'bg-[#00D26A] animate-ping' : 'bg-[#555A7B]'}`}></span>
-            <span>{isArmingAll ? 'SWARM ARMED & ACTIVE' : 'SWARM PAUSED'}</span>
-          </button>
+          <div className="px-4 py-2.5 rounded-lg text-xs font-bold font-mono uppercase tracking-wider flex items-center gap-2 bg-[#181B2E] border border-[#2B304E] text-[#8E94B8]">
+            <span className="w-2 h-2 rounded-full bg-[#555A7B]"></span>
+            <span>SWARM RUNTIME: NOT_CONNECTED</span>
+          </div>
 
           <button
             onClick={() => setIsModalOpen(true)}
-            className="airbyte-btn-primary px-4 py-2.5 text-xs font-bold flex items-center gap-2"
+            className="airbyte-btn-primary px-4 py-2.5 text-xs font-bold flex items-center gap-2 cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>DEPLOY NEW BOT</span>
@@ -105,46 +96,46 @@ export const BotModeView: React.FC<BotModeViewProps> = ({
       {/* Swarm Metrics matching Airbyte Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="airbyte-card p-5 space-y-2">
-          <div className="text-[10px] font-mono text-[#6E759D] uppercase">Active Bots</div>
+          <div className="text-[10px] font-mono text-[#6E759D] uppercase">Configured Templates</div>
           <div className="text-2xl font-extrabold text-white font-['Space_Grotesk']">
-            {tasks.filter(t => t.status === 'running').length} / {tasks.length}
+            {tasks.length}
           </div>
-          <div className="text-xs text-[#00D26A] font-mono flex items-center gap-1">
-            <CheckCircle2 className="w-3 h-3" />
-            <span>All daemons operational</span>
+          <div className="text-xs text-[#8E94B8] font-mono flex items-center gap-1">
+            <AlertCircle className="w-3 h-3 text-[#555A7B]" />
+            <span>NOT_CONNECTED (No runtime daemon)</span>
           </div>
         </div>
 
         <div className="airbyte-card p-5 space-y-2">
           <div className="text-[10px] font-mono text-[#6E759D] uppercase">Vault Actions (24h)</div>
           <div className="text-2xl font-extrabold text-white font-['Space_Grotesk']">
-            {tasks.reduce((a, b) => a + b.actionsCount, 0).toLocaleString()}
+            NOT_AVAILABLE
           </div>
-          <div className="text-xs text-[#8C8AFF] font-mono flex items-center gap-1">
-            <Activity className="w-3 h-3" />
-            <span>+18.4% sync velocity</span>
+          <div className="text-xs text-[#8E94B8] font-mono flex items-center gap-1">
+            <Activity className="w-3 h-3 text-[#555A7B]" />
+            <span>NOT_AVAILABLE</span>
           </div>
         </div>
 
         <div className="airbyte-card p-5 space-y-2">
           <div className="text-[10px] font-mono text-[#6E759D] uppercase">Context Efficiency</div>
           <div className="text-2xl font-extrabold text-white font-['Space_Grotesk']">
-            99.2%
+            NOT_AVAILABLE
           </div>
-          <div className="text-xs text-[#00D26A] font-mono flex items-center gap-1">
-            <Zap className="w-3 h-3" />
-            <span>Zero context overflow</span>
+          <div className="text-xs text-[#8E94B8] font-mono flex items-center gap-1">
+            <Zap className="w-3 h-3 text-[#555A7B]" />
+            <span>NOT_AVAILABLE</span>
           </div>
         </div>
 
         <div className="airbyte-card p-5 space-y-2">
           <div className="text-[10px] font-mono text-[#6E759D] uppercase">Vault Replication</div>
           <div className="text-2xl font-extrabold text-white font-['Space_Grotesk']">
-            Realtime
+            NOT_CONNECTED
           </div>
-          <div className="text-xs text-[#615EFF] font-mono flex items-center gap-1">
-            <Radio className="w-3 h-3" />
-            <span>Streaming to markdown</span>
+          <div className="text-xs text-[#8E94B8] font-mono flex items-center gap-1">
+            <Radio className="w-3 h-3 text-[#555A7B]" />
+            <span>NOT_CONNECTED</span>
           </div>
         </div>
       </div>
@@ -153,10 +144,10 @@ export const BotModeView: React.FC<BotModeViewProps> = ({
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-lg font-bold text-white font-['Space_Grotesk']">
-            Active Bot Daemons
+            Configured Bot Templates
           </h3>
-          <span className="airbyte-badge-subtle font-mono text-xs">
-            CRON DISPATCHER ONLINE
+          <span className="airbyte-badge-subtle font-mono text-xs text-[#8E94B8]">
+            CRON DISPATCHER: NOT_CONNECTED (Phase 1)
           </span>
         </div>
 
@@ -170,15 +161,14 @@ export const BotModeView: React.FC<BotModeViewProps> = ({
               >
                 <div className="space-y-2 max-w-2xl">
                   <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#1A1D33] text-[#A5A2FF] border border-[#2B304E] font-bold">
+                      SAMPLE TEMPLATE
+                    </span>
                     <span className="text-sm font-bold text-white font-['Space_Grotesk']">
                       {task.name}
                     </span>
-                    <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
-                      task.status === 'running' 
-                        ? 'bg-[#00D26A]/10 text-[#00D26A] border-[#00D26A]/30' 
-                        : 'bg-[#181B2E] text-[#8E94B8] border-[#2B304E]'
-                    }`}>
-                      {task.status.toUpperCase()}
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded border bg-[#181B2E] text-[#8E94B8] border-[#2B304E]">
+                      {task.status === 'running' ? 'STANDBY (TEMPLATE)' : 'PAUSED'}
                     </span>
                     <span className="text-[10px] font-mono bg-[#615EFF]/10 text-[#A5A2FF] border border-[#615EFF]/30 px-2 py-0.5 rounded">
                       {task.model}
@@ -192,7 +182,7 @@ export const BotModeView: React.FC<BotModeViewProps> = ({
                   <div className="flex flex-wrap items-center gap-4 text-[11px] font-mono text-[#6A7097]">
                     <span>Schedule: <strong className="text-[#C0C5DE]">{task.cron}</strong></span>
                     <span>Target Vault Note: <strong className="text-[#A5A2FF]">[[{task.targetVaultNote}]]</strong></span>
-                    <span>Last run: <strong className="text-[#C0C5DE]">{task.lastRun}</strong></span>
+                    <span>Last run: <strong className="text-[#8E94B8]">NOT_AVAILABLE</strong></span>
                   </div>
                 </div>
 
@@ -200,24 +190,24 @@ export const BotModeView: React.FC<BotModeViewProps> = ({
                   <button
                     onClick={() => handleExecuteSingle(task.id)}
                     disabled={isExecuting}
-                    className="px-3 py-1.5 rounded bg-[#131626] hover:bg-[#615EFF] border border-[#232844] text-xs font-mono text-[#C0C5DE] hover:text-white transition flex items-center gap-1.5"
+                    className="px-3 py-1.5 rounded bg-[#131626] hover:bg-[#1C2036] border border-[#232844] text-xs font-mono text-[#8E94B8] hover:text-white transition flex items-center gap-1.5 cursor-pointer"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${isExecuting ? 'animate-spin' : ''}`} />
-                    <span>{isExecuting ? 'RUNNING...' : 'TRIGGER NOW'}</span>
+                    <span>{isExecuting ? 'DISPATCHING...' : 'TRIGGER TEMPLATE'}</span>
                   </button>
 
                   <button
                     onClick={() => onToggleTaskStatus(task.id)}
-                    className="p-2 rounded bg-[#131626] hover:bg-[#1C2036] border border-[#232844] text-[#8E94B8] hover:text-white transition"
-                    title={task.status === 'running' ? 'Pause Bot' : 'Start Bot'}
+                    className="p-2 rounded bg-[#131626] hover:bg-[#1C2036] border border-[#232844] text-[#8E94B8] hover:text-white transition cursor-pointer"
+                    title={task.status === 'running' ? 'Pause Template' : 'Enable Template'}
                   >
                     {task.status === 'running' ? <Pause className="w-3.5 h-3.5 text-amber-400" /> : <Play className="w-3.5 h-3.5 text-[#00D26A]" />}
                   </button>
 
                   <button
                     onClick={() => onDeleteTask(task.id)}
-                    className="p-2 rounded bg-[#131626] hover:bg-[#1C2036] border border-[#232844] text-[#8E94B8] hover:text-rose-400 transition"
-                    title="Remove Bot"
+                    className="p-2 rounded bg-[#131626] hover:bg-[#1C2036] border border-[#232844] text-[#8E94B8] hover:text-rose-400 transition cursor-pointer"
+                    title="Remove Template"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>

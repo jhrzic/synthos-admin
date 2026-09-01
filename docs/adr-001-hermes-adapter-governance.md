@@ -1,21 +1,33 @@
 # ADR-001: Hermes Adapter Governance & Unified Control Plane Architecture
 
 ## Status
-- **Phase 1**: IMPLEMENTED (Health, Capabilities, Strict Contract Mapping, Interface Definitions)
-- **Phase 2**: DEFERRED (Execute, Event Streaming, Task State Transitions)
+**ACCEPTED**
+
+## Canonical Repositories
+- **GitHub**: `jhrzic/synthos-admin`
+- **Local**: `~/synthos/synthos-admin`
+- **Legacy/Reference**: `mission-control` (Reference only; strictly non-canonical)
 
 ---
 
-## Context & Objectives
-Hermes is an independent agent and runtime workspace governed by the SynthOS administrative control plane. 
+## 1. Context & Objectives
+SynthOS Admin (`synthos-admin`) is the canonical administrative control plane for the SynthOS multi-agent operating system. It governs multiple independent agent and runtime workspaces, including Nous Hermes, Claude Code, Gemini, OpenAI Codex, Cursor, and custom swarm engines.
 
-To eliminate fragmented sub-apps, simulated mocks, fake runtime metrics, and un-sandboxed execution paths, ADR-001 establishes a formal adapter interface and contract for Hermes integration.
+Prior to ADR-001, legacy prototypes introduced fragmented sub-apps, unverified mock metrics, and un-sandboxed execution assumptions. This Architecture Decision Record (ADR) defines the formal adapter governance protocol, architectural boundaries, strict health contracts, and phased integration requirements for the Hermes runtime workspace within SynthOS Admin.
 
 ---
 
-## Adapter Interface Contract (Phase 1)
+## 2. Architectural Decision & Host Topology
+1. **Host Control Plane**: `synthos-admin` serves as the authoritative administrative control layer.
+2. **Independent Workspace**: Hermes operates as an independent runtime workspace governed within the unified single-pane shell.
+3. **Global Services Isolation**: Global systems such as Jarvis HUD, Guardian Sentinel, and Aegis Governance remain global system-level services and are not siloed into or owned by any individual workspace.
+4. **No Legacy Product Silos**: The legacy Mission Control product silo is deprecated and maintained for reference only.
 
-The Hermes adapter implements the following mandatory primitives:
+---
+
+## 3. Mandatory Adapter Interface Contract (`IHermesAdapter`)
+
+All interactions with the Hermes runtime are mediated by the `IHermesAdapter` interface:
 
 ```typescript
 export interface IHermesAdapter {
@@ -28,14 +40,16 @@ export interface IHermesAdapter {
 
 ---
 
-## Health Endpoint Contract
+## 4. Health Contract & Validation Protocol
 
-`health()` consumes `GET /synthos/health` from the upstream runtime:
+The adapter communicates with the Hermes runtime via `GET /synthos/health`.
 
-- **Method**: `GET ${HERMES_ADAPTER_BASE_URL}/synthos/health`
-- **Header**: `Authorization: Bearer <HERMES_ADAPTER_TOKEN>`
-- **Timeout**: Strict 5000ms (5s) AbortSignal timeout
-- **Poll Interval**: ≤ 15s (recommended 15s)
+### Contract Specification
+- **Endpoint**: `GET ${HERMES_ADAPTER_BASE_URL}/synthos/health`
+- **Authorization**: `Authorization: Bearer ${HERMES_ADAPTER_TOKEN}`
+- **Timeout**: Strict 5000ms (5s) `AbortSignal` timeout
+- **Polling Interval**: ≤ 15 seconds
+- **Content-Type**: `application/json`
 
 ### Upstream 200 JSON Response Schema:
 ```json
@@ -43,37 +57,48 @@ export interface IHermesAdapter {
   "status": "UP" | "DEGRADED" | "DOWN",
   "runtime_type": "hermes",
   "runtime_version": "<string>",
-  "runtime_instance_id": "<stable_id>",
+  "runtime_instance_id": "<stable_instance_id>",
   "adapter_schema_version": "1",
   "process_alive": true | false,
   "gateway_alive": true | false | null,
-  "timestamp": "<ISO 8601>"
+  "timestamp": "<ISO 8601 string>"
 }
 ```
 
-### Exact State Mapping Rules:
-| Upstream Condition | Adapter State | Auth State | Version / Instance |
-|---|---|---|---|
-| HTTP 200 + valid JSON status `UP` | `UP` | `AUTHENTICATED` | Extracted from payload |
-| HTTP 200 + valid JSON status `DEGRADED` | `DEGRADED` | `AUTHENTICATED` | Extracted from payload |
-| HTTP 200 + valid JSON status `DOWN` | `DOWN` | `AUTHENTICATED` | Extracted from payload |
-| HTTP 401 / 403 (Invalid/Missing token) | `AUTH_ERROR` | `AUTH_ERROR` | `NOT_AVAILABLE` |
-| Timeout (>5s) or Network connection failure | `NOT_CONNECTED` | As configured | `NOT_AVAILABLE` |
-| Malformed / Non-JSON response | `UNKNOWN` | `UNKNOWN` | `NOT_AVAILABLE` |
+### Strict Health State Mapping Matrix:
+| HTTP Status | Body Condition | Resulting Status | Auth Status | Runtime Fields |
+|---|---|---|---|---|
+| **200 OK** | Valid JSON, valid contract schema with `status: "UP"` | `UP` | `AUTHENTICATED` | Extracted from payload |
+| **200 OK** | Valid JSON, valid contract schema with `status: "DEGRADED"` | `DEGRADED` | `AUTHENTICATED` | Extracted from payload |
+| **200 OK** | Valid JSON, valid contract schema with `status: "DOWN"` | `DOWN` | `AUTHENTICATED` | Extracted from payload |
+| **200 OK** | Malformed JSON or incomplete/missing contract fields | `UNKNOWN` | `AUTHENTICATED` | `NOT_AVAILABLE` |
+| **401 / 403** | Unauthorized or Forbidden | `AUTH_ERROR` | `AUTH_ERROR` | `NOT_AVAILABLE` |
+| **500 / Non-200** | Any status other than 200, 401, 403 (even if body has `"status": "UP"`) | `UNKNOWN` | `UNKNOWN` | `NOT_AVAILABLE` |
+| **Timeout / Error** | Request aborted after 5s or network failure | `NOT_CONNECTED` | As configured | `NOT_AVAILABLE` |
+
+*Rule: An HTTP status other than 200 MUST NEVER produce `UP`, `DEGRADED`, or `DOWN`. Contract fields (including `process_alive`) must never be inferred or faked.*
 
 ---
 
-## Capabilities Introspection
+## 5. Phased Execution Roadmap
 
-`capabilities()` exposes only verified capabilities confirmed by adapter wiring and authoritative runtime data:
-- `health_check`: `CONFIRMED`
-- `capabilities_discovery`: `CONFIRMED`
-- `execute`: `NOT_IMPLEMENTED_PHASE_1`
-- `events`: `NOT_IMPLEMENTED_PHASE_1`
+### Phase 1: Governance, Telemetry, and Contract Enforcement
+- Implement `IHermesAdapter` in `src/services/hermesAdapter.ts`.
+- Implement `health()` with strict HTTP 200 schema validation, 5s timeout, and state mapping.
+- Implement `capabilities()` exposing confirmed introspection schema v1.
+- Provide Phase 1 stubs for `execute()` and `events()`.
+- Eliminate all synthetic mocks, randomized telemetry, fake cryptographic hashes, and simulated execution indicators.
+- Audit codebase for un-sandboxed code execution: `EVAL_PATH_STATUS: NOT_PRESENT`.
+
+### Phase 2: Execution Protocol & Streaming Event Hooks
+- Implement full `execute()` payload dispatch with task state transitions.
+- Implement `events()` Server-Sent Events (SSE) / WebSocket multiplexing.
+- Connect bidirectional Obsidian vault syncing and multi-agent DAG task dispatch.
 
 ---
 
-## Security Governance & Eval Audit
-
-- **Un-sandboxed eval() paths**: `EVAL_PATH_STATUS: NOT_PRESENT` in `synthos-admin`.
-- **Environment Isolation**: Configured via `HERMES_ADAPTER_BASE_URL` and `HERMES_ADAPTER_TOKEN`.
+## 6. Security Governance & Audit Verification
+- **Eval Path Audit**: `EVAL_PATH_STATUS: NOT_PRESENT`.
+- **Environment Variable Declarations**:
+  - `HERMES_ADAPTER_BASE_URL`: Base HTTP URL for the upstream Hermes adapter service.
+  - `HERMES_ADAPTER_TOKEN`: Bearer token for authenticating control plane health and management requests.

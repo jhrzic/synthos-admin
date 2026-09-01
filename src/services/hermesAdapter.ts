@@ -124,8 +124,25 @@ export class HermesAdapter implements IHermesAdapter {
         };
       }
 
-      // Check content-type before parsing
-      const contentType = response.headers.get('content-type') || '';
+      // Any HTTP status other than 200 (e.g. 500, 502, 404) MUST NOT produce UP, DEGRADED, or DOWN
+      if (response.status !== 200) {
+        return {
+          status: 'UNKNOWN',
+          connectivity_status: 'UNKNOWN',
+          auth_status: 'UNKNOWN',
+          runtime_type: 'hermes',
+          runtime_version: 'NOT_AVAILABLE',
+          adapter_version: '1',
+          runtime_instance_id: 'NOT_AVAILABLE',
+          capabilities_schema_version: '1',
+          process_alive: false,
+          gateway_alive: null,
+          timestamp: new Date().toISOString(),
+          responseTimeMs,
+          error: `HTTP ${response.status} ${response.statusText || 'Error'} from upstream health endpoint`,
+        };
+      }
+
       let rawText = '';
       try {
         rawText = await response.text();
@@ -147,7 +164,7 @@ export class HermesAdapter implements IHermesAdapter {
         };
       }
 
-      let parsed: HermesRemoteHealthResponse;
+      let parsed: any;
       try {
         parsed = JSON.parse(rawText);
       } catch (jsonErr: any) {
@@ -169,32 +186,61 @@ export class HermesAdapter implements IHermesAdapter {
         };
       }
 
-      // Exact status mapping from 200 JSON payload
-      let finalStatus: HermesConnectivityStatus = 'UNKNOWN';
-      if (parsed.status === 'UP') {
-        finalStatus = 'UP';
-      } else if (parsed.status === 'DEGRADED') {
-        finalStatus = 'DEGRADED';
-      } else if (parsed.status === 'DOWN') {
-        finalStatus = 'DOWN';
-      } else {
-        finalStatus = 'UNKNOWN';
+      // Strict validation of all mandatory health contract fields
+      const isStatusValid = parsed?.status === 'UP' || parsed?.status === 'DEGRADED' || parsed?.status === 'DOWN';
+      const isRuntimeTypeValid = parsed?.runtime_type === 'hermes';
+      const isRuntimeVersionValid = typeof parsed?.runtime_version === 'string' && parsed.runtime_version.trim().length > 0;
+      const isRuntimeInstanceIdValid = typeof parsed?.runtime_instance_id === 'string' && parsed.runtime_instance_id.trim().length > 0;
+      const isAdapterSchemaValid = parsed?.adapter_schema_version === '1';
+      const isProcessAliveValid = typeof parsed?.process_alive === 'boolean';
+      const isGatewayAliveValid = typeof parsed?.gateway_alive === 'boolean' || parsed?.gateway_alive === null;
+      const isTimestampValid = typeof parsed?.timestamp === 'string' && !isNaN(Date.parse(parsed.timestamp));
+
+      const isContractValid =
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        isStatusValid &&
+        isRuntimeTypeValid &&
+        isRuntimeVersionValid &&
+        isRuntimeInstanceIdValid &&
+        isAdapterSchemaValid &&
+        isProcessAliveValid &&
+        isGatewayAliveValid &&
+        isTimestampValid;
+
+      if (!isContractValid) {
+        return {
+          status: 'UNKNOWN',
+          connectivity_status: 'UNKNOWN',
+          auth_status: 'AUTHENTICATED',
+          runtime_type: 'hermes',
+          runtime_version: 'NOT_AVAILABLE',
+          adapter_version: '1',
+          runtime_instance_id: 'NOT_AVAILABLE',
+          capabilities_schema_version: '1',
+          process_alive: false,
+          gateway_alive: null,
+          timestamp: new Date().toISOString(),
+          responseTimeMs,
+          error: 'Malformed or incomplete health contract schema from upstream runtime (missing/invalid required fields)',
+        };
       }
 
+      // Authoritative valid contract response: use supplied process_alive directly (never infer)
       return {
-        status: finalStatus,
-        connectivity_status: finalStatus,
+        status: parsed.status,
+        connectivity_status: parsed.status,
         auth_status: 'AUTHENTICATED',
-        runtime_type: parsed.runtime_type || 'hermes',
-        runtime_version: parsed.runtime_version || 'UNKNOWN',
-        adapter_version: parsed.adapter_schema_version || '1',
-        runtime_instance_id: parsed.runtime_instance_id || 'UNKNOWN',
-        capabilities_schema_version: parsed.adapter_schema_version || '1',
-        process_alive: parsed.process_alive ?? (finalStatus === 'UP'),
-        gateway_alive: parsed.gateway_alive ?? null,
-        timestamp: parsed.timestamp || new Date().toISOString(),
+        runtime_type: 'hermes',
+        runtime_version: parsed.runtime_version,
+        adapter_version: parsed.adapter_schema_version,
+        runtime_instance_id: parsed.runtime_instance_id,
+        capabilities_schema_version: parsed.adapter_schema_version,
+        process_alive: parsed.process_alive,
+        gateway_alive: parsed.gateway_alive,
+        timestamp: parsed.timestamp,
         responseTimeMs,
-        details: parsed as any,
+        details: parsed,
       };
     } catch (fetchError: any) {
       clearTimeout(timer);
