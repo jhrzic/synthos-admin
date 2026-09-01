@@ -124,34 +124,25 @@ function checkGuardianRules(cmd: string): {
 }
 
 export function normalizeGeminiModel(model?: string): string {
-  if (!model) return "gemini-3.7-flash";
-  const m = String(model).trim().toLowerCase();
-  if (
-    m === "gemini" ||
-    m === "gemini-flash" ||
-    m === "gemini-3.6-flash" ||
-    m === "gemini-3.5-flash" ||
-    m === "gemini-2.5-flash" ||
-    m === "gemini-2.0-flash" ||
-    m === "gemini-1.5-flash" ||
-    m === "gemini-1.5-pro" ||
-    m === "gemini-2.0-pro"
-  ) {
-    return "gemini-3.7-flash";
-  }
-  if (m === "gemini-pro" || m === "gemini-3-pro" || m === "gemini-3.1-pro" || m === "gemini-3.1-pro-preview") {
-    return "gemini-3.1-pro-preview";
-  }
-  if (m === "gemini-lite" || m === "flash-lite" || m === "gemini-flash-lite" || m === "gemini-3.1-flash-lite") {
+  if (!model) return "gemini-3.1-flash-lite";
+  const m = String(model).trim();
+  if (m === "gemini-3.1-flash-lite" || m === "models/gemini-3.1-flash-lite") {
     return "gemini-3.1-flash-lite";
   }
-  if (m.startsWith("gemini-") || m.startsWith("veo-") || m.startsWith("lyria-")) {
-    return m;
+  if (m === "gemini-3.7-flash" || m === "models/gemini-3.7-flash") {
+    return "gemini-3.7-flash";
   }
-  return "gemini-3.7-flash";
+  if (m === "gemini-3.1-pro-preview" || m === "models/gemini-3.1-pro-preview") {
+    return "gemini-3.1-pro-preview";
+  }
+  // Default to confirmed live model for generic 'gemini' alias
+  if (m.toLowerCase() === "gemini" || m.toLowerCase() === "google" || m.toLowerCase() === "gemini-flash") {
+    return "gemini-3.1-flash-lite";
+  }
+  return m;
 }
 
-const DEFAULT_CANDIDATE_MODELS = ["gemini-3.7-flash", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"];
+const DEFAULT_CANDIDATE_MODELS = ["gemini-3.1-flash-lite"];
 
 async function startServer() {
   const app = express();
@@ -3073,7 +3064,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
         gemini: {
           status: process.env.GEMINI_API_KEY ? "CONFIGURED" : "NOT_CONFIGURED",
           provider: "google-genai",
-          models: ["gemini-3.7-flash", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"]
+          models: ["gemini-3.1-flash-lite"]
         },
         openrouter: {
           status: process.env.OPENROUTER_API_KEY ? "CONFIGURED" : "ZERO_COST_FALLBACK_ONLY",
@@ -3213,7 +3204,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
         gemini: {
           configured: !!process.env.GEMINI_API_KEY,
           provider: "google-genai",
-          model: "gemini-3.7-flash / gemini-3.1-pro-preview"
+          model: "gemini-3.1-flash-lite"
         },
         openrouter: {
           configured: !!process.env.OPENROUTER_API_KEY,
@@ -3434,7 +3425,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
       try {
         const ai = new GoogleGenAI({ apiKey });
         const response = await ai.models.generateContent({
-          model: "gemini-3.7-flash",
+          model: "gemini-3.1-flash-lite",
           contents: "ping: respond with 'pong' only",
         });
 
@@ -3443,7 +3434,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
           success: true,
           status: "PASS",
           provider: "Google Gemini",
-          model: "gemini-3.7-flash",
+          model: "gemini-3.1-flash-lite",
           reply: response.text?.trim() || "pong",
           latencyMs,
           usage: response.usageMetadata ? `${response.usageMetadata.totalTokenCount || 0} tokens` : "Usage metadata returned",
