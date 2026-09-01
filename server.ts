@@ -11,6 +11,9 @@ import {
   updateTaskStatus, 
   recordActivityEvent, 
   recordArtifact, 
+  recordQualityReview,
+  getTaskQualityReviews,
+  runDeterministicAegisVerification,
   getTaskWithHistory, 
   getTaskActivityEvents, 
   getTaskArtifacts, 
@@ -1083,7 +1086,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       let providerUsageMetadata: any = null;
 
       // Step 1: Execute tool/model logic based on role with Live Gemini Model
-      const candidateModels = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.7-flash"];
+      const candidateModels = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.7-flash"];
       
       try {
         const ai = new GoogleGenAI({
@@ -1283,12 +1286,73 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
         createdAt: nowIso
       });
 
-      // Temporary terminal state: AWAITING_VERIFICATION (do not mark DONE yet)
+      // Temporary state: AWAITING_VERIFICATION before Aegis inspection
       updateTaskStatus(taskId, "AWAITING_VERIFICATION");
+
+      // Run real deterministic Aegis verification against ledger and persisted disk artifact
+      const aegisResult = runDeterministicAegisVerification(taskId, executionOutput);
+
+      // Persist quality review to SQLite quality_reviews table
+      const persistedReview = recordQualityReview({
+        taskId,
+        reviewer: aegisResult.reviewer,
+        method: aegisResult.method,
+        score: aegisResult.score,
+        decision: aegisResult.decision,
+        checks: aegisResult.checks,
+        evidence: aegisResult.evidence,
+        createdAt: nowIso
+      });
+
+      // Handle Aegis verification decision according to specification
+      if (aegisResult.decision === "VERIFIED") {
+        // Transition to AWAITING_RECEIPT (do NOT mark DONE yet)
+        updateTaskStatus(taskId, "AWAITING_RECEIPT");
+        recordActivityEvent({
+          taskId,
+          eventType: "AEGIS_REVIEWED",
+          agentId: "aegis",
+          payload: {
+            reviewId: persistedReview.review_id,
+            decision: "VERIFIED",
+            score: aegisResult.score,
+            checks: aegisResult.checks
+          },
+          createdAt: nowIso
+        });
+      } else if (aegisResult.decision === "FAILED") {
+        updateTaskStatus(taskId, "FAILED");
+        recordActivityEvent({
+          taskId,
+          eventType: "AEGIS_FAILED",
+          agentId: "aegis",
+          payload: {
+            reviewId: persistedReview.review_id,
+            decision: "FAILED",
+            checks: aegisResult.checks
+          },
+          createdAt: nowIso
+        });
+      } else {
+        // INCONCLUSIVE
+        updateTaskStatus(taskId, "AWAITING_VERIFICATION");
+        recordActivityEvent({
+          taskId,
+          eventType: "AEGIS_INCONCLUSIVE",
+          agentId: "aegis",
+          payload: {
+            reviewId: persistedReview.review_id,
+            decision: "INCONCLUSIVE",
+            checks: aegisResult.checks
+          },
+          createdAt: nowIso
+        });
+      }
 
       const { task: savedTask, statusHistory } = getTaskWithHistory(taskId);
       const activityEvents = getTaskActivityEvents(taskId);
       const artifactsList = getTaskArtifacts(taskId);
+      const reviewsList = getTaskQualityReviews(taskId);
 
       // Real execution metrics from provider SDK metadata (or null if unavailable - no random/fabricated numbers)
       const realTokensConsumed = providerUsageMetadata?.totalTokenCount ?? providerUsageMetadata?.totalTokens ?? null;
@@ -1300,13 +1364,13 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
       };
 
       return res.json({
-        success: true,
+        success: aegisResult.decision === "VERIFIED",
         taskId,
-        status: "AWAITING_VERIFICATION",
+        status: savedTask?.status || "AWAITING_RECEIPT",
         outputs: executionOutput,
         claimedBy: `${assignedAgent.charAt(0).toUpperCase() + assignedAgent.slice(1)} Agent (${modelUsed})`,
         claimedAt: startTimeIso,
-        latestAction: `Completed provider execution in ${elapsedMs}ms. Stored artifact (${persistedArtifact.content_hash}). Awaiting Aegis verification.`,
+        latestAction: `Provider finished in ${elapsedMs}ms. Artifact hashed (${persistedArtifact.content_hash}). Aegis decision: ${persistedReview.decision} (score: ${persistedReview.score ?? "null"}). Status: ${savedTask?.status}.`,
         modelUsed,
         toolCalls,
         artifact: {
@@ -1320,10 +1384,21 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
           content: artifactContent,
           createdAt: nowIso
         },
+        review: {
+          reviewId: persistedReview.review_id,
+          reviewer: persistedReview.reviewer,
+          method: persistedReview.method,
+          decision: persistedReview.decision,
+          score: persistedReview.score,
+          checks: aegisResult.checks,
+          evidence: aegisResult.evidence,
+          createdAt: persistedReview.created_at
+        },
         task: savedTask,
         statusHistory,
         activityEvents,
         artifacts: artifactsList,
+        reviews: reviewsList,
         executionMetrics
       });
     } catch (err: any) {
@@ -1409,6 +1484,25 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
       });
     } catch (err: any) {
       return res.status(500).json({ error: err?.message || "Failed to query artifacts" });
+    }
+  });
+
+  app.get("/api/execution/tasks/:taskId/reviews", (req, res) => {
+    try {
+      const { taskId } = req.params;
+      const reviews = getTaskQualityReviews(taskId);
+      return res.json({
+        success: true,
+        taskId,
+        count: reviews.length,
+        reviews: reviews.map(r => ({
+          ...r,
+          checks: JSON.parse(r.checks_json || "[]"),
+          evidence: JSON.parse(r.evidence_json || "{}")
+        }))
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || "Failed to query quality reviews" });
     }
   });
 
