@@ -1853,7 +1853,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
 
         const taskTitle = currentNode.name || currentNode.title || `Node ${i + 1}: ${currentNode.id}`;
         const nodeTaskId = `task-${runId}-${currentNode.id}`;
-        const nodeAgent = currentNode.assignedAgent || currentNode.type === "scout" ? "scout" : "dev";
+        const nodeAgent = currentNode.assignedAgent || (currentNode.type === "scout" ? "scout" : "dev");
         const nodeModel = currentNode.assignedModel || "gemini-3.6-flash";
         const nodeDescription = `${currentNode.description || taskTitle}${previousOutput ? `\n\nUpstream Context from previous step:\n${previousOutput.slice(0, 1000)}` : ""}`;
 
@@ -2659,19 +2659,6 @@ sourceHash: ${packageMetadataResult.sourceHash}
           if (runId) session.associatedRunId = runId;
           terminalSessions.set(sessionId, session);
 
-          // Generate cryptographic Aegis receipt
-          const aegisScore = isSuccess ? (stderr ? 92.5 : 99.2) : 34.0;
-          const verificationReceipt = {
-            receiptId: `rcpt-term-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-            command: trimmedCmd,
-            exitCode,
-            durationMs,
-            aegisScore,
-            status: isSuccess ? "SUCCEEDED" : "FAILED",
-            signature: `0x${Buffer.from(`${trimmedCmd}:${exitCode}:${durationMs}:${Date.now()}`).toString("hex").slice(0, 32)}`,
-            timestamp: new Date().toISOString()
-          };
-
           if (taskId) {
             try {
               recordActivityEvent({
@@ -2682,8 +2669,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
                   command: trimmedCmd,
                   exitCode,
                   durationMs,
-                  isSuccess,
-                  aegisScore
+                  isSuccess
                 }
               });
             } catch {}
@@ -2701,7 +2687,6 @@ sourceHash: ${packageMetadataResult.sourceHash}
             taskId,
             runId,
             guardianCheck,
-            verificationReceipt,
             timestamp: new Date().toISOString()
           });
         }
@@ -2791,26 +2776,6 @@ sourceHash: ${packageMetadataResult.sourceHash}
       } catch (e) {
         // ignore
       }
-    });
-  });
-
-  // Aegis Cryptographic Outcome Verification
-  app.post("/api/terminal/verify-aegis", (req, res) => {
-    const { command = "", stdout = "", stderr = "", exitCode = 0, durationMs = 0 } = req.body || {};
-    const isSuccess = exitCode === 0;
-    const aegisScore = isSuccess ? (stderr ? 91.0 : 99.5) : 28.0;
-    const signature = `0x${Buffer.from(`${command}:${exitCode}:${durationMs}:${Date.now()}`).toString("hex").slice(0, 32)}`;
-
-    return res.json({
-      receiptId: `rcpt-term-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      command,
-      exitCode,
-      aegisScore,
-      status: isSuccess ? "SUCCEEDED" : "FAILED",
-      signature,
-      guardianPassed: isSuccess,
-      zeroSlackAchieved: durationMs < 5000,
-      timestamp: new Date().toISOString()
     });
   });
 
