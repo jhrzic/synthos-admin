@@ -247,8 +247,7 @@ export const HermesTerminalView: React.FC<HermesTerminalViewProps> = ({
         stderr: result.stderr || '',
         durationMs: result.durationMs || (Date.now() - startTime),
         cwd: result.cwd || currentCwd,
-        guardianCheck: result.guardianCheck,
-        verificationReceipt: result.verificationReceipt
+        guardianCheck: result.guardianCheck
       } : r));
 
       // Update session CWD and history
@@ -361,14 +360,6 @@ ${record.stdout || '(no stdout output)'}
 \`\`\`text
 ${record.stderr || '(no stderr output)'}
 \`\`\`
-
-## 4. Aegis Verification Receipt
-${record.verificationReceipt ? `
-- **Receipt ID**: \`${record.verificationReceipt.receiptId}\`
-- **Aegis Score**: **${record.verificationReceipt.aegisScore} / 100**
-- **Signature**: \`${record.verificationReceipt.signature}\`
-- **Zero-Slack**: Verified
-` : 'No cryptographic receipt generated.'}
 
 ---
 *Archived by Hermes Terminal Mission Control Engine*`;
@@ -706,19 +697,6 @@ ${record.verificationReceipt ? `
                   }`}>
                     {log.stderr}
                   </pre>
-                )}
-
-                {/* Aegis Verification Receipt Strip */}
-                {log.verificationReceipt && (
-                  <div className="flex flex-wrap items-center justify-between text-[11px] text-gray-500 pt-1 border-t border-[#131526]">
-                    <div className="flex items-center gap-2">
-                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>Aegis Score: <strong className="text-emerald-400">{log.verificationReceipt.aegisScore}/100</strong></span>
-                      <span className="text-gray-600">•</span>
-                      <span>Receipt: <code className="text-gray-400">{log.verificationReceipt.receiptId}</code></span>
-                    </div>
-                    <span className="font-mono text-gray-500 text-[10px]">Sig: {log.verificationReceipt.signature.slice(0, 16)}...</span>
-                  </div>
                 )}
               </div>
             );
