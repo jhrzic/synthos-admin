@@ -400,6 +400,15 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
     diagnostics?.providers?.openrouter?.configured || 
     diagnostics?.providers?.anthropic?.configured
   );
+  const isModelsTestedAndLive = Boolean(
+    providerTestResults['gemini']?.status === 'PASS' ||
+    providerTestResults['openrouter']?.status === 'PASS' ||
+    e2eResultData.results.find(r => r.name.includes('Model Provider'))?.status === 'PASS'
+  );
+  const isModelsProbeFailed = Boolean(
+    providerTestResults['gemini']?.status === 'FAIL' ||
+    e2eResultData.results.find(r => r.name.includes('Model Provider'))?.status === 'FAIL'
+  );
   const isVaultReady = Boolean(diagnostics?.storage.exists);
   const isE2ePassed = e2eResultData.e2eStatus === 'CERTIFIED_READY';
 
@@ -447,12 +456,22 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
       id: 4,
       title: 'Frontier AI Model Providers',
       required: true,
-      status: isModelsConfigured ? 'PASS' : 'NOT_CONFIGURED',
-      missing: isModelsConfigured 
-        ? 'Configured providers available.' 
-        : 'Missing API keys (GEMINI_API_KEY / OPENROUTER_API_KEY).',
+      status: isModelsTestedAndLive 
+        ? 'PASS' 
+        : isModelsProbeFailed 
+          ? 'FAIL' 
+          : isModelsConfigured 
+            ? 'PARTIAL' 
+            : 'NOT_CONFIGURED',
+      missing: isModelsTestedAndLive 
+        ? 'Frontier model provider verified via live API probe.' 
+        : isModelsProbeFailed
+          ? 'Live API probe failed.'
+          : isModelsConfigured 
+            ? 'Configured in environment — live probe pending.' 
+            : 'Missing API keys (GEMINI_API_KEY / OPENROUTER_API_KEY).',
       setupAction: 'Configure GEMINI_API_KEY or OPENROUTER_API_KEY in .env.local',
-      testAction: 'Dispatch ping query to active model router',
+      testAction: 'Probe active model provider in Models section',
       section: 'models'
     },
     {

@@ -3583,19 +3583,72 @@ sourceHash: ${packageMetadataResult.sourceHash}
 
     // 4. Model Provider
     if (process.env.GEMINI_API_KEY) {
-      results.push({
-        step: 4,
-        name: "Frontier Model Provider (Gemini)",
-        status: "PASS",
-        details: "GEMINI_API_KEY configured and available for server-side generation."
-      });
+      try {
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const probeRes = await ai.models.generateContent({
+          model: "gemini-3.1-flash-lite",
+          contents: "ping",
+        });
+        if (probeRes.text) {
+          results.push({
+            step: 4,
+            name: "Frontier Model Provider (Gemini)",
+            status: "PASS",
+            details: "Live generateContent probe succeeded on gemini-3.1-flash-lite."
+          });
+        } else {
+          results.push({
+            step: 4,
+            name: "Frontier Model Provider (Gemini)",
+            status: "FAIL",
+            details: "Gemini provider returned empty response payload."
+          });
+        }
+      } catch (probeErr: any) {
+        results.push({
+          step: 4,
+          name: "Frontier Model Provider (Gemini)",
+          status: "FAIL",
+          details: `Gemini live probe error: ${probeErr.message}`
+        });
+      }
     } else if (process.env.OPENROUTER_API_KEY) {
-      results.push({
-        step: 4,
-        name: "Frontier Model Provider (OpenRouter)",
-        status: "PASS",
-        details: "OPENROUTER_API_KEY configured."
-      });
+      try {
+        const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            model: "nousresearch/hermes-3-llama-3.1-405b",
+            messages: [{ role: "user", content: "ping" }],
+            max_tokens: 5
+          })
+        });
+        if (resp.ok) {
+          results.push({
+            step: 4,
+            name: "Frontier Model Provider (OpenRouter)",
+            status: "PASS",
+            details: "OpenRouter probe succeeded on nousresearch/hermes-3-llama-3.1-405b."
+          });
+        } else {
+          results.push({
+            step: 4,
+            name: "Frontier Model Provider (OpenRouter)",
+            status: "FAIL",
+            details: `OpenRouter probe returned status ${resp.status}.`
+          });
+        }
+      } catch (probeErr: any) {
+        results.push({
+          step: 4,
+          name: "Frontier Model Provider (OpenRouter)",
+          status: "FAIL",
+          details: `OpenRouter probe error: ${probeErr.message}`
+        });
+      }
     } else {
       results.push({
         step: 4,
