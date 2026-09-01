@@ -1184,7 +1184,7 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
               </thead>
               <tbody className="divide-y divide-[#15172C]">
                 {[
-                  { key: 'gemini', name: 'Google Gemini', defaultModel: 'gemini-3.6-flash', configured: diagnostics?.providers?.gemini?.configured },
+                  { key: 'gemini', name: 'Google Gemini', defaultModel: 'gemini-3.7-flash', configured: diagnostics?.providers?.gemini?.configured },
                   { key: 'openrouter', name: 'OpenRouter', defaultModel: 'nousresearch/hermes-3-llama-3.1-405b', configured: diagnostics?.providers?.openrouter?.configured },
                   { key: 'anthropic', name: 'Anthropic Claude', defaultModel: 'claude-3-7-sonnet', configured: diagnostics?.providers?.anthropic?.configured },
                   { key: 'nous', name: 'Nous Research', defaultModel: 'Hermes-3-Llama-3.1-405B', configured: diagnostics?.providers?.nous?.configured },

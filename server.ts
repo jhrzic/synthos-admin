@@ -123,6 +123,36 @@ function checkGuardianRules(cmd: string): {
   };
 }
 
+export function normalizeGeminiModel(model?: string): string {
+  if (!model) return "gemini-3.7-flash";
+  const m = String(model).trim().toLowerCase();
+  if (
+    m === "gemini" ||
+    m === "gemini-flash" ||
+    m === "gemini-3.6-flash" ||
+    m === "gemini-3.5-flash" ||
+    m === "gemini-2.5-flash" ||
+    m === "gemini-2.0-flash" ||
+    m === "gemini-1.5-flash" ||
+    m === "gemini-1.5-pro" ||
+    m === "gemini-2.0-pro"
+  ) {
+    return "gemini-3.7-flash";
+  }
+  if (m === "gemini-pro" || m === "gemini-3-pro" || m === "gemini-3.1-pro" || m === "gemini-3.1-pro-preview") {
+    return "gemini-3.1-pro-preview";
+  }
+  if (m === "gemini-lite" || m === "flash-lite" || m === "gemini-flash-lite" || m === "gemini-3.1-flash-lite") {
+    return "gemini-3.1-flash-lite";
+  }
+  if (m.startsWith("gemini-") || m.startsWith("veo-") || m.startsWith("lyria-")) {
+    return m;
+  }
+  return "gemini-3.7-flash";
+}
+
+const DEFAULT_CANDIDATE_MODELS = ["gemini-3.7-flash", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"];
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -133,7 +163,7 @@ async function startServer() {
   // API Routes
   app.post(["/api/generate"], async (req, res) => {
     try {
-      const { model = "gemini-3.6-flash", prompt = "", systemInstruction, temperature = 0.7 } = req.body || {};
+      const { model = "gemini-3.7-flash", prompt = "", systemInstruction, temperature = 0.7 } = req.body || {};
       const apiKey = process.env.GEMINI_API_KEY;
 
       if (!apiKey) {
@@ -156,15 +186,15 @@ async function startServer() {
         },
       });
 
-      const enhancedPrompt = `[Model: ${model.toUpperCase()}]\n${systemInstruction ? `System Prompt: ${systemInstruction}\n` : ""}\nUser Query: ${prompt}`;
+      const targetModel = normalizeGeminiModel(model);
+      const enhancedPrompt = `[Model: ${targetModel.toUpperCase()}]\n${systemInstruction ? `System Prompt: ${systemInstruction}\n` : ""}\nUser Query: ${prompt}`;
 
-      const candidateModels = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.7-flash"];
+      const candidateModels = [targetModel, ...DEFAULT_CANDIDATE_MODELS].filter((v, i, a) => a.indexOf(v) === i);
       let generatedText = "";
       let modelUsed = candidateModels[0];
       let lastError: any = null;
 
-      // Try user requested model first if provided and in candidate list, else fallback to candidate list
-      const modelQueue = [model, ...candidateModels].filter((v, i, a) => a.indexOf(v) === i);
+      const modelQueue = candidateModels;
 
       let usageMetadata: any = null;
       for (const candidate of modelQueue) {
@@ -495,7 +525,7 @@ async function startServer() {
       });
 
       async function generateContentWithFailover(prompt: string, options: any = {}) {
-        const candidateModels = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.7-flash"];
+        const candidateModels = DEFAULT_CANDIDATE_MODELS;
         let lastError: any = null;
 
         for (let attempt = 0; attempt < candidateModels.length; attempt++) {
@@ -804,8 +834,9 @@ Video ID: "${videoId}"
 
 Analyze this video topic for technical intelligence, agent workflow implications, and architectural takeaways in concise Markdown.`;
 
+        const targetModel = normalizeGeminiModel(model);
         const modelRes = await ai.models.generateContent({
-          model,
+          model: targetModel,
           contents: prompt
         });
         analysis = modelRes.text || "";
@@ -887,7 +918,7 @@ Return JSON matching this exact structure:
 }
 Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis, Engineering/Strategy, Synthesis, and Verification. The root task MUST have empty prerequisiteKeys.`;
 
-          const candidateModels = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-pro"];
+          const candidateModels = DEFAULT_CANDIDATE_MODELS;
           for (const m of candidateModels) {
             try {
               const resp = await ai.models.generateContent({
@@ -1226,7 +1257,8 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       let providerUsageMetadata: any = null;
 
       // Step 1: Execute tool/model logic based on role with Live Gemini Model
-      const candidateModels = ["gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.7-flash", "gemini-3.1-pro-preview"];
+      const normalizedAssignedModel = normalizeGeminiModel(assignedModel);
+      const candidateModels = [normalizedAssignedModel, ...DEFAULT_CANDIDATE_MODELS].filter((v, i, a) => a.indexOf(v) === i);
       
       try {
         const ai = new GoogleGenAI({
@@ -1349,7 +1381,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
 4. Provide a clear, factual, and concise description of the package metadata read from package.json without any fabricated claims.`;
         }
 
-        const modelQueue = [assignedModel, ...candidateModels].filter((v, i, a) => a.indexOf(v) === i && !v.includes("claude") && !v.includes("o3") && !v.includes("sonar"));
+        const modelQueue = [normalizedAssignedModel, ...candidateModels].filter((v, i, a) => a.indexOf(v) === i && !v.includes("claude") && !v.includes("o3") && !v.includes("sonar"));
         const modelsToTry = modelQueue.length > 0 ? modelQueue : candidateModels;
 
         for (const m of modelsToTry) {
@@ -2318,7 +2350,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
             httpOptions: { headers: { "User-Agent": "aistudio-build" } }
           });
           const response = await ai.models.generateContent({
-            model: "gemini-3.6-flash",
+            model: "gemini-3.7-flash",
             contents: trimmed,
             config: {
               systemInstruction: "You are Jarvis, the SynthOS Global System Service and Administrative Assistant. Answer concisely and factually based on SynthOS architecture, agent coordination, and system governance."
@@ -3041,7 +3073,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
         gemini: {
           status: process.env.GEMINI_API_KEY ? "CONFIGURED" : "NOT_CONFIGURED",
           provider: "google-genai",
-          models: ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.7-flash"]
+          models: ["gemini-3.7-flash", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"]
         },
         openrouter: {
           status: process.env.OPENROUTER_API_KEY ? "CONFIGURED" : "ZERO_COST_FALLBACK_ONLY",
@@ -3181,7 +3213,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
         gemini: {
           configured: !!process.env.GEMINI_API_KEY,
           provider: "google-genai",
-          model: "gemini-3.6-flash / gemini-3.7-flash"
+          model: "gemini-3.7-flash / gemini-3.1-pro-preview"
         },
         openrouter: {
           configured: !!process.env.OPENROUTER_API_KEY,
@@ -3402,7 +3434,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
       try {
         const ai = new GoogleGenAI({ apiKey });
         const response = await ai.models.generateContent({
-          model: "gemini-3.6-flash",
+          model: "gemini-3.7-flash",
           contents: "ping: respond with 'pong' only",
         });
 
@@ -3411,7 +3443,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
           success: true,
           status: "PASS",
           provider: "Google Gemini",
-          model: "gemini-3.6-flash",
+          model: "gemini-3.7-flash",
           reply: response.text?.trim() || "pong",
           latencyMs,
           usage: response.usageMetadata ? `${response.usageMetadata.totalTokenCount || 0} tokens` : "Usage metadata returned",
@@ -3627,7 +3659,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
         workspaceId: "ws-synthos-primary",
         assignedAgent: "dev",
         provider: "google-genai",
-        modelUsed: "gemini-3.6-flash",
+        modelUsed: "gemini-3.7-flash",
         artifactId: "art-diag-001",
         artifactHash: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         aegisDecision: "APPROVED",

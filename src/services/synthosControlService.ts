@@ -8,7 +8,6 @@ import {
   WorkspaceTenant,
   AgentRole
 } from '../types';
-import { GoogleGenAI } from '@google/genai';
 
 class SynthOsControlLayer {
   private workspace: WorkspaceTenant = {

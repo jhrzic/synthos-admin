@@ -78,7 +78,7 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     id: 'task-1',
     title: 'DISCOVER RECENT VIDEOS',
     agent: 'Research Agent (Scout)',
-    model: 'gemini-3.6-flash',
+    model: 'gemini-3.7-flash',
     whyModel: 'Optimized for long context & real-time Google/YouTube Search grounding',
     fallbackModel: 'perplexity-sonar-huge',
     column: 'backlog'
@@ -87,7 +87,7 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     id: 'task-2',
     title: 'FETCH VIDEO METADATA',
     agent: 'Research Agent (Scout)',
-    model: 'gemini-3.6-flash',
+    model: 'gemini-3.7-flash',
     whyModel: 'Fast JSON schema extraction for durations & publish dates',
     fallbackModel: 'openai-gpt4o-mini',
     column: 'backlog'
@@ -105,7 +105,7 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     id: 'task-4',
     title: 'SUMMARIZE EACH VIDEO',
     agent: 'Analyst Agent (Scribe)',
-    model: 'gemini-3.6-flash',
+    model: 'gemini-3.7-flash',
     whyModel: 'High throughput fast summarization with bullet points',
     fallbackModel: 'claude-3-5-haiku',
     column: 'backlog'
@@ -116,7 +116,7 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     agent: 'Analyst Agent (Scribe)',
     model: 'deepseek-r1',
     whyModel: 'Deep chain-of-thought analysis for semantic claim extraction',
-    fallbackModel: 'gemini-2.5-pro',
+    fallbackModel: 'gemini-3.1-pro-preview',
     column: 'backlog'
   },
   {
@@ -134,7 +134,7 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     agent: 'SEO / Growth Agent (Reach)',
     model: 'chatgpt-o3-mini',
     whyModel: 'High precision strategy classification for AEO & GEO content loops',
-    fallbackModel: 'gemini-3.6-flash',
+    fallbackModel: 'gemini-3.7-flash',
     column: 'backlog'
   },
   {
@@ -143,7 +143,7 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     agent: 'SynthOS Strategy Agent',
     model: 'claude-3-7-sonnet',
     whyModel: 'Architectural reasoning for multi-agent browser patterns',
-    fallbackModel: 'gemini-2.5-pro',
+    fallbackModel: 'gemini-3.1-pro-preview',
     column: 'backlog'
   },
   {
@@ -159,7 +159,7 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     id: 'task-10',
     title: 'IDENTIFY DUPLICATES',
     agent: 'SynthOS Strategy Agent',
-    model: 'gemini-3.6-flash',
+    model: 'gemini-3.7-flash',
     whyModel: 'Fast feature matrix deduplication',
     fallbackModel: 'chatgpt-4o-mini',
     column: 'backlog'
@@ -179,7 +179,7 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     agent: 'Engineering Agent (Dev)',
     model: 'claude-3-7-sonnet',
     whyModel: 'Precise effort vs complexity estimation',
-    fallbackModel: 'gemini-2.5-pro',
+    fallbackModel: 'gemini-3.1-pro-preview',
     column: 'backlog'
   },
   {
@@ -197,14 +197,14 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     agent: 'Orchestrator (Hermes 3)',
     model: 'claude-3-7-sonnet',
     whyModel: 'Executive synthesis and decision sign-off',
-    fallbackModel: 'gemini-2.5-pro',
+    fallbackModel: 'gemini-3.1-pro-preview',
     column: 'backlog'
   },
   {
     id: 'task-15',
     title: 'GENERATE IMPLEMENTATION BACKLOG',
     agent: 'Orchestrator (Hermes 3)',
-    model: 'gemini-3.6-flash',
+    model: 'gemini-3.7-flash',
     whyModel: 'Structured Kanban task payload generation',
     fallbackModel: 'openai-gpt4o',
     column: 'backlog'

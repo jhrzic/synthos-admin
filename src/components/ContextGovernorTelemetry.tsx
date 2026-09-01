@@ -27,7 +27,7 @@ export const ContextGovernorTelemetry: React.FC = () => {
     inputTokens: 41250,
     outputTokens: 18400,
     toolSchemasLoaded: 18,
-    model: 'gemini-3.6-flash',
+    model: 'gemini-3.7-flash',
     cost: 0.1145,
     latencyMs: 340,
     activeLevel: 'L0'
@@ -61,7 +61,7 @@ export const ContextGovernorTelemetry: React.FC = () => {
     const totalAvail = 2000000;
     const cached = 32768;
     const toolSchemas = 18;
-    const modelStr = 'gemini-3.6-flash';
+    const modelStr = 'gemini-3.7-flash';
 
     let retrieved = 4200;
     let input = 12000;
