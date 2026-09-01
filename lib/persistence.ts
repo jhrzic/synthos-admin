@@ -86,6 +86,26 @@ export interface AegisCheckResult {
   evidence: string;
 }
 
+export interface GraphRecord {
+  graph_id: string;
+  name: string;
+  description: string;
+  nodes_json: string;
+  edges_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GraphRunRecord {
+  run_id: string;
+  graph_id: string;
+  status: string;
+  current_node_id: string | null;
+  state_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export function getDatabasePath(): string {
   return process.env.SYNTHOS_DB_PATH || path.join(process.cwd(), 'data', 'synthos-admin.db');
 }
@@ -164,9 +184,124 @@ export function getDatabase(): any {
         signature TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS graphs (
+        graph_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        nodes_json TEXT NOT NULL,
+        edges_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS graph_runs (
+        run_id TEXT PRIMARY KEY,
+        graph_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        current_node_id TEXT,
+        state_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
   }
   return dbInstance;
+}
+
+export function saveGraph(params: {
+  graphId: string;
+  name: string;
+  description?: string;
+  nodes: any[];
+  edges: any[];
+}): GraphRecord {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  const nodesJson = JSON.stringify(params.nodes || []);
+  const edgesJson = JSON.stringify(params.edges || []);
+  const desc = params.description || '';
+
+  const existing = db.prepare('SELECT graph_id FROM graphs WHERE graph_id = ?').get(params.graphId);
+  if (existing) {
+    db.prepare(`
+      UPDATE graphs 
+      SET name = ?, description = ?, nodes_json = ?, edges_json = ?, updated_at = ?
+      WHERE graph_id = ?
+    `).run(params.name, desc, nodesJson, edgesJson, now, params.graphId);
+  } else {
+    db.prepare(`
+      INSERT INTO graphs (graph_id, name, description, nodes_json, edges_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(params.graphId, params.name, desc, nodesJson, edgesJson, now, now);
+  }
+
+  return {
+    graph_id: params.graphId,
+    name: params.name,
+    description: desc,
+    nodes_json: nodesJson,
+    edges_json: edgesJson,
+    created_at: now,
+    updated_at: now
+  };
+}
+
+export function getGraph(graphId: string): GraphRecord | null {
+  const db = getDatabase();
+  return (db.prepare('SELECT * FROM graphs WHERE graph_id = ?').get(graphId) as GraphRecord) || null;
+}
+
+export function listGraphs(): GraphRecord[] {
+  const db = getDatabase();
+  return (db.prepare('SELECT * FROM graphs ORDER BY updated_at DESC').all() as GraphRecord[]) || [];
+}
+
+export function saveGraphRun(params: {
+  runId: string;
+  graphId: string;
+  status: string;
+  currentNodeId?: string | null;
+  state?: any;
+}): GraphRunRecord {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  const stateJson = JSON.stringify(params.state || {});
+  const currentNodeId = params.currentNodeId || null;
+
+  const existing = db.prepare('SELECT run_id FROM graph_runs WHERE run_id = ?').get(params.runId);
+  if (existing) {
+    db.prepare(`
+      UPDATE graph_runs 
+      SET status = ?, current_node_id = ?, state_json = ?, updated_at = ?
+      WHERE run_id = ?
+    `).run(params.status, currentNodeId, stateJson, now, params.runId);
+  } else {
+    db.prepare(`
+      INSERT INTO graph_runs (run_id, graph_id, status, current_node_id, state_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(params.runId, params.graphId, params.status, currentNodeId, stateJson, now, now);
+  }
+
+  return {
+    run_id: params.runId,
+    graph_id: params.graphId,
+    status: params.status,
+    current_node_id: currentNodeId,
+    state_json: stateJson,
+    created_at: now,
+    updated_at: now
+  };
+}
+
+export function getGraphRun(runId: string): GraphRunRecord | null {
+  const db = getDatabase();
+  return (db.prepare('SELECT * FROM graph_runs WHERE run_id = ?').get(runId) as GraphRunRecord) || null;
+}
+
+export function listGraphRuns(): GraphRunRecord[] {
+  const db = getDatabase();
+  return (db.prepare('SELECT * FROM graph_runs ORDER BY updated_at DESC').all() as GraphRunRecord[]) || [];
 }
 
 export function createInitialTask(params: {
@@ -750,6 +885,14 @@ export function getSigningKeyDir(): string {
 }
 
 export function ensureSigningKeyPair(): { privateKeyPem: string; publicKeyPem: string; fingerprint: string } {
+  // Check secure environment variable overrides first (e.g. injected via Secret Manager / container runtime)
+  if (process.env.SYNTHOS_SIGNING_PRIVATE_KEY_PEM && process.env.SYNTHOS_SIGNING_PUBLIC_KEY_PEM) {
+    const privateKeyPem = process.env.SYNTHOS_SIGNING_PRIVATE_KEY_PEM.replace(/\\n/g, '\n');
+    const publicKeyPem = process.env.SYNTHOS_SIGNING_PUBLIC_KEY_PEM.replace(/\\n/g, '\n');
+    const fingerprint = `sha256:${crypto.createHash('sha256').update(publicKeyPem).digest('hex')}`;
+    return { privateKeyPem, publicKeyPem, fingerprint };
+  }
+
   const keyDir = getSigningKeyDir();
   const privPath = path.join(keyDir, 'ed25519_private.pem');
   const pubPath = path.join(keyDir, 'ed25519_public.pem');

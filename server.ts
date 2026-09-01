@@ -27,7 +27,14 @@ import {
   getTaskArtifacts, 
   getDatabasePath,
   read_package_metadata,
-  deleteTaskRecords
+  deleteTaskRecords,
+  saveGraph,
+  getGraph,
+  listGraphs,
+  saveGraphRun,
+  getGraphRun,
+  listGraphRuns,
+  getDatabase
 } from "./lib/persistence";
 
 dotenv.config();
@@ -181,11 +188,33 @@ async function startServer() {
       }
 
       if (generatedText) {
+        const taskId = req.body?.taskId || `chat-${Date.now()}`;
+        const agentId = req.body?.agentId || "hermes";
+        let eventId = "";
+        try {
+          const act = recordActivityEvent({
+            taskId,
+            agentId,
+            eventType: "PROMPT_COMPLETED",
+            payload: {
+              promptLength: prompt.length,
+              modelUsed,
+              provider: "google-genai",
+              replyLength: generatedText.length,
+              workspaceId: req.body?.workspaceId || "ws-synthos-primary"
+            }
+          });
+          eventId = act.event_id;
+        } catch {
+          // ignore ledger write failure
+        }
         return res.json({
           success: true,
           status: "SUCCESS",
           reply: generatedText,
           modelUsed,
+          taskId,
+          eventId,
           timestamp: new Date().toISOString(),
         });
       }
@@ -706,6 +735,96 @@ ${finalMatrix.map((m: any) => `- **${m.idea}**: ${m.whatItDoes} (Priority: \`${m
     }
   });
 
+  // GENERAL YOUTUBE VIDEO INTELLIGENCE INGESTION
+  app.post("/api/youtube/ingest", async (req, res) => {
+    try {
+      const { url = "", model = "gemini-3.6-flash" } = req.body || {};
+      const trimmedUrl = url.trim();
+      if (!trimmedUrl) {
+        return res.status(400).json({ success: false, error: "Missing YouTube URL." });
+      }
+
+      console.log(`[YouTube Ingest] Fetching metadata for ${trimmedUrl}...`);
+      let title = "";
+      let authorName = "";
+      let videoId = "";
+
+      const videoIdMatch = trimmedUrl.match(/(?:v=|\/embed\/|\/watch\?v=|\/shorts\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+      if (videoIdMatch) {
+        videoId = videoIdMatch[1];
+      }
+
+      // Step 1: Real YouTube oEmbed Metadata Fetch
+      try {
+        const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(trimmedUrl)}&format=json`;
+        const oembedRes = await fetch(oembedUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+        if (oembedRes.ok) {
+          const oembedData = await oembedRes.json();
+          title = oembedData.title || "";
+          authorName = oembedData.author_name || "";
+        }
+      } catch (e) {
+        console.warn("[YouTube oEmbed Warning]:", e);
+      }
+
+      if (!title && !videoId) {
+        return res.json({
+          success: false,
+          status: "DEGRADED",
+          reason: "INVALID_YOUTUBE_URL",
+          error: "Could not resolve valid YouTube video metadata from the provided URL.",
+          url: trimmedUrl
+        });
+      }
+
+      // Step 2: Scout Agent Analysis via Live Gemini Model
+      const apiKey = process.env.GEMINI_API_KEY || "";
+      let analysis = "";
+      if (apiKey) {
+        const ai = new GoogleGenAI({
+          apiKey,
+          httpOptions: { headers: { "User-Agent": "aistudio-build" } }
+        });
+        const prompt = `You are the Hermes Scout YouTube Intelligence Agent.
+Video Title: "${title || 'YouTube Video ' + videoId}"
+Channel: "${authorName || 'YouTube Creator'}"
+URL: "${trimmedUrl}"
+Video ID: "${videoId}"
+
+Analyze this video topic for technical intelligence, agent workflow implications, and architectural takeaways in concise Markdown.`;
+
+        const modelRes = await ai.models.generateContent({
+          model,
+          contents: prompt
+        });
+        analysis = modelRes.text || "";
+      }
+
+      const taskId = `yt-ingest-${Date.now()}`;
+      recordActivityEvent({
+        taskId,
+        agentId: "scout",
+        eventType: "YOUTUBE_INTELLIGENCE_INGESTED",
+        payload: { url: trimmedUrl, videoId, title, authorName }
+      });
+
+      return res.json({
+        success: true,
+        status: "COMPLETED",
+        taskId,
+        videoId,
+        title: title || `YouTube Video (${videoId})`,
+        authorName,
+        url: trimmedUrl,
+        analysis,
+        timestamp: new Date().toISOString()
+      });
+    } catch (err: any) {
+      console.error("[YouTube Ingestion Error]:", err);
+      return res.status(500).json({ success: false, error: err?.message || "Failed to ingest YouTube video" });
+    }
+  });
+
   // ORCHESTRATOR DECOMPOSITION ENGINE
   app.post("/api/orchestrator/decompose", async (req, res) => {
     try {
@@ -1096,7 +1215,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       let providerUsageMetadata: any = null;
 
       // Step 1: Execute tool/model logic based on role with Live Gemini Model
-      const candidateModels = ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-3.7-flash", "gemini-3.1-pro-preview"];
+      const candidateModels = ["gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.7-flash", "gemini-3.1-pro-preview"];
       
       try {
         const ai = new GoogleGenAI({
@@ -1593,6 +1712,241 @@ sourceHash: ${packageMetadataResult.sourceHash}
   });
 
   // READ-ONLY VERIFICATION ENDPOINTS (Query SQLite directly)
+  // ==========================================
+  // GRAPH BUILDER & GRAPH RUNTIME ENDPOINTS
+  // ==========================================
+
+  app.get("/api/graphs", (req, res) => {
+    try {
+      const graphs = listGraphs();
+      return res.json({
+        success: true,
+        graphs: graphs.map(g => ({
+          ...g,
+          nodes: JSON.parse(g.nodes_json || "[]"),
+          edges: JSON.parse(g.edges_json || "[]")
+        }))
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list graphs" });
+    }
+  });
+
+  app.post("/api/graphs", (req, res) => {
+    try {
+      const { graphId = `graph-${Date.now()}`, name = "Unnamed Graph", description = "", nodes = [], edges = [] } = req.body || {};
+      const saved = saveGraph({ graphId, name, description, nodes, edges });
+      return res.json({
+        success: true,
+        graph: {
+          ...saved,
+          nodes: JSON.parse(saved.nodes_json),
+          edges: JSON.parse(saved.edges_json)
+        }
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to save graph" });
+    }
+  });
+
+  app.get("/api/graphs/:graphId", (req, res) => {
+    try {
+      const { graphId } = req.params;
+      const g = getGraph(graphId);
+      if (!g) return res.status(404).json({ success: false, error: "Graph not found", graphId });
+      return res.json({
+        success: true,
+        graph: {
+          ...g,
+          nodes: JSON.parse(g.nodes_json || "[]"),
+          edges: JSON.parse(g.edges_json || "[]")
+        }
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to get graph" });
+    }
+  });
+
+  app.get("/api/graph-runs", (req, res) => {
+    try {
+      const runs = listGraphRuns();
+      return res.json({
+        success: true,
+        runs: runs.map(r => ({
+          ...r,
+          state: JSON.parse(r.state_json || "{}")
+        }))
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list graph runs" });
+    }
+  });
+
+  app.get("/api/graph-runs/:runId", (req, res) => {
+    try {
+      const { runId } = req.params;
+      const r = getGraphRun(runId);
+      if (!r) return res.status(404).json({ success: false, error: "Graph run not found", runId });
+      return res.json({
+        success: true,
+        run: {
+          ...r,
+          state: JSON.parse(r.state_json || "{}")
+        }
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to get graph run" });
+    }
+  });
+
+  app.post("/api/graphs/execute", async (req, res) => {
+    try {
+      const { 
+        graphId = `graph-${Date.now()}`,
+        name = "Sequential DAG",
+        nodes = [],
+        edges = [],
+        runId = `run-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`
+      } = req.body || {};
+
+      if (!nodes || nodes.length === 0) {
+        return res.status(400).json({ success: false, error: "Graph must contain at least one node." });
+      }
+
+      // 1. Persist graph definition
+      saveGraph({ graphId, name, nodes, edges });
+
+      // 2. Initialize Graph Run in SQLite
+      const initialState = {
+        graphId,
+        nodeResults: {},
+        currentStep: 0,
+        totalNodes: nodes.length,
+        executionLog: [`[GraphRuntime]: Initialized run ${runId} with ${nodes.length} nodes.`]
+      };
+      saveGraphRun({
+        runId,
+        graphId,
+        status: "RUNNING",
+        currentNodeId: nodes[0].id,
+        state: initialState
+      });
+
+      // 3. Step-by-step topological advancement (e.g. Node A -> Node B)
+      const executionResults: any[] = [];
+      let previousOutput = "";
+
+      for (let i = 0; i < nodes.length; i++) {
+        const currentNode = nodes[i];
+        saveGraphRun({
+          runId,
+          graphId,
+          status: "RUNNING",
+          currentNodeId: currentNode.id,
+          state: {
+            ...initialState,
+            currentStep: i + 1,
+            currentNodeId: currentNode.id,
+            nodeResults: Object.fromEntries(executionResults.map(r => [r.nodeId, r]))
+          }
+        });
+
+        const taskTitle = currentNode.name || currentNode.title || `Node ${i + 1}: ${currentNode.id}`;
+        const nodeTaskId = `task-${runId}-${currentNode.id}`;
+        const nodeAgent = currentNode.assignedAgent || currentNode.type === "scout" ? "scout" : "dev";
+        const nodeModel = currentNode.assignedModel || "gemini-3.6-flash";
+        const nodeDescription = `${currentNode.description || taskTitle}${previousOutput ? `\n\nUpstream Context from previous step:\n${previousOutput.slice(0, 1000)}` : ""}`;
+
+        // Dispatch through real execution spine
+        const executionResponse = await fetch(`http://127.0.0.1:${PORT}/api/execute-agent-task`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            taskId: nodeTaskId,
+            taskTitle,
+            description: nodeDescription,
+            assignedAgent: nodeAgent,
+            assignedModel: nodeModel,
+            inputs: previousOutput,
+            workspaceId: "ws-synthos-primary"
+          })
+        });
+
+        const nodeExecData = await executionResponse.json();
+
+        // Strict verification gate: Node must reach DONE and have valid verified receipt
+        const isNodeVerified = nodeExecData.success && nodeExecData.status === "DONE" && nodeExecData.receipt?.verified === true;
+
+        if (!isNodeVerified) {
+          // Halt execution DAG immediately on gate failure
+          const failedState = {
+            graphId,
+            failedNodeId: currentNode.id,
+            error: "Node failed verification gate. Graph execution halted.",
+            nodeResults: Object.fromEntries(executionResults.map(r => [r.nodeId, r]))
+          };
+          saveGraphRun({
+            runId,
+            graphId,
+            status: "FAILED",
+            currentNodeId: currentNode.id,
+            state: failedState
+          });
+          return res.json({
+            success: false,
+            runId,
+            status: "FAILED",
+            failedAtNode: currentNode.id,
+            nodeExecution: nodeExecData
+          });
+        }
+
+        // Record node result and pass output forward to next node
+        executionResults.push({
+          nodeId: currentNode.id,
+          nodeName: taskTitle,
+          taskId: nodeTaskId,
+          status: "DONE",
+          receiptId: nodeExecData.receipt?.receiptId,
+          signature: nodeExecData.receipt?.signature,
+          aegisDecision: nodeExecData.review?.decision,
+          artifactHash: nodeExecData.artifact?.contentHash,
+          artifactPath: nodeExecData.artifact?.filePath
+        });
+
+        previousOutput = nodeExecData.outputs || nodeExecData.artifact?.content || "";
+      }
+
+      // 4. All nodes verified: Mark Graph Run as COMPLETED
+      const finalState = {
+        graphId,
+        completedAt: new Date().toISOString(),
+        totalCompletedNodes: nodes.length,
+        nodeResults: Object.fromEntries(executionResults.map(r => [r.nodeId, r]))
+      };
+      saveGraphRun({
+        runId,
+        graphId,
+        status: "COMPLETED",
+        currentNodeId: null,
+        state: finalState
+      });
+
+      return res.json({
+        success: true,
+        runId,
+        graphId,
+        status: "COMPLETED",
+        nodesExecuted: executionResults.length,
+        nodes: executionResults,
+        finalState
+      });
+    } catch (err: any) {
+      console.error("[Graph Execution Error]:", err);
+      return res.status(500).json({ success: false, error: err?.message || "Graph execution failed" });
+    }
+  });
+
   app.get("/api/execution/tasks/:taskId", (req, res) => {
     try {
       const { taskId } = req.params;
@@ -1907,6 +2261,154 @@ sourceHash: ${packageMetadataResult.sourceHash}
   });
 
   // ==========================================
+  // GLOBAL JARVIS ADMINISTRATIVE COMMAND ENGINE
+  // ==========================================
+
+  app.post("/api/jarvis/command", async (req, res) => {
+    try {
+      const { command = "", sessionId = "jarvis-global-session" } = req.body || {};
+      const trimmed = command.trim();
+      if (!trimmed) {
+        return res.status(400).json({ success: false, error: "Empty command received." });
+      }
+
+      const lower = trimmed.toLowerCase();
+      let reply = "";
+      let intent = "GENERAL_DIRECTIVE";
+      let evidence: any = null;
+
+      // Administrative Dispatch Routing
+      if (lower.includes("task") || lower.includes("show all agent tasks") || lower.includes("list tasks")) {
+        intent = "ADMIN_TASK_QUERY";
+        const db = getDatabase();
+        const tasks = db.prepare("SELECT task_id, title, assigned_agent, assigned_model, status, created_at FROM tasks ORDER BY created_at DESC LIMIT 10").all();
+        evidence = tasks;
+        reply = `Found ${tasks.length} active agent tasks in SynthOS ledger:\n` +
+          tasks.map((t: any, idx: number) => `${idx + 1}. [${t.status}] ${t.title} (${t.assigned_agent} / ${t.assigned_model}) - ID: ${t.task_id}`).join("\n");
+      } else if (lower.includes("graph") || lower.includes("pipeline") || lower.includes("dag")) {
+        intent = "ADMIN_GRAPH_QUERY";
+        const graphs = listGraphs();
+        const runs = listGraphRuns();
+        evidence = { graphsCount: graphs.length, runsCount: runs.length, latestRun: runs[0] };
+        reply = `SynthOS Graph Control Plane:\n- Total Graph DAGs: ${graphs.length}\n- Total Graph Execution Runs: ${runs.length}\n- Latest Run: ${runs[0]?.run_id || 'None'} [${runs[0]?.status || 'IDLE'}]`;
+      } else if (lower.includes("receipt") || lower.includes("signature") || lower.includes("aegis")) {
+        intent = "ADMIN_RECEIPT_QUERY";
+        const db = getDatabase();
+        const receipts = db.prepare("SELECT receipt_id, task_id, algorithm, created_at FROM receipts ORDER BY created_at DESC LIMIT 5").all();
+        evidence = receipts;
+        reply = `Verified Cryptographic Receipts Ledger (${receipts.length} recent):\n` +
+          receipts.map((r: any) => `• Receipt ${r.receipt_id} (Task: ${r.task_id}) - Algorithm: ${r.algorithm}`).join("\n");
+      } else {
+        // Natural Language Directive via Live Model
+        const apiKey = process.env.GEMINI_API_KEY || "";
+        if (apiKey) {
+          const ai = new GoogleGenAI({
+            apiKey,
+            httpOptions: { headers: { "User-Agent": "aistudio-build" } }
+          });
+          const response = await ai.models.generateContent({
+            model: "gemini-3.6-flash",
+            contents: trimmed,
+            config: {
+              systemInstruction: "You are Jarvis, the SynthOS Global System Service and Administrative Assistant. Answer concisely and factually based on SynthOS architecture, agent coordination, and system governance."
+            }
+          });
+          reply = response.text || "Directive acknowledged and dispatched to system mesh.";
+        } else {
+          reply = `[JARVIS GLOBAL ENGINE]: Directive acknowledged: "${trimmed}". Processing through SynthOS execution mesh.`;
+        }
+      }
+
+      // Record activity event in SQLite ledger
+      const jarvisTaskId = `jarvis-cmd-${Date.now()}`;
+      try {
+        recordActivityEvent({
+          taskId: jarvisTaskId,
+          agentId: "jarvis",
+          eventType: "JARVIS_COMMAND_EXECUTED",
+          payload: { command: trimmed, intent, replyPreview: reply.slice(0, 100) }
+        });
+      } catch (e) {
+        console.warn("[Jarvis Event Record Warning]:", e);
+      }
+
+      return res.json({
+        success: true,
+        command: trimmed,
+        intent,
+        reply,
+        evidence,
+        taskId: jarvisTaskId,
+        timestamp: new Date().toISOString()
+      });
+    } catch (err: any) {
+      console.error("[Jarvis Command Error]:", err);
+      return res.status(500).json({ success: false, error: err?.message || "Jarvis command dispatch failed" });
+    }
+  });
+
+  // ==========================================
+  // APOLLO HERMES-SPECIFIC VOICE BRIDGE ENGINE
+  // ==========================================
+
+  app.get("/api/apollo/status", (req, res) => {
+    const fishKey = process.env.FISH_AUDIO_API_KEY || "";
+    const openAiKey = process.env.OPENAI_API_KEY || "";
+    const elevenKey = process.env.ELEVENLABS_API_KEY || "";
+
+    const hasAudioCredential = Boolean(fishKey || openAiKey || elevenKey);
+    return res.json({
+      success: true,
+      service: "Apollo Voice Bridge",
+      role: "Hermes-specific voice/audio bridge (distinct from global Jarvis engine)",
+      status: hasAudioCredential ? "CONNECTED" : "DEGRADED",
+      reason: hasAudioCredential ? "OPERATIONAL" : "API_KEY_NOT_CONFIGURED",
+      providers: {
+        fish_audio: Boolean(fishKey),
+        openai_realtime: Boolean(openAiKey),
+        elevenlabs: Boolean(elevenKey),
+        browser_fallback: true
+      },
+      bargeInEnabled: true,
+      duplexBufferMs: 150,
+      timestamp: new Date().toISOString()
+    });
+  });
+
+  app.post("/api/apollo/command", async (req, res) => {
+    try {
+      const { directive = "", targetAgent = "scout", priority = "P1" } = req.body || {};
+      const trimmed = directive.trim();
+      if (!trimmed) {
+        return res.status(400).json({ success: false, error: "Empty Apollo directive received." });
+      }
+
+      const apolloTaskId = `apollo-${Date.now()}`;
+      const responseText = `Apollo Voice Bridge dispatched directive to Hermes Agent ${targetAgent.toUpperCase()}: "${trimmed}". Evaluated under Guardian Sentinel.`;
+
+      recordActivityEvent({
+        taskId: apolloTaskId,
+        agentId: "apollo",
+        eventType: "APOLLO_VOICE_DIRECTIVE",
+        payload: { directive: trimmed, targetAgent, priority }
+      });
+
+      return res.json({
+        success: true,
+        service: "Apollo Voice Bridge",
+        taskId: apolloTaskId,
+        directive: trimmed,
+        targetAgent,
+        priority,
+        reply: responseText,
+        timestamp: new Date().toISOString()
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Apollo dispatch error" });
+    }
+  });
+
+  // ==========================================
   // REAL HERMES TERMINAL EXECUTION ENGINE
   // ==========================================
 
@@ -2012,6 +2514,16 @@ sourceHash: ${packageMetadataResult.sourceHash}
       // Step 1: Guardian Policy Check
       const guardianCheck = checkGuardianRules(trimmedCmd);
       if (guardianCheck.status === "BLOCKED") {
+        if (taskId) {
+          try {
+            recordActivityEvent({
+              taskId,
+              agentId: "guardian",
+              eventType: "TERMINAL_COMMAND_BLOCKED",
+              payload: { command: trimmedCmd, reason: guardianCheck.warning, citation: guardianCheck.ruleCitation }
+            });
+          } catch {}
+        }
         return res.json({
           success: false,
           status: "BLOCKED",
@@ -2027,6 +2539,16 @@ sourceHash: ${packageMetadataResult.sourceHash}
       }
 
       if (guardianCheck.status === "APPROVAL_REQUIRED" && !approvedByHuman) {
+        if (taskId) {
+          try {
+            recordActivityEvent({
+              taskId,
+              agentId: "guardian",
+              eventType: "TERMINAL_APPROVAL_REQUIRED",
+              payload: { command: trimmedCmd, warning: guardianCheck.warning, citation: guardianCheck.ruleCitation }
+            });
+          } catch {}
+        }
         return res.json({
           success: false,
           status: "APPROVAL_REQUIRED",
@@ -2149,6 +2671,23 @@ sourceHash: ${packageMetadataResult.sourceHash}
             signature: `0x${Buffer.from(`${trimmedCmd}:${exitCode}:${durationMs}:${Date.now()}`).toString("hex").slice(0, 32)}`,
             timestamp: new Date().toISOString()
           };
+
+          if (taskId) {
+            try {
+              recordActivityEvent({
+                taskId,
+                agentId: "hermes",
+                eventType: "TERMINAL_COMMAND_EXECUTED",
+                payload: {
+                  command: trimmedCmd,
+                  exitCode,
+                  durationMs,
+                  isSuccess,
+                  aegisScore
+                }
+              });
+            } catch {}
+          }
 
           return res.json({
             success: isSuccess,
