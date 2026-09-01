@@ -1010,24 +1010,35 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       const startTime = Date.now();
 
       const apiKey = process.env.GEMINI_API_KEY || "";
+      if (!apiKey) {
+        return res.status(400).json({
+          success: false,
+          status: "BLOCKED",
+          reason: "BLOCKED_MISSING_CREDENTIAL",
+          error: "GEMINI_API_KEY environment variable is not configured on the server",
+          taskId
+        });
+      }
+
       let executionOutput = "";
       let modelUsed = assignedModel;
       let toolCalls: string[] = [];
+      let lastProviderError: string | null = null;
+      let hadProviderError = false;
 
       // Step 1: Execute tool/model logic based on role with Live Gemini Model
       const candidateModels = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.7-flash"];
       
-      if (apiKey) {
-        try {
-          const ai = new GoogleGenAI({
-            apiKey,
-            httpOptions: { headers: { "User-Agent": "aistudio-build" } },
-          });
+      try {
+        const ai = new GoogleGenAI({
+          apiKey,
+          httpOptions: { headers: { "User-Agent": "aistudio-build" } },
+        });
 
-          let rolePrompt = "";
-          if (assignedAgent === "scout") {
-            toolCalls = ["web_search_grounding", "rss_parser", "dom_inspector"];
-            rolePrompt = `You are the Hermes Scout Research Agent. Execute this task with real-world technical precision:
+        let rolePrompt = "";
+        if (assignedAgent === "scout") {
+          toolCalls = ["web_search_grounding", "rss_parser", "dom_inspector"];
+          rolePrompt = `You are the Hermes Scout Research Agent. Execute this task with real-world technical precision:
 TASK: "${taskTitle}"
 DESCRIPTION: "${description}"
 CONTEXT / SOURCE: "${sourceUrl || inputs}"
@@ -1037,9 +1048,9 @@ Produce structured intelligence findings in clean Markdown format:
 2. Discovered Architecture / Code Specifications
 3. Market & Developer Pain Points
 4. Actionable Next Steps for Dev & Scribe`;
-          } else if (assignedAgent === "dev") {
-            toolCalls = ["typescript_compiler", "docker_sandbox_runner", "latency_benchmarker"];
-            rolePrompt = `You are the Hermes Dev Systems Engineering Agent. Execute this engineering directive:
+        } else if (assignedAgent === "dev") {
+          toolCalls = ["typescript_compiler", "docker_sandbox_runner", "latency_benchmarker"];
+          rolePrompt = `You are the Hermes Dev Systems Engineering Agent. Execute this engineering directive:
 TASK: "${taskTitle}"
 DESCRIPTION: "${description}"
 INPUTS / REPO CONTEXT: "${inputs || sourceUrl}"
@@ -1049,9 +1060,9 @@ Produce a production-grade Technical Implementation Blueprint & Verification Spe
 2. Concrete Code Implementation / Schema Definition
 3. Execution Latency & Performance Profile (<50ms target)
 4. Automated Test Harness & Verification Criteria`;
-          } else if (assignedAgent === "reach") {
-            toolCalls = ["distribution_modeler", "viral_hook_generator", "seo_aeo_indexer"];
-            rolePrompt = `You are the Hermes Reach Growth & Distribution Agent. Execute this GTM directive:
+        } else if (assignedAgent === "reach") {
+          toolCalls = ["distribution_modeler", "viral_hook_generator", "seo_aeo_indexer"];
+          rolePrompt = `You are the Hermes Reach Growth & Distribution Agent. Execute this GTM directive:
 TASK: "${taskTitle}"
 DESCRIPTION: "${description}"
 
@@ -1060,9 +1071,9 @@ Produce a high-leverage Distribution & Go-To-Market Plan in Markdown:
 2. Generative Engine Optimization (GEO) & AEO Citation Strategy
 3. Viral Demo & Launch Mechanism
 4. Growth Metric Targets & Retention Loops`;
-          } else if (assignedAgent === "analytics") {
-            toolCalls = ["sql_telemetry_aggregator", "token_economics_calculator", "tam_matrix"];
-            rolePrompt = `You are the Hermes Analytics & Token Optimization Agent. Execute this analysis:
+        } else if (assignedAgent === "analytics") {
+          toolCalls = ["sql_telemetry_aggregator", "token_economics_calculator", "tam_matrix"];
+          rolePrompt = `You are the Hermes Analytics & Token Optimization Agent. Execute this analysis:
 TASK: "${taskTitle}"
 DESCRIPTION: "${description}"
 
@@ -1071,9 +1082,9 @@ Produce an analytical telemetry and unit economics breakdown in Markdown:
 2. Latency & Resource Utilization Breakdown
 3. Total Addressable Market (TAM) & Competitive Positioning
 4. Strategic Recommendations`;
-          } else if (assignedAgent === "scribe") {
-            toolCalls = ["obsidian_vault_writer", "wikilinks_mesh_generator", "markdown_compiler"];
-            rolePrompt = `You are the Hermes Scribe Knowledge Architect. Synthesize this task into an Obsidian Vault Memo:
+        } else if (assignedAgent === "scribe") {
+          toolCalls = ["obsidian_vault_writer", "wikilinks_mesh_generator", "markdown_compiler"];
+          rolePrompt = `You are the Hermes Scribe Knowledge Architect. Synthesize this task into an Obsidian Vault Memo:
 TASK: "${taskTitle}"
 DESCRIPTION: "${description}"
 
@@ -1082,9 +1093,9 @@ Produce a comprehensive Obsidian Knowledge Graph Document with at least 5 [[wiki
 2. Core Thesis & Technical Specifications
 3. Interconnected Knowledge Mesh ([[Architecture/Agentic-OS]], [[Aegis-Receipts/Verification]], etc.)
 4. Permanent Knowledge Base Takeaways`;
-          } else {
-            toolCalls = ["guardian_aegis_auditor", "cryptographic_signer", "board_db_committer"];
-            rolePrompt = `You are the Hermes Orchestrator Master Agent. Conduct an executive audit and sign-off:
+        } else {
+          toolCalls = ["guardian_aegis_auditor", "cryptographic_signer", "board_db_committer"];
+          rolePrompt = `You are the Hermes Orchestrator Master Agent. Conduct an executive audit and sign-off:
 TASK: "${taskTitle}"
 DESCRIPTION: "${description}"
 
@@ -1093,73 +1104,54 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
 2. Compliance with Permanent Operating Rules
 3. Guardian Aegis Verification Summary
 4. State Machine & Board.db State Transition`;
-          }
-
-          const modelQueue = [assignedModel, ...candidateModels].filter((v, i, a) => a.indexOf(v) === i && !v.includes("claude") && !v.includes("o3") && !v.includes("sonar"));
-          for (const m of (modelQueue.length > 0 ? modelQueue : candidateModels)) {
-            try {
-              const resp = await ai.models.generateContent({
-                model: m,
-                contents: rolePrompt,
-                config: { temperature: 0.2 }
-              });
-              if (resp?.text) {
-                executionOutput = resp.text;
-                modelUsed = m;
-                break;
-              }
-            } catch (e: any) {
-              console.warn(`[Agent Model Router] '${m}' failover:`, e?.message);
-            }
-          }
-        } catch (genErr: any) {
-          console.warn("[Agent Task GenAI Error]:", genErr?.message);
         }
+
+        const modelQueue = [assignedModel, ...candidateModels].filter((v, i, a) => a.indexOf(v) === i && !v.includes("claude") && !v.includes("o3") && !v.includes("sonar"));
+        const modelsToTry = modelQueue.length > 0 ? modelQueue : candidateModels;
+
+        for (const m of modelsToTry) {
+          try {
+            const resp = await ai.models.generateContent({
+              model: m,
+              contents: rolePrompt,
+              config: { temperature: 0.2 }
+            });
+            if (resp?.text && resp.text.trim().length > 0) {
+              executionOutput = resp.text;
+              modelUsed = m;
+              break;
+            }
+          } catch (e: any) {
+            hadProviderError = true;
+            lastProviderError = e?.message || String(e);
+            console.warn(`[Agent Model Router] '${m}' failover:`, lastProviderError);
+          }
+        }
+      } catch (genErr: any) {
+        hadProviderError = true;
+        lastProviderError = genErr?.message || String(genErr);
+        console.warn("[Agent Task GenAI Error]:", lastProviderError);
       }
 
-      // Fallback deterministic content if model is unavailable
+      // If provider execution failed or threw errors across all candidates
       if (!executionOutput) {
-        if (assignedAgent === "scout") {
-          toolCalls = ["web_search_grounding", "rss_parser", "dom_inspector"];
-          executionOutput = `### [SCOUT INTEL REPORT]: ${taskTitle}
-- **Status**: Live Discovery Completed
-- **Source Harvested**: ${sourceUrl || "Web & RSS Feed Stream"}
-- **Discovered Signals**: 14 technical specifications, 3 competitor benchmarks, 5 actionable integration vectors.
-- **Prerequisites Satisfied**: Data normalized into structured JSON pipeline ready for Scribe & Dev analysis.`;
-        } else if (assignedAgent === "dev") {
-          toolCalls = ["typescript_compiler", "docker_sandbox_runner", "latency_benchmarker"];
-          executionOutput = `### [DEV ENGINEERING SPEC & POC]: ${taskTitle}
-- **Runtime Environment**: Cloud Run Full-Stack Container (Node.js 22 + TypeScript 5.8)
-- **Sandbox Latency**: 42.8ms execution round-trip
-- **Tool Bindings**: Standardized async tool interfaces with structured error recovery
-- **Harness Verification**: Passed 12/12 unit and integration validation checks without regression.`;
-        } else if (assignedAgent === "reach") {
-          toolCalls = ["distribution_modeler", "viral_hook_generator", "seo_aeo_indexer"];
-          executionOutput = `### [REACH DISTRIBUTION & GTM STRATEGY]: ${taskTitle}
-- **Target ICP**: Full-Stack AI Engineers, Solopreneurs, and Swarm Architects
-- **AEO / GEO Strategy**: Optimized for Perplexity citation ranking and Google AI Overviews
-- **Viral Launch Hook**: "How we turned monolithic LLM prompts into a 6-agent autonomous operating system"
-- **Conversion Loop**: Interactive live demo → Obsidian knowledge vault export → self-hosted AgentOS.`;
-        } else if (assignedAgent === "analytics") {
-          toolCalls = ["sql_telemetry_aggregator", "token_economics_calculator", "tam_matrix"];
-          executionOutput = `### [ANALYTICS & TOKEN ECONOMICS REPORT]: ${taskTitle}
-- **Token Inference Optimization**: +31.4% efficiency via model arbitration
-- **Total Addressable Market (TAM)**: $4.2B Agentic Workflow & Autonomous Browser Infrastructure by 2027
-- **Unit Economics**: $0.0034 per fully audited workflow item.`;
-        } else if (assignedAgent === "scribe") {
-          toolCalls = ["obsidian_vault_writer", "wikilinks_mesh_generator", "markdown_compiler"];
-          executionOutput = `### [SCRIBE KNOWLEDGE VAULT MEMO]: [[Startup-Theses/${taskTitle.replace(/[^a-zA-Z0-9-]/g, "-")}]]
-- **Obsidian Path**: \`Startup-Theses/${taskTitle.replace(/[^a-zA-Z0-9-]/g, "-")}.md\`
-- **Bidirectional Wikilinks**: [[Architecture/Multi-Agent-Swarm]], [[Aegis-Receipts/Verification]], [[Models/Router]]
-- **Synthesis**: Comprehensive technical documentation compiled and indexed into Obsidian memory graph.`;
-        } else {
-          toolCalls = ["guardian_aegis_auditor", "cryptographic_signer", "board_db_committer"];
-          executionOutput = `### [ORCHESTRATOR EXECUTIVE SIGN-OFF]: ${taskTitle}
-- **Quality Audit**: 100% compliance with permanent operating rules
-- **Zero-Hallucination Gate**: Passed (Aegis Score: 98.6 / 100)
-- **State Machine Sync**: Committed state transition to board.db
-- **Cryptographic Signature**: \`sha256:0x9f8b4c2e1a7d6e5f3b2c1a0e8d7c6b5a4f3e2d1c\``;
+        if (hadProviderError && lastProviderError) {
+          return res.status(502).json({
+            success: false,
+            status: "FAILED",
+            reason: "MODEL_PROVIDER_UNAVAILABLE",
+            error: lastProviderError,
+            lastProviderError,
+            taskId
+          });
         }
+        return res.status(502).json({
+          success: false,
+          status: "FAILED",
+          reason: "EMPTY_PROVIDER_RESPONSE",
+          error: "Model provider returned an empty or unparseable response",
+          taskId
+        });
       }
 
       const elapsedMs = Date.now() - startTime;
