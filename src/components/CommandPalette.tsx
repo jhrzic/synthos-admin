@@ -178,6 +178,13 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       keywords: ['infrastructure', 'system', 'diagnostics', 'telemetry', 'health', 'vps']
     },
     { 
+      id: 'jarvis', 
+      label: 'Open Jarvis Executive Assistant', 
+      category: 'System', 
+      icon: <Sparkles className="w-4 h-4 text-[#FF5E8E]" />,
+      keywords: ['jarvis', 'assistant', 'executive', 'global assistant', 'ai', 'voice', 'hud', 'mind']
+    },
+    { 
       id: 'settings', 
       label: 'Open Settings', 
       category: 'System', 

@@ -2038,7 +2038,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
         onTriggerVoice={() => {
           setIsGlobalVoiceOpen(true);
         }}
-        onOpenFullJarvis={() => setActiveTab('hermes-apollo')}
+        onOpenFullJarvis={() => setActiveTab('jarvis')}
       />
 
       {/* Global Shared SynthOS Voice Overlay */}
@@ -2052,9 +2052,9 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
         onSendQuery={handleSendQuery}
         onAddKanbanTask={handleAddKanbanTask}
         onAddNoteToVault={(title, content, tags, folder) => handleAddNoteToVault(title, content, tags, folder || 'Voice-Directives')}
-        onOpenDedicatedApollo={() => {
+        onOpenFullJarvis={() => {
           setIsGlobalVoiceOpen(false);
-          setActiveTab('hermes-apollo');
+          setActiveTab('jarvis');
         }}
       />
 

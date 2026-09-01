@@ -19,7 +19,7 @@ interface GlobalVoiceOverlayProps {
   onSendQuery: (query: string, targetModel: string) => Promise<string>;
   onAddKanbanTask?: (task: Omit<KanbanTask, 'id' | 'createdAt' | 'updatedAt' | 'subtasks'>) => void;
   onAddNoteToVault?: (title: string, content: string, tags: string[], folder?: string) => void;
-  onOpenDedicatedApollo?: () => void;
+  onOpenFullJarvis?: () => void;
 }
 
 export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
@@ -32,7 +32,7 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
   onSendQuery,
   onAddKanbanTask,
   onAddNoteToVault,
-  onOpenDedicatedApollo,
+  onOpenFullJarvis,
 }) => {
   const [inputText, setInputText] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -247,17 +247,17 @@ Respond concisely in 1-2 spoken sentences with clear confirmation of action take
           </div>
 
           <div className="flex items-center gap-2">
-            {onOpenDedicatedApollo && (
+            {onOpenFullJarvis && (
               <button
                 onClick={() => {
                   onClose();
-                  onOpenDedicatedApollo();
+                  onOpenFullJarvis();
                 }}
                 className="px-3 py-1.5 rounded-lg bg-[#121424] hover:bg-[#1A1E36] text-[#A5A2FF] hover:text-white border border-[#242844] text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
-                title="Open full dedicated Apollo Voice workspace"
+                title="Open full Jarvis Executive Hub"
               >
-                <Radio className="w-3.5 h-3.5 text-[#FF5E8E]" />
-                <span className="hidden sm:inline">Apollo Voice Workspace</span>
+                <Sparkles className="w-3.5 h-3.5 text-[#EAB308]" />
+                <span className="hidden sm:inline">Jarvis Executive Hub</span>
                 <ExternalLink className="w-3 h-3" />
               </button>
             )}

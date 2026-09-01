@@ -156,6 +156,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
     {
       category: 'SYSTEM',
       items: [
+        { id: 'jarvis' as ActiveTab, label: 'Jarvis Executive Hub', icon: Sparkles, color: '#EAB308' },
         { id: 'model-router' as ActiveTab, label: 'Model Arbitration', icon: Sliders, color: '#38BDF8' },
         { id: 'hermes-mcps' as ActiveTab, label: 'MCP Registry', icon: Server, color: '#F59E0B' },
         { id: 'message-bridge' as ActiveTab, label: 'Integrations & Bridge', icon: Network, color: '#615EFF' },
