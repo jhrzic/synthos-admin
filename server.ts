@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 import os from "os";
 import fs from "fs";
+import crypto from "node:crypto";
 import { exec, spawn } from "child_process";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
@@ -14,6 +15,13 @@ import {
   recordQualityReview,
   getTaskQualityReviews,
   runDeterministicAegisVerification,
+  recordReceipt,
+  getTaskReceipts,
+  canonicalizePayload,
+  signReceiptPayload,
+  verifyReceiptSignature,
+  verifyReceipt,
+  CanonicalReceiptPayload,
   getTaskWithHistory, 
   getTaskActivityEvents, 
   getTaskArtifacts, 
@@ -1306,7 +1314,7 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
 
       // Handle Aegis verification decision according to specification
       if (aegisResult.decision === "VERIFIED") {
-        // Transition to AWAITING_RECEIPT (do NOT mark DONE yet)
+        // Transition to AWAITING_RECEIPT
         updateTaskStatus(taskId, "AWAITING_RECEIPT");
         recordActivityEvent({
           taskId,
@@ -1320,6 +1328,90 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
           },
           createdAt: nowIso
         });
+
+        // ---------------------------------------------------------------------
+        // Step 4 Execution Spine: Real Cryptographic Execution Receipt Signing
+        // ---------------------------------------------------------------------
+        const receiptId = `rcpt-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+        const canonicalPayload: CanonicalReceiptPayload = {
+          receiptId,
+          taskId,
+          reviewId: persistedReview.review_id,
+          workspaceId: req.body?.workspaceId || "ws-synthos-primary",
+          assignedAgent,
+          provider: "google-genai",
+          modelUsed,
+          artifactId: persistedArtifact.artifact_id,
+          artifactHash: persistedArtifact.content_hash,
+          aegisDecision: aegisResult.decision,
+          aegisMethod: aegisResult.method,
+          createdAt: nowIso
+        };
+
+        const canonicalPayloadStr = canonicalizePayload(canonicalPayload);
+        const { signature, publicKeyPem, algorithm, fingerprint } = signReceiptPayload(canonicalPayloadStr);
+
+        // Immediate cryptographic signature verification
+        const receiptVerificationPassed = verifyReceiptSignature(canonicalPayloadStr, signature, publicKeyPem);
+
+        if (receiptVerificationPassed) {
+          // Persist receipt in SQLite
+          recordReceipt({
+            receiptId,
+            taskId,
+            reviewId: persistedReview.review_id,
+            algorithm,
+            publicKey: publicKeyPem,
+            payloadJson: canonicalPayloadStr,
+            signature,
+            createdAt: nowIso
+          });
+
+          // Persist RECEIPT_CREATED activity event
+          recordActivityEvent({
+            taskId,
+            eventType: "RECEIPT_CREATED",
+            agentId: "guardian",
+            payload: {
+              receiptId,
+              algorithm,
+              fingerprint,
+              signature,
+              verified: true
+            },
+            createdAt: nowIso
+          });
+
+          // Transition task status to DONE
+          updateTaskStatus(taskId, "DONE");
+
+          // Persist TASK_COMPLETED activity event
+          recordActivityEvent({
+            taskId,
+            eventType: "TASK_COMPLETED",
+            agentId: assignedAgent,
+            payload: {
+              receiptId,
+              status: "DONE",
+              elapsedMs
+            },
+            createdAt: nowIso
+          });
+        } else {
+          // Signature verification failed
+          updateTaskStatus(taskId, "FAILED");
+          recordActivityEvent({
+            taskId,
+            eventType: "RECEIPT_VERIFICATION_FAILED",
+            agentId: "guardian",
+            payload: {
+              receiptId,
+              algorithm,
+              error: "Cryptographic signature verification failed on generated receipt"
+            },
+            createdAt: nowIso
+          });
+        }
       } else if (aegisResult.decision === "FAILED") {
         updateTaskStatus(taskId, "FAILED");
         recordActivityEvent({
@@ -1353,6 +1445,7 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
       const activityEvents = getTaskActivityEvents(taskId);
       const artifactsList = getTaskArtifacts(taskId);
       const reviewsList = getTaskQualityReviews(taskId);
+      const receiptsList = getTaskReceipts(taskId);
 
       // Real execution metrics from provider SDK metadata (or null if unavailable - no random/fabricated numbers)
       const realTokensConsumed = providerUsageMetadata?.totalTokenCount ?? providerUsageMetadata?.totalTokens ?? null;
@@ -1364,13 +1457,13 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
       };
 
       return res.json({
-        success: aegisResult.decision === "VERIFIED",
+        success: aegisResult.decision === "VERIFIED" && savedTask?.status === "DONE",
         taskId,
         status: savedTask?.status || "AWAITING_RECEIPT",
         outputs: executionOutput,
         claimedBy: `${assignedAgent.charAt(0).toUpperCase() + assignedAgent.slice(1)} Agent (${modelUsed})`,
         claimedAt: startTimeIso,
-        latestAction: `Provider finished in ${elapsedMs}ms. Artifact hashed (${persistedArtifact.content_hash}). Aegis decision: ${persistedReview.decision} (score: ${persistedReview.score ?? "null"}). Status: ${savedTask?.status}.`,
+        latestAction: `Provider finished in ${elapsedMs}ms. Artifact hashed (${persistedArtifact.content_hash}). Aegis decision: ${persistedReview.decision}. Receipts: ${receiptsList.length}. Status: ${savedTask?.status}.`,
         modelUsed,
         toolCalls,
         artifact: {
@@ -1394,11 +1487,25 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
           evidence: aegisResult.evidence,
           createdAt: persistedReview.created_at
         },
+        receipt: receiptsList[0] ? {
+          receiptId: receiptsList[0].receipt_id,
+          algorithm: receiptsList[0].algorithm,
+          publicKey: receiptsList[0].public_key,
+          signature: receiptsList[0].signature,
+          payload: JSON.parse(receiptsList[0].payload_json),
+          verified: verifyReceipt(receiptsList[0]),
+          createdAt: receiptsList[0].created_at
+        } : null,
         task: savedTask,
         statusHistory,
         activityEvents,
         artifacts: artifactsList,
         reviews: reviewsList,
+        receipts: receiptsList.map(r => ({
+          ...r,
+          payload: JSON.parse(r.payload_json),
+          verified: verifyReceipt(r)
+        })),
         executionMetrics
       });
     } catch (err: any) {
@@ -1503,6 +1610,25 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
       });
     } catch (err: any) {
       return res.status(500).json({ error: err?.message || "Failed to query quality reviews" });
+    }
+  });
+
+  app.get("/api/execution/tasks/:taskId/receipts", (req, res) => {
+    try {
+      const { taskId } = req.params;
+      const receipts = getTaskReceipts(taskId);
+      return res.json({
+        success: true,
+        taskId,
+        count: receipts.length,
+        receipts: receipts.map(r => ({
+          ...r,
+          payload: JSON.parse(r.payload_json),
+          verified: verifyReceipt(r)
+        }))
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || "Failed to query execution receipts" });
     }
   });
 

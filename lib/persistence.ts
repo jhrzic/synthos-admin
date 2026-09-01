@@ -54,6 +54,32 @@ export interface QualityReviewRecord {
   created_at: string;
 }
 
+export interface ReceiptRecord {
+  receipt_id: string;
+  task_id: string;
+  review_id: string;
+  algorithm: string;
+  public_key: string;
+  payload_json: string;
+  signature: string;
+  created_at: string;
+}
+
+export interface CanonicalReceiptPayload {
+  receiptId: string;
+  taskId: string;
+  reviewId: string;
+  workspaceId: string;
+  assignedAgent: string;
+  provider: string;
+  modelUsed: string;
+  artifactId: string;
+  artifactHash: string;
+  aegisDecision: string;
+  aegisMethod: string;
+  createdAt: string;
+}
+
 export interface AegisCheckResult {
   check: string;
   status: 'PASS' | 'FAIL';
@@ -125,6 +151,17 @@ export function getDatabase(): any {
         decision TEXT NOT NULL,
         checks_json TEXT NOT NULL,
         evidence_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS receipts (
+        receipt_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        review_id TEXT NOT NULL,
+        algorithm TEXT NOT NULL,
+        public_key TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        signature TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
     `);
@@ -577,3 +614,148 @@ export function runDeterministicAegisVerification(taskId: string, expectedOutput
     };
   }
 }
+
+// --------------------------------------------------------------------------
+// Real Cryptographic Key Management & Ed25519 Signing / Verification
+// --------------------------------------------------------------------------
+
+export function getSigningKeyDir(): string {
+  return process.env.SYNTHOS_SIGNING_KEY_DIR || path.join(process.cwd(), 'data', 'keys');
+}
+
+export function ensureSigningKeyPair(): { privateKeyPem: string; publicKeyPem: string; fingerprint: string } {
+  const keyDir = getSigningKeyDir();
+  const privPath = path.join(keyDir, 'ed25519_private.pem');
+  const pubPath = path.join(keyDir, 'ed25519_public.pem');
+
+  // If both exist on disk, read and reuse existing keys
+  if (fs.existsSync(privPath) && fs.existsSync(pubPath)) {
+    const privateKeyPem = fs.readFileSync(privPath, 'utf8');
+    const publicKeyPem = fs.readFileSync(pubPath, 'utf8');
+    const fingerprint = `sha256:${crypto.createHash('sha256').update(publicKeyPem).digest('hex')}`;
+    return { privateKeyPem, publicKeyPem, fingerprint };
+  }
+
+  // Ensure keys directory exists
+  if (!fs.existsSync(keyDir)) {
+    fs.mkdirSync(keyDir, { recursive: true });
+  }
+
+  // Generate durable Ed25519 keypair
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519', {
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+  });
+
+  fs.writeFileSync(privPath, privateKey, { encoding: 'utf8', mode: 0o600 });
+  fs.writeFileSync(pubPath, publicKey, { encoding: 'utf8', mode: 0o644 });
+
+  const fingerprint = `sha256:${crypto.createHash('sha256').update(publicKey).digest('hex')}`;
+  return { privateKeyPem: privateKey, publicKeyPem: publicKey, fingerprint };
+}
+
+export function getSigningPublicKey(): { publicKeyPem: string; fingerprint: string; algorithm: string } {
+  const { publicKeyPem, fingerprint } = ensureSigningKeyPair();
+  return { publicKeyPem, fingerprint, algorithm: 'Ed25519' };
+}
+
+export function canonicalizePayload(payload: CanonicalReceiptPayload | Record<string, any>): string {
+  const orderedKeys = Object.keys(payload).sort();
+  const orderedObj: Record<string, any> = {};
+  for (const key of orderedKeys) {
+    orderedObj[key] = (payload as any)[key];
+  }
+  return JSON.stringify(orderedObj);
+}
+
+export function signReceiptPayload(canonicalPayloadStr: string): { 
+  signature: string; 
+  publicKeyPem: string; 
+  algorithm: string; 
+  fingerprint: string;
+} {
+  const { privateKeyPem, publicKeyPem, fingerprint } = ensureSigningKeyPair();
+  const signatureBuffer = crypto.sign(null, Buffer.from(canonicalPayloadStr, 'utf8'), privateKeyPem);
+  const signature = signatureBuffer.toString('hex');
+  return {
+    signature,
+    publicKeyPem,
+    algorithm: 'Ed25519',
+    fingerprint
+  };
+}
+
+export function verifyReceiptSignature(
+  canonicalPayloadStr: string,
+  signature: string,
+  publicKeyPem: string
+): boolean {
+  try {
+    const signatureBuffer = Buffer.from(signature, 'hex');
+    return crypto.verify(
+      null,
+      Buffer.from(canonicalPayloadStr, 'utf8'),
+      publicKeyPem,
+      signatureBuffer
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function verifyReceipt(receipt: {
+  payload_json: string;
+  signature: string;
+  public_key: string;
+}): boolean {
+  return verifyReceiptSignature(receipt.payload_json, receipt.signature, receipt.public_key);
+}
+
+export function recordReceipt(params: {
+  receiptId?: string;
+  taskId: string;
+  reviewId: string;
+  algorithm: string;
+  publicKey: string;
+  payloadJson: string;
+  signature: string;
+  createdAt?: string;
+}): ReceiptRecord {
+  const db = getDatabase();
+  const receiptId = params.receiptId || `rcpt-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+  const nowIso = params.createdAt || new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO receipts (receipt_id, task_id, review_id, algorithm, public_key, payload_json, signature, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    receiptId,
+    params.taskId,
+    params.reviewId,
+    params.algorithm,
+    params.publicKey,
+    params.payloadJson,
+    params.signature,
+    nowIso
+  );
+
+  return {
+    receipt_id: receiptId,
+    task_id: params.taskId,
+    review_id: params.reviewId,
+    algorithm: params.algorithm,
+    public_key: params.publicKey,
+    payload_json: params.payloadJson,
+    signature: params.signature,
+    created_at: nowIso
+  };
+}
+
+export function getTaskReceipts(taskId: string): ReceiptRecord[] {
+  const db = getDatabase();
+  const rows = db.prepare(`
+    SELECT * FROM receipts WHERE task_id = ? ORDER BY created_at ASC
+  `).all(taskId);
+  return rows as ReceiptRecord[];
+}
+
