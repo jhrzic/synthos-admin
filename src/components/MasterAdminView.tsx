@@ -152,20 +152,20 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
 
   // Hermes Admin Live State
   const [hermesAdmin, setHermesAdmin] = useState({
-    installedVersion: 'v3.0.4',
-    latestVersion: 'v3.2.1',
-    updateAvailable: true,
-    releaseDate: '2026-08-28',
-    configVersion: 'v2.4.0',
-    configMigrationRequired: true,
-    gateway: 'CONNECTED (Port 3000 / Envoy Mesh)',
+    installedVersion: 'NOT_AVAILABLE',
+    latestVersion: 'NOT_AVAILABLE',
+    updateAvailable: false,
+    releaseDate: new Date().toISOString().split('T')[0],
+    configVersion: 'NOT_AVAILABLE',
+    configMigrationRequired: false,
+    gateway: 'NOT_CONNECTED',
     chat: 'OPERATIONAL (TUI + Slash Commands)',
     terminal: 'OPERATIONAL (Sandbox Container WASM)',
     apollo: 'OPERATIONAL (Full-Duplex Speech)',
     botMode: 'ACTIVE (4 Swarm Workers)',
     mobileSupport: 'ENABLED (PWA Touch Target Compliant)',
     desktopSupport: 'ENABLED (Hardware Accelerated Canvas)',
-    lastChecked: 'Just now',
+    lastChecked: 'Just now (15s poll)',
     isUpdating: false,
     updateApproved: false
   });
@@ -633,8 +633,12 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
               </span>
               <ArrowRight className="w-3.5 h-3.5 text-slate-400 group-hover:text-white transition-transform group-hover:translate-x-1" />
             </div>
-            <p className="text-xs font-bold text-slate-200">Hermes v3.2.1 Update Available</p>
-            <p className="text-[11px] text-slate-400">Installed: v3.0.4. Config migration required for multi-turn tool calling.</p>
+            <p className="text-xs font-bold text-slate-200">
+              {hermesAdmin.gateway === 'UP' ? `Hermes v${hermesAdmin.installedVersion}` : `Hermes Adapter: ${hermesAdmin.gateway}`}
+            </p>
+            <p className="text-[11px] text-slate-400">
+              {hermesAdmin.gateway === 'UP' ? `Connected runtime instance ${hermesAdmin.installedVersion}` : 'ADR-001 Hermes adapter health monitoring active (15s poll).'}
+            </p>
           </div>
 
           {/* Issue 2 */}

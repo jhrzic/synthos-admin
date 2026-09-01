@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ActiveTab } from '../types';
+import { useHermesHealth } from '../hooks/useHermesHealth';
 import {
   LayoutDashboard, MessageSquare, Terminal, Radio, Layers, Bot, Zap, Kanban,
   Cpu, Server, Code2, Clock, Globe, HardDrive, Database, FileCheck, Sparkles,
@@ -54,10 +55,10 @@ export const WorkspaceTopNav: React.FC<WorkspaceTopNavProps> = ({
   activeTab,
   setActiveTab,
   activeWorkspace,
-  gatewayStatus = { running: true, pid: 14092, uptimeSec: 18420, version: '4.2.0-hermes-core' }
 }) => {
   const [isMoreOpen, setIsMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement>(null);
+  const { health: hermesHealth } = useHermesHealth(15000);
 
   // Close dropdown on click outside
   useEffect(() => {
@@ -323,16 +324,39 @@ export const WorkspaceTopNav: React.FC<WorkspaceTopNavProps> = ({
 
           {/* Evidence-Based Status Pill */}
           <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[#121528] border border-[#222744] text-[10px] font-mono">
-            <span style={{ color: activeConfig.statusColor }}>●</span>
-            <span className="font-bold tracking-wider" style={{ color: activeConfig.statusColor }}>
-              {activeConfig.statusText}
-            </span>
-            {currentWorkspace === 'hermes' && (
+            {currentWorkspace === 'hermes' ? (
               <>
+                <span style={{ 
+                  color: hermesHealth.status === 'UP' ? '#00D26A' : 
+                         hermesHealth.status === 'DEGRADED' ? '#F59E0B' :
+                         hermesHealth.status === 'DOWN' ? '#EF4444' :
+                         hermesHealth.status === 'AUTH_ERROR' ? '#EF4444' : '#8E94B8' 
+                }}>●</span>
+                <span className="font-bold tracking-wider" style={{ 
+                  color: hermesHealth.status === 'UP' ? '#00D26A' : 
+                         hermesHealth.status === 'DEGRADED' ? '#F59E0B' :
+                         hermesHealth.status === 'DOWN' ? '#EF4444' :
+                         hermesHealth.status === 'AUTH_ERROR' ? '#EF4444' : '#8E94B8' 
+                }}>
+                  {hermesHealth.status}
+                </span>
                 <span className="text-[#454B72]">|</span>
-                <span className="text-[#8E94B8]">v{gatewayStatus.version}</span>
-                <span className="text-[#454B72]">|</span>
-                <span className="text-[#8E94B8]">PID:{gatewayStatus.pid}</span>
+                <span className="text-[#8E94B8]">
+                  v{hermesHealth.runtime_version}
+                </span>
+                {hermesHealth.runtime_instance_id !== 'NOT_AVAILABLE' && hermesHealth.runtime_instance_id !== 'UNKNOWN' && (
+                  <>
+                    <span className="text-[#454B72]">|</span>
+                    <span className="text-[#8E94B8]">ID:{hermesHealth.runtime_instance_id}</span>
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+                <span style={{ color: activeConfig.statusColor }}>●</span>
+                <span className="font-bold tracking-wider" style={{ color: activeConfig.statusColor }}>
+                  {activeConfig.statusText}
+                </span>
               </>
             )}
           </div>

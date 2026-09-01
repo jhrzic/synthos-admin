@@ -36,6 +36,7 @@ import {
   listGraphRuns,
   getDatabase
 } from "./lib/persistence";
+import { hermesAdapter } from "./src/services/hermesAdapter";
 
 dotenv.config();
 
@@ -2808,77 +2809,78 @@ sourceHash: ${packageMetadataResult.sourceHash}
     updateApproved: false
   };
 
-  app.get("/api/hermes/upstream-status", (req, res) => {
-    const isUpdateAvailable = hermesState.installedVersion !== hermesState.latestVersion;
-    
+  app.get("/api/hermes/health", async (req, res) => {
+    try {
+      const health = await hermesAdapter.health();
+      return res.json(health);
+    } catch (err: any) {
+      return res.status(500).json({
+        status: "UNKNOWN",
+        connectivity_status: "UNKNOWN",
+        auth_status: "UNKNOWN",
+        runtime_type: "hermes",
+        runtime_version: "NOT_AVAILABLE",
+        adapter_version: "1",
+        runtime_instance_id: "NOT_AVAILABLE",
+        capabilities_schema_version: "1",
+        process_alive: false,
+        gateway_alive: null,
+        timestamp: new Date().toISOString(),
+        error: err.message || "Unknown error executing HermesAdapter.health()"
+      });
+    }
+  });
+
+  app.get("/api/hermes/capabilities", async (req, res) => {
+    try {
+      const capabilities = await hermesAdapter.capabilities();
+      return res.json(capabilities);
+    } catch (err: any) {
+      return res.status(500).json({
+        adapter_schema_version: "1",
+        runtime_type: "hermes",
+        capabilities: {},
+        confirmed_at: new Date().toISOString(),
+        adapter_phase: 1,
+        error: err.message
+      });
+    }
+  });
+
+  app.get("/api/hermes/upstream-status", async (req, res) => {
+    const health = await hermesAdapter.health();
+    const isConnected = health.status === "UP";
+    const installedVersion = health.runtime_version !== "NOT_AVAILABLE" && health.runtime_version !== "UNKNOWN" 
+      ? health.runtime_version 
+      : "NOT_AVAILABLE";
+
     return res.json({
       success: true,
-      installedVersion: hermesState.installedVersion,
-      latestVersion: hermesState.latestVersion,
-      releaseDate: hermesState.releaseDate,
-      updateAvailable: isUpdateAvailable,
-      installedCommit: hermesState.installedCommit,
-      latestCommit: hermesState.latestCommit,
-      configVersion: hermesState.configVersion,
-      latestConfigVersion: hermesState.latestConfigVersion,
-      configMigrationRequired: hermesState.configMigrationRequired,
-      newFeatures: [
-        "Dynamic Multi-Agent Swarm routing (Orchestrator, Scout, Scribe, Reach, Dev, Analytics) with board.db state machine",
-        "OpenRouter model arbitration with fallback ladders and token budget caps",
-        "Strict JSON schema enforcement for tool-calling and function dispatch",
-        "Bidirectional Obsidian [[wikilink]] graph parsing and indexing",
-        "Sub-50ms local memory tree synchronization"
-      ],
-      newSettings: [
-        "TELEGRAM_POLL_INTERVAL_MS (default: 1500ms)",
-        "MAX_PARALLEL_AGENT_DIRECTIVES (default: 6 workers)",
-        "OPENROUTER_FALLBACK_ORDER (default: [\"nousresearch/hermes-3-llama-3.1-405b\", \"deepseek/deepseek-r1\", \"anthropic/claude-3.7-sonnet\"])",
-        "OBSIDIAN_VAULT_AUTO_INDEX (default: true)"
-      ],
-      deprecatedFeatures: [
-        "Legacy single-agent monolithic prompt engine (replaced by Swarm Orchestrator)",
-        "Unencrypted file-based IPC locks (replaced by board.db SQLite locks)"
-      ],
-      breakingChanges: [
-        "Strict typing on JSON board.db state transitions requires updated task payloads",
-        "Telegram thread routing identifiers require explicit 3-digit configurations (101-106)"
-      ],
-      desktopSupport: {
-        status: "AVAILABLE",
-        platforms: ["macOS (Apple Silicon & Intel)", "Linux (Ubuntu/Debian/Arch)", "Windows (WSL2)"],
-        details: "Native desktop execution with full local terminal subprocess execution and Obsidian vault sync."
-      },
-      mobileSupport: {
-        androidTermux: {
-          status: "AVAILABLE",
-          title: "Android / Termux",
-          details: "Full Python 3.11+ environment in Termux running Hermes CLI with SQLite board.db state machine and OpenRouter cloud routing.",
-          docsUrl: "https://github.com/NousResearch/hermes-agent/blob/main/docs/termux_android.md"
-        },
-        iosCompanion: {
-          status: "PLANNED",
-          title: "iOS Native Companion",
-          details: "Native Swift/SwiftUI mobile client currently in architectural design; Telegram Bot thread mesh (#orchestrator-bridge, #scout-intel) is fully supported on iOS.",
-          docsUrl: "https://github.com/NousResearch/hermes-agent#mobile-telegram-mesh"
-        },
-        remoteDashboard: {
-          status: "AVAILABLE",
-          title: "Remote Dashboard / Mobile Web",
-          details: "Responsive mobile web application / PWA with full Mission Control, Kanban, and real shell terminal access via reverse proxy.",
-          docsUrl: "https://github.com/NousResearch/hermes-agent#remote-dashboard"
-        }
-      },
-      gatewayStatus: "ONLINE",
-      lastChecked: hermesState.lastChecked,
-      scheduledCheckInterval: "DAILY",
+      status: health.status,
+      connectivity_status: health.connectivity_status,
+      auth_status: health.auth_status,
+      installedVersion: installedVersion,
+      latestVersion: isConnected ? installedVersion : "NOT_AVAILABLE",
+      releaseDate: health.timestamp,
+      updateAvailable: false,
+      installedCommit: health.runtime_instance_id,
+      latestCommit: isConnected ? health.runtime_instance_id : "NOT_AVAILABLE",
+      configVersion: isConnected ? "v1" : "NOT_AVAILABLE",
+      latestConfigVersion: isConnected ? "v1" : "NOT_AVAILABLE",
+      configMigrationRequired: false,
+      processAlive: health.process_alive,
+      gatewayAlive: health.gateway_alive,
+      gatewayStatus: health.status,
+      lastChecked: health.timestamp,
+      scheduledCheckInterval: "15s (ADR-001)",
       upstreamRepo: "https://github.com/NousResearch/hermes-agent",
-      upstreamDocs: "https://asadtinkers.com/guides/hermes-agentos-mission-control-dashboard/",
+      upstreamDocs: "docs/adr-001-hermes-adapter-governance.md",
       commandsSupported: [
-        "hermes update",
-        "hermes config check",
-        "hermes config migrate"
+        "health()",
+        "capabilities()"
       ],
-      timestamp: new Date().toISOString()
+      timestamp: health.timestamp,
+      error: health.error
     });
   });
 

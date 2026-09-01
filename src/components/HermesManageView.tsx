@@ -78,35 +78,30 @@ export const HermesManageView: React.FC<HermesManageViewProps> = ({
 
   // Hermes Upstream Watcher State
   const [upstreamData, setUpstreamData] = useState<HermesUpstreamData>({
-    installedVersion: 'v3.0.4',
-    latestVersion: 'v3.2.1',
-    releaseDate: '2026-08-28T14:30:00Z',
-    updateAvailable: true,
-    installedCommit: '7f8a92c',
-    latestCommit: '9e41b80',
-    configVersion: 'v2.4.0',
-    latestConfigVersion: 'v2.5.0',
-    configMigrationRequired: true,
+    installedVersion: 'NOT_AVAILABLE',
+    latestVersion: 'NOT_AVAILABLE',
+    releaseDate: new Date().toISOString(),
+    updateAvailable: false,
+    installedCommit: 'NOT_AVAILABLE',
+    latestCommit: 'NOT_AVAILABLE',
+    configVersion: 'NOT_AVAILABLE',
+    latestConfigVersion: 'NOT_AVAILABLE',
+    configMigrationRequired: false,
     newFeatures: [
-      'Dynamic Multi-Agent Swarm routing (Orchestrator, Scout, Scribe, Reach, Dev, Analytics) with board.db state machine',
-      'OpenRouter model arbitration with fallback ladders and token budget caps',
-      'Strict JSON schema enforcement for tool-calling and function dispatch',
-      'Bidirectional Obsidian [[wikilink]] graph parsing and indexing',
-      'Sub-50ms local memory tree synchronization'
+      'Hermes Adapter Governance Protocol (ADR-001 Phase 1)',
+      'Strict health check contract (GET /synthos/health) with 5s timeout',
+      'Authoritative capability schema discovery'
     ],
     newSettings: [
-      'TELEGRAM_POLL_INTERVAL_MS (default: 1500ms)',
-      'MAX_PARALLEL_AGENT_DIRECTIVES (default: 6 workers)',
-      'OPENROUTER_FALLBACK_ORDER (default: ["nousresearch/hermes-3-llama-3.1-405b", "deepseek/deepseek-r1", "anthropic/claude-3.7-sonnet"])',
-      'OBSIDIAN_VAULT_AUTO_INDEX (default: true)'
+      'HERMES_ADAPTER_BASE_URL',
+      'HERMES_ADAPTER_TOKEN'
     ],
     deprecatedFeatures: [
-      'Legacy single-agent monolithic prompt engine (replaced by Swarm Orchestrator)',
-      'Unencrypted file-based IPC locks (replaced by board.db SQLite locks)'
+      'Un-sandboxed execution paths',
+      'Simulated mock gateway indicators'
     ],
     breakingChanges: [
-      'Strict typing on JSON board.db state transitions requires updated task payloads',
-      'Telegram thread routing identifiers require explicit 3-digit configurations (101-106)'
+      'Health endpoint contract requires Authorization: Bearer token and JSON schema v1'
     ],
     desktopSupport: {
       status: 'AVAILABLE',
@@ -133,15 +128,14 @@ export const HermesManageView: React.FC<HermesManageViewProps> = ({
         docsUrl: 'https://github.com/NousResearch/hermes-agent#remote-dashboard'
       }
     },
-    gatewayStatus: 'ONLINE',
+    gatewayStatus: 'NOT_CONNECTED',
     lastChecked: new Date().toISOString(),
-    scheduledCheckInterval: 'DAILY',
+    scheduledCheckInterval: '15s (ADR-001)',
     upstreamRepo: 'https://github.com/NousResearch/hermes-agent',
-    upstreamDocs: 'https://asadtinkers.com/guides/hermes-agentos-mission-control-dashboard/',
+    upstreamDocs: 'docs/adr-001-hermes-adapter-governance.md',
     commandsSupported: [
-      'hermes update',
-      'hermes config check',
-      'hermes config migrate'
+      'health()',
+      'capabilities()'
     ]
   });
 
@@ -150,18 +144,20 @@ export const HermesManageView: React.FC<HermesManageViewProps> = ({
   const [isUpgrading, setIsUpgrading] = useState(false);
   const [isMigratingConfig, setIsMigratingConfig] = useState(false);
   const [showApprovalModal, setShowApprovalModal] = useState(false);
-  const [cliOutput, setCliOutput] = useState<string>('[HERMES WATCHER]: Initialized daily upstream synchronization daemon.');
+  const [cliOutput, setCliOutput] = useState<string>('[HERMES ADAPTER]: Initialized ADR-001 Hermes runtime health polling daemon.');
   const [connectionPings, setConnectionPings] = useState<Record<string, 'online' | 'offline' | 'pending'>>({
-    'telegram': 'online',
-    'discord': 'online',
-    'openrouter': 'online',
-    'obsidian': 'online',
-    'airbyte': 'online'
+    'telegram': 'offline',
+    'discord': 'offline',
+    'openrouter': 'offline',
+    'obsidian': 'offline',
+    'airbyte': 'offline'
   });
 
-  // Fetch real upstream status on mount
+  // Fetch real upstream status on mount and poll every 15s (ADR-001 mandate)
   useEffect(() => {
     fetchUpstreamStatus();
+    const interval = setInterval(fetchUpstreamStatus, 15000);
+    return () => clearInterval(interval);
   }, []);
 
   const fetchUpstreamStatus = async () => {

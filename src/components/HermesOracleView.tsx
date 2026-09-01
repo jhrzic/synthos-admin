@@ -35,24 +35,32 @@ export const HermesOracleView: React.FC<HermesOracleViewProps> = ({
   const activeAgent = memoryStatuses.find(m => m.agentKey === selectedAgentKey) || memoryStatuses[0];
   const agentDetails = agents[selectedAgentKey] || Object.values(agents)[0];
 
-  const handleTriggerSignalScan = () => {
+  const handleTriggerSignalScan = async () => {
     setIsScanning(true);
-    setScanMessage('Transmitting live health ping across all 15 agent nodes and OpenRouter gateway...');
-    setTimeout(() => {
+    setScanMessage('Transmitting live health ping across adapter and runtime nodes...');
+    const startTime = Date.now();
+    try {
+      const res = await fetch('/api/hermes/health');
+      const health = await res.json().catch(() => ({ status: 'UNKNOWN' }));
+      const latency = Date.now() - startTime;
+      
       setMemoryStatuses(prev => prev.map(m => ({
         ...m,
         lastIndexed: 'Just now',
-        signalHealth: Math.min(100, Math.max(96, Number((98 + Math.random() * 2).toFixed(1)))),
+        signalHealth: health.status === 'UP' ? 100 : 0,
         signalTelemetry: {
           ...m.signalTelemetry,
-          latencyMs: Math.floor(65 + Math.random() * 50),
-          tokensPerSec: Math.floor(95 + Math.random() * 40)
+          latencyMs: latency,
+          openRouterState: health.status === 'UP' ? 'ONLINE' : 'DEGRADED'
         }
       })));
+      setScanMessage(`Runtime audit complete (${latency}ms). Status: ${health.status}.`);
+    } catch (err: any) {
+      setScanMessage(`Runtime scan completed with status: NOT_CONNECTED`);
+    } finally {
       setIsScanning(false);
-      setScanMessage('All 15 neural agent nodes reporting OPTIMAL status. 0 packet drops.');
       setTimeout(() => setScanMessage(null), 4000);
-    }, 1200);
+    }
   };
 
   const handleTestAgentSignal = async (key: string) => {

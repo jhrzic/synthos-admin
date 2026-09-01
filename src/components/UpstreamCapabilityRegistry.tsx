@@ -29,23 +29,22 @@ export const UpstreamCapabilityRegistry: React.FC<{
   const [registryItems, setRegistryItems] = useState<RegistryItem[]>([
     {
       id: 'hermes',
-      name: 'Nous Hermes Swarm OS',
+      name: 'Nous Hermes Runtime Adapter',
       category: 'agent',
-      currentVersion: 'v3.0.4',
-      latestVersion: 'v3.2.0',
-      status: 'UPDATE_AVAILABLE',
+      currentVersion: 'NOT_AVAILABLE',
+      latestVersion: 'NOT_AVAILABLE',
+      status: 'WATCHING',
       icon: Crown,
       color: '#EC4899',
-      lastChecked: '2 hours ago',
-      description: 'Unified swarm coordination protocol with active board.db Kanban state transition mechanisms and structured memory loops.',
+      lastChecked: 'Just now (15s poll)',
+      description: 'ADR-001 Hermes adapter governance layer with strict health check protocol (GET /synthos/health) and capability discovery.',
       capabilities: [
-        'Dynamic Multi-Agent Swarm routing (Orchestrator, Scout, Scribe, Reach, Dev, Analytics)',
-        'Sub-50ms local memory tree synchronizations',
-        'Direct bidirectional Obsidian [[wikilink]] graph parsing'
+        'Hermes Runtime Health Check Protocol (GET /synthos/health)',
+        'Authoritative Capability Introspection Schema v1',
+        'Strict 5000ms AbortSignal Timeout & State Mapping'
       ],
       breakingChanges: [
-        'API v3.2.x enforces strict typing on the JSON board state schema.',
-        'Telegram thread routing identifiers require explicit 3-digit configurations.'
+        'Requires Authorization: Bearer <HERMES_ADAPTER_TOKEN> for operational telemetry.'
       ],
       githubUrl: 'https://github.com/NousResearch/hermes-agent'
     },

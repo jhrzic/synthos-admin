@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ActiveTab } from '../types';
+import { useHermesHealth } from '../hooks/useHermesHealth';
 import {
   LayoutDashboard, MessageSquare, Terminal, Radio, Layers, Bot, Zap, Kanban,
   Cpu, Server, Code2, Clock, Globe, HardDrive, Database, FileCheck, Sparkles,
@@ -10,12 +11,6 @@ import {
 interface HermesTopNavProps {
   activeTab: ActiveTab;
   setActiveTab: (tab: ActiveTab) => void;
-  gatewayStatus?: {
-    running: boolean;
-    pid: number;
-    uptimeSec: number;
-    version: string;
-  };
 }
 
 interface NavItem {
@@ -31,10 +26,10 @@ interface NavItem {
 export const HermesTopNav: React.FC<HermesTopNavProps> = ({
   activeTab,
   setActiveTab,
-  gatewayStatus = { running: true, pid: 14092, uptimeSec: 18420, version: '4.2.0-hermes-core' }
 }) => {
   const [isMoreOpen, setIsMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement>(null);
+  const { health } = useHermesHealth(15000);
 
   // Close dropdown on click outside
   useEffect(() => {
@@ -93,11 +88,31 @@ export const HermesTopNav: React.FC<HermesTopNavProps> = ({
             <div className="w-2.5 h-2.5 rounded-full bg-[#615EFF] shadow-[0_0_10px_#615EFF] animate-pulse" />
             <span className="text-xs font-bold text-white tracking-wider font-['Space_Grotesk']">HERMES AGENTOS</span>
           </div>
-          <div className="hidden sm:flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[#121528] border border-[#222744] text-[10px] font-mono text-[#8E94B8]">
-            <span className="text-[#00D26A]">●</span>
-            <span>v{gatewayStatus.version}</span>
+          <div className="hidden sm:flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[#121528] border border-[#222744] text-[10px] font-mono">
+            <span style={{ 
+              color: health.status === 'UP' ? '#00D26A' : 
+                     health.status === 'DEGRADED' ? '#F59E0B' :
+                     health.status === 'DOWN' ? '#EF4444' :
+                     health.status === 'AUTH_ERROR' ? '#EF4444' : '#8E94B8' 
+            }}>●</span>
+            <span className="font-bold tracking-wider" style={{ 
+              color: health.status === 'UP' ? '#00D26A' : 
+                     health.status === 'DEGRADED' ? '#F59E0B' :
+                     health.status === 'DOWN' ? '#EF4444' :
+                     health.status === 'AUTH_ERROR' ? '#EF4444' : '#8E94B8' 
+            }}>
+              {health.status}
+            </span>
             <span className="text-[#454B72]">|</span>
-            <span>PID:{gatewayStatus.pid}</span>
+            <span className="text-[#8E94B8]">
+              v{health.runtime_version}
+            </span>
+            {health.runtime_instance_id !== 'NOT_AVAILABLE' && health.runtime_instance_id !== 'UNKNOWN' && (
+              <>
+                <span className="text-[#454B72]">|</span>
+                <span className="text-[#8E94B8]">ID:{health.runtime_instance_id}</span>
+              </>
+            )}
           </div>
         </div>
 

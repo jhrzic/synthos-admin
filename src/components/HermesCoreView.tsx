@@ -90,37 +90,30 @@ export const HermesCoreView: React.FC<HermesCoreViewProps> = ({
     }
   ]);
 
-  const [isSimulatingUpdate, setIsSimulatingUpdate] = useState(false);
+  const [isRefreshingTelemetry, setIsRefreshingTelemetry] = useState(false);
 
-  const triggerSimulatedUpdate = () => {
-    setIsSimulatingUpdate(true);
-    setTimeout(() => {
-      const systems = ['Claude Code SDK', 'Gemini Flash 3.6', 'SynthOS Core Memory', 'Obsidian Sync Daemon', 'Guardian Sentinel'];
-      const features = ['File Buffering', 'Function Calling v2', 'Vector Pruning', 'Local Attachment Watcher', 'RBAC Token Checking'];
-      const statuses: Array<'NEW' | 'UPDATED' | 'DEPRECATED' | 'BREAKING'> = ['NEW', 'UPDATED', 'DEPRECATED', 'BREAKING'];
-      const severities: Array<'low' | 'medium' | 'high' | 'critical'> = ['low', 'medium', 'high', 'critical'];
-      const messages = [
-        'Added lazy load caching for nested project modules to save token overhead.',
-        'Refined JSON output schema matching to strictly enforce type constraints on artifacts.',
-        'Deprecating older 16k context fallback routes to prevent silent degradation.',
-        'Breaking changes in downstream file watchers; local folder permissions modified.',
-        'Optimized multi-agent sync locks to prevent race conditions during parallel run executions.'
-      ];
-
-      const rIndex = Math.floor(Math.random() * messages.length);
-      const newAlert = {
-        id: `alert-dyn-${Date.now()}`,
-        system: systems[Math.floor(Math.random() * systems.length)],
-        feature: features[Math.floor(Math.random() * features.length)],
-        status: statuses[Math.floor(Math.random() * statuses.length)],
-        message: messages[rIndex],
-        timestamp: 'Just now (Simulated)',
-        severity: severities[Math.floor(Math.random() * severities.length)]
-      };
-
-      setSystemAlerts(prev => [newAlert, ...prev]);
-      setIsSimulatingUpdate(false);
-    }, 800);
+  const refreshTelemetry = async () => {
+    setIsRefreshingTelemetry(true);
+    try {
+      const res = await fetch('/api/hermes/health');
+      if (res.ok) {
+        const health = await res.json();
+        const newAlert = {
+          id: `alert-diag-${Date.now()}`,
+          system: 'Hermes Adapter (ADR-001)',
+          feature: 'Health Contract Telemetry',
+          status: (health.status === 'UP' ? 'UPDATED' : 'BREAKING') as 'NEW' | 'UPDATED' | 'DEPRECATED' | 'BREAKING',
+          message: `Runtime connectivity status: ${health.status}. Instance ID: ${health.runtime_instance_id}. Process: ${health.process_alive ? 'ALIVE' : 'INACTIVE'}.`,
+          timestamp: 'Just now',
+          severity: (health.status === 'UP' ? 'low' : 'high') as 'low' | 'medium' | 'high' | 'critical'
+        };
+        setSystemAlerts(prev => [newAlert, ...prev.slice(0, 7)]);
+      }
+    } catch (err: any) {
+      console.warn('Telemetry refresh failed:', err);
+    } finally {
+      setIsRefreshingTelemetry(false);
+    }
   };
 
   // Active execution timeline state for current command
@@ -423,12 +416,12 @@ export const HermesCoreView: React.FC<HermesCoreViewProps> = ({
                   <h3 className="text-sm font-bold text-white uppercase tracking-wider">System Update Watcher</h3>
                 </div>
                 <button
-                  onClick={triggerSimulatedUpdate}
-                  disabled={isSimulatingUpdate}
-                  className="text-[10px] bg-[#121528] border border-[#222644] text-white hover:border-[#38BDF8] px-2 py-1 rounded transition select-none flex items-center gap-1.5"
+                  onClick={refreshTelemetry}
+                  disabled={isRefreshingTelemetry}
+                  className="text-[10px] bg-[#121528] border border-[#222644] text-white hover:border-[#38BDF8] px-2 py-1 rounded transition select-none flex items-center gap-1.5 cursor-pointer"
                 >
-                  <RefreshCw className={`w-2.5 h-2.5 ${isSimulatingUpdate ? 'animate-spin' : ''}`} />
-                  {isSimulatingUpdate ? 'SCANNING...' : 'TRIGGER UPDATE'}
+                  <RefreshCw className={`w-2.5 h-2.5 ${isRefreshingTelemetry ? 'animate-spin' : ''}`} />
+                  {isRefreshingTelemetry ? 'CHECKING...' : 'REFRESH HEALTH'}
                 </button>
               </div>
 
