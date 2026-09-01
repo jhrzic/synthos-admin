@@ -5,3 +5,10 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# SynthOS Runtime & Database
+data/*.db
+data/*.db-*
+data/keys/
+data/runtime/
+vault/Startup-Theses/Read-SynthOS-Admin-package-version.md
