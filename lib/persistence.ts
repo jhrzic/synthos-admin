@@ -484,22 +484,32 @@ export function runDeterministicAegisVerification(taskId: string, expectedOutput
       });
     }
 
-    // 7. Status history contains TODO, READY, RUNNING, AWAITING_VERIFICATION
+    // 7. Status history contains TODO, READY, RUNNING, AWAITING_VERIFICATION in chronological order
     const historyStatuses = statusHistory.map(s => s.status);
-    const requiredStatuses = ["TODO", "READY", "RUNNING", "AWAITING_VERIFICATION"];
-    const missingStatuses = requiredStatuses.filter(st => !historyStatuses.includes(st));
-    if (missingStatuses.length === 0) {
+    const requiredSequence = ["TODO", "READY", "RUNNING", "AWAITING_VERIFICATION"];
+    
+    let seqIdx = 0;
+    for (const st of historyStatuses) {
+      if (st === requiredSequence[seqIdx]) {
+        seqIdx++;
+        if (seqIdx === requiredSequence.length) {
+          break;
+        }
+      }
+    }
+
+    if (seqIdx === requiredSequence.length) {
       checks.push({
         check: "status_history_sequence",
         status: "PASS",
-        evidence: `Task transitioned through all required statuses: [${historyStatuses.join(" -> ")}]`
+        evidence: `Task transitioned through required statuses in chronological order: [${requiredSequence.join(" -> ")}]. Full history: [${historyStatuses.join(" -> ")}]`
       });
       evidence.statusHistory = historyStatuses;
     } else {
       checks.push({
         check: "status_history_sequence",
         status: "FAIL",
-        evidence: `Status history missing required states: [${missingStatuses.join(", ")}]. Found: [${historyStatuses.join(", ")}]`
+        evidence: `Status history violates required chronological sequence [${requiredSequence.join(" -> ")}]. Next expected status was '${requiredSequence[seqIdx]}'. Found history: [${historyStatuses.join(" -> ")}]`
       });
       evidence.statusHistory = historyStatuses;
     }

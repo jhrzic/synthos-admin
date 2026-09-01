@@ -1086,7 +1086,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       let providerUsageMetadata: any = null;
 
       // Step 1: Execute tool/model logic based on role with Live Gemini Model
-      const candidateModels = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.7-flash"];
+      const candidateModels = ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-3.7-flash", "gemini-3.1-pro-preview"];
       
       try {
         const ai = new GoogleGenAI({
