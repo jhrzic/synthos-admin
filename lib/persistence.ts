@@ -713,7 +713,7 @@ export function verifyReceipt(receipt: {
     const trustedKeyInfo = getSigningPublicKey();
 
     // 1. Confirm algorithm === "Ed25519"
-    if (receipt.algorithm && receipt.algorithm !== 'Ed25519') {
+    if (receipt.algorithm !== 'Ed25519') {
       return false;
     }
 
