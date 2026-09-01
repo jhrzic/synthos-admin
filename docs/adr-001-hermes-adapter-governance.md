@@ -10,18 +10,23 @@
 
 ---
 
-## 1. Context & Objectives
-SynthOS Admin (`synthos-admin`) is the canonical administrative control plane for the SynthOS multi-agent operating system. It governs multiple independent agent and runtime workspaces, including Nous Hermes, Claude Code, Gemini, OpenAI Codex, Cursor, and custom swarm engines.
+## 1. Context & Architecture Baseline
+SynthOS Admin (`synthos-admin`) is the canonical administrative control plane for the SynthOS multi-agent operating system. It governs independent agent and runtime workspaces including Hermes, Claude, Gemini, Codex, Cursor, and Orchestrator.
 
-Prior to ADR-001, legacy prototypes introduced fragmented sub-apps, unverified mock metrics, and un-sandboxed execution assumptions. This Architecture Decision Record (ADR) defines the formal adapter governance protocol, architectural boundaries, strict health contracts, and phased integration requirements for the Hermes runtime workspace within SynthOS Admin.
+This ADR defines the formal adapter governance protocol, architectural boundaries, strict health contracts, and security rules for the Hermes runtime workspace within SynthOS Admin.
 
 ---
 
-## 2. Architectural Decision & Host Topology
-1. **Host Control Plane**: `synthos-admin` serves as the authoritative administrative control layer.
+## 2. Architectural Boundaries & Top-Level Invariants
+1. **Host Control Plane**: `synthos-admin` is the authoritative host and administrative control layer.
 2. **Independent Workspace**: Hermes operates as an independent runtime workspace governed within the unified single-pane shell.
-3. **Global Services Isolation**: Global systems such as Jarvis HUD, Guardian Sentinel, and Aegis Governance remain global system-level services and are not siloed into or owned by any individual workspace.
+3. **Global Services Isolation**: Global systems such as Jarvis HUD, Guardian Sentinel, and Aegis Governance remain global system-level services and are not owned by or siloed into Hermes or any individual workspace.
 4. **No Legacy Product Silos**: The legacy Mission Control product silo is deprecated and maintained for reference only.
+5. **Memory & Context Invariant**:
+   - Memory integration is strictly **one-way and read-only**.
+   - SynthOS never writes into Hermes memory.
+   - Context flows to Hermes **only through `execute()` task context**.
+   - **Bidirectional sync is strictly PROHIBITED.**
 
 ---
 
@@ -80,7 +85,7 @@ The adapter communicates with the Hermes runtime via `GET /synthos/health`.
 
 ---
 
-## 5. Phased Execution Roadmap
+## 5. Phased Integration Roadmap
 
 ### Phase 1: Governance, Telemetry, and Contract Enforcement
 - Implement `IHermesAdapter` in `src/services/hermesAdapter.ts`.
@@ -93,7 +98,8 @@ The adapter communicates with the Hermes runtime via `GET /synthos/health`.
 ### Phase 2: Execution Protocol & Streaming Event Hooks
 - Implement full `execute()` payload dispatch with task state transitions.
 - Implement `events()` Server-Sent Events (SSE) / WebSocket multiplexing.
-- Connect bidirectional Obsidian vault syncing and multi-agent DAG task dispatch.
+- Multi-agent DAG task dispatch.
+- Maintain strict one-way read-only memory governance: Context flows to Hermes only via `execute()` task context; bidirectional memory/vault syncing remains prohibited.
 
 ---
 
