@@ -51,7 +51,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
       if (saved) return JSON.parse(saved);
     } catch {}
     return {
-      'MISSION CONTROL': true,
+      'OPERATIONS': true,
       'WORKSPACES': true,
       'BUILD': true,
       'KNOWLEDGE': true,
@@ -60,16 +60,6 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
       'SYSTEM': false,
       'MASTER ADMIN': true,
     };
-  });
-
-  // Nested Hermes sub-menu expand state
-  const [isHermesExpanded, setIsHermesExpanded] = useState<boolean>(() => {
-    try {
-      const saved = localStorage.getItem('synthos_nav_hermes_expanded');
-      return saved !== null ? JSON.parse(saved) : false;
-    } catch {
-      return false;
-    }
   });
 
   const [isMobileOpen, setIsMobileOpen] = useState<boolean>(false);
@@ -90,14 +80,6 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
     }
   }, [expandedSections]);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem('synthos_nav_hermes_expanded', JSON.stringify(isHermesExpanded));
-    } catch (e) {
-      console.warn('Could not persist hermes sub-menu state:', e);
-    }
-  }, [isHermesExpanded]);
-
   const toggleSection = (category: string) => {
     setExpandedSections(prev => ({
       ...prev,
@@ -108,14 +90,13 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
   // Canonical Navigation Structure
   const navigationGroups = [
     {
-      category: 'MISSION CONTROL',
+      category: 'OPERATIONS',
       items: [
         { id: 'overview' as ActiveTab, label: 'Overview', icon: LayoutDashboard, color: '#A5A2FF' },
-        { id: 'jarvis' as ActiveTab, label: 'Jarvis Global Voice', icon: Sparkles, badge: 'GLOBAL', color: '#615EFF' },
         { id: 'kanban' as ActiveTab, label: 'Kanban', icon: Kanban, badge: '6 Stg', color: '#00D26A' },
         { id: 'graph-runs' as ActiveTab, label: 'Active Runs', icon: Activity, color: '#EC4899' },
         { id: 'agent-wireframe' as ActiveTab, label: 'Agent Wireframe', icon: Network, color: '#615EFF' },
-        { id: 'hermes-approvals' as ActiveTab, label: 'Approvals', icon: ShieldCheck, color: '#F59E0B' },
+        { id: 'guardian-aegis' as ActiveTab, label: 'Approvals', icon: ShieldCheck, color: '#F59E0B' },
         { id: 'receipts' as ActiveTab, label: 'Results & Receipts', icon: FileCheck, color: '#38BDF8' },
       ]
     },
@@ -125,12 +106,12 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
       items: [
         { id: 'agent-orchestrator' as ActiveTab, label: 'Orchestrator', icon: Crown, statusTag: 'LIVE', color: '#EC4899' },
         { id: 'hermes-core' as ActiveTab, label: 'Hermes', icon: Cpu, statusTag: 'LIVE', color: '#615EFF' },
-        { id: 'agent-claude' as ActiveTab, label: 'Claude', icon: Sparkles, statusTag: 'LIVE', color: '#F97316' },
+        { id: 'agent-claude' as ActiveTab, label: 'Claude', icon: Sparkles, statusTag: 'PARTIAL', color: '#F97316' },
         { id: 'agent-gemini' as ActiveTab, label: 'Gemini', icon: Sparkles, statusTag: 'LIVE', color: '#1A73E8' },
-        { id: 'agent-codex' as ActiveTab, label: 'Codex', icon: Code2, statusTag: 'LIVE', color: '#00D26A' },
-        { id: 'agent-cursor' as ActiveTab, label: 'Cursor', icon: Terminal, statusTag: 'LIVE', color: '#A855F7' },
-        { id: 'agent-antigravity' as ActiveTab, label: 'Antigravity', icon: Compass, statusTag: 'LIVE', color: '#8A5CF5' },
-        { id: 'agent-openclaw' as ActiveTab, label: 'OpenClaw', icon: Globe, statusTag: 'LIVE', color: '#14B8A6' },
+        { id: 'agent-codex' as ActiveTab, label: 'Codex', icon: Code2, statusTag: 'PARTIAL', color: '#00D26A' },
+        { id: 'agent-cursor' as ActiveTab, label: 'Cursor', icon: Terminal, statusTag: 'NOT CONNECTED', color: '#A855F7' },
+        { id: 'agent-antigravity' as ActiveTab, label: 'Antigravity', icon: Compass, statusTag: 'PARTIAL', color: '#8A5CF5' },
+        { id: 'agent-openclaw' as ActiveTab, label: 'OpenClaw', icon: Globe, statusTag: 'PARTIAL', color: '#14B8A6' },
       ]
     },
     {
@@ -330,7 +311,15 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
                             {!isCollapsed && (
                               <div className="flex items-center gap-1.5 shrink-0">
                                 {item.statusTag && (
-                                  <span className="text-[8px] font-mono px-1.5 py-0.5 rounded font-bold bg-[#00D26A]/10 text-[#00D26A] border border-[#00D26A]/30">
+                                  <span className={`text-[8px] font-mono px-1.5 py-0.5 rounded font-bold border ${
+                                    item.statusTag === 'LIVE'
+                                      ? 'bg-[#00D26A]/10 text-[#00D26A] border-[#00D26A]/30'
+                                      : item.statusTag === 'PARTIAL'
+                                        ? 'bg-[#F59E0B]/10 text-[#F59E0B] border-[#F59E0B]/30'
+                                        : item.statusTag === 'NOT CONNECTED'
+                                          ? 'bg-[#94A3B8]/10 text-[#94A3B8] border-[#94A3B8]/30'
+                                          : 'bg-[#EF4444]/10 text-[#EF4444] border-[#EF4444]/30'
+                                  }`}>
                                     {item.statusTag}
                                   </span>
                                 )}

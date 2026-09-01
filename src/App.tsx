@@ -16,7 +16,7 @@ import {
 import { AGENT_DEFINITIONS } from './data/agentDefinitions';
 import { AirbyteHeader } from './components/AirbyteHeader';
 import { SidebarNav } from './components/SidebarNav';
-import { HermesTopNav } from './components/HermesTopNav';
+import { WorkspaceTopNav, WorkspaceType } from './components/WorkspaceTopNav';
 import { HermesCoreView } from './components/HermesCoreView';
 import { HermesChatView } from './components/HermesChatView';
 import { HermesTerminalView } from './components/HermesTerminalView';
@@ -1245,6 +1245,20 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
     return 'orchestrator';
   };
 
+  const getWorkspaceFromTab = (tab: ActiveTab): WorkspaceType | null => {
+    if (tab.startsWith('hermes') || tab === 'hermes') return 'hermes';
+    if (tab === 'agent-claude' || tab === 'claude' || tab === 'claudecode') return 'claude';
+    if (tab === 'agent-gemini' || tab === 'gemini') return 'gemini';
+    if (tab === 'agent-codex' || tab === 'codex') return 'codex';
+    if (tab === 'agent-cursor' || tab === 'cursor') return 'cursor';
+    if (tab === 'agent-antigravity' || tab === 'antigravity') return 'antigravity';
+    if (tab === 'agent-openclaw' || tab === 'openclaw') return 'openclaw';
+    if (tab === 'agent-orchestrator') return 'orchestrator';
+    return null;
+  };
+
+  const activeWorkspaceType = getWorkspaceFromTab(activeTab);
+
   return (
     <div className="min-h-screen bg-[#05060A] text-[#F3F4F9] flex flex-col selection:bg-[#615EFF] selection:text-white font-['Plus_Jakarta_Sans',sans-serif]">
       {/* Airbyte / Hermes Mission Control Header */}
@@ -1282,11 +1296,12 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
         />
 
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-          {/* Hermes Top Navigation (rendered only when Hermes workspace is active) */}
-          {(activeTab.startsWith('hermes') || activeTab === 'hermes') && (
-            <HermesTopNav 
+          {/* Workspace Contextual Top Navigation (rendered when any of the 8 workspaces is active) */}
+          {activeWorkspaceType && (
+            <WorkspaceTopNav 
               activeTab={activeTab} 
               setActiveTab={setActiveTab} 
+              activeWorkspace={activeWorkspaceType}
             />
           )}
 

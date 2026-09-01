@@ -1,96 +1,36 @@
-# NousResearch Hermes AgentOS Mission Control Architecture
+# SynthOS Administrative Control Plane Architecture
 
-> Unified multi-agent coordination protocol, specialized fleet roles (Orchestrator, Scout, Scribe, Reach, Dev, Analytics), OpenRouter model arbitration, Telegram thread routing, and bi-directional Obsidian Knowledge Graph synchronization.
-> References: [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) & [Asad Tinkers Hermes AgentOS Mission Control](https://asadtinkers.com/guides/hermes-agentos-mission-control-dashboard/)
-
----
-
-## 1. Executive Overview
-
-The **Hermes AgentOS Swarm** is an autonomous multi-agent operating system designed to eliminate token waste, parallelize cognitive workloads across dedicated specialists, and maintain persistent, structured knowledge in Obsidian vaults.
-
-Rather than running monolithic prompts through a single LLM, Hermes decomposes complex requests across **6 specialized agents**, routes tokens dynamically across frontier models (via **OpenRouter** and native APIs), manages execution state through a real-time **Kanban State Machine (`board.db`)**, and isolates communications via **Telegram thread routing**.
-
-```
-                           ┌────────────────────────┐
-                           │   USER / JARVIS HUD    │
-                           └───────────┬────────────┘
-                                       │
-                      ┌────────────────▼────────────────┐
-                      │    ORCHESTRATOR (FLEET MASTER)  │
-                      └───────┬──────────────┬──────────┘
-                              │              │
-       ┌──────────────────────┼──────────────┼─────────────────────┐
-       │                      │              │                     │
-┌──────▼──────┐        ┌──────▼──────┐ ┌─────▼───────┐      ┌──────▼──────┐
-│    SCOUT    │        │   SCRIBE    │ │    REACH    │      │     DEV     │
-│ (Scraping)  │        │  (Vaults)   │ │  (Growth)   │      │ (Engineers) │
-└──────┬──────┘        └──────┬──────┘ └─────┬───────┘      └──────┬──────┘
-       │                      │              │                     │
-       └──────────────────────┼──────────────┴─────────────────────┘
-                              │
-                       ┌──────▼──────┐
-                       │  ANALYTICS  │
-                       │  (Metrics)  │
-                       └──────┬──────┘
-                              │
-                       ┌──────▼──────────────────────┐
-                       │     HERMES MODEL ROUTER     │
-                       │ (OpenRouter / Gemini / etc.)│
-                       └──────────────┬──────────────┘
-                                      │
-                       ┌──────────────▼──────────────┐
-                       │  OBSIDIAN KNOWLEDGE GRAPH   │
-                       │    & TELEGRAM THREAD MESH   │
-                       └─────────────────────────────┘
-```
+> **Canonical System Directive:**
+> SynthOS Admin is the canonical administrative control plane for the SynthOS multi-agent operating system. It manages independent agent and runtime workspaces, task dispatch, graph orchestration, model routing, tools and MCPs, shared memory and Obsidian/Vault integration, automation, governance through Guardian and Aegis, receipts, activity, and global Jarvis voice control.
 
 ---
 
-## 2. Specialized Fleet Roles & Telegram Routing
+## 1. System Host & Workspace Architecture
 
-| Agent Role | Telegram Thread ID | Channel Name | Primary Model | Specialty & Responsibilities |
-| :--- | :--- | :--- | :--- | :--- |
-| **Orchestrator** | `101` | `#orchestrator-bridge` | `Nous Hermes 3` | Fleet Commander, goal decomposition, board.db governor, permanent operating rules, executive sign-off. |
-| **Scout** | `102` | `#scout-intel` | `Perplexity Sonar` / `Kimi K1.5` | Live web crawling, Product Hunt & GitHub trend scraping, arXiv preprints, market whitespace detection. |
-| **Scribe** | `103` | `#scribe-notes` | `Claude Code 3.7` / `ChatGPT o3` | Obsidian knowledge scribe, investment thesis authoring, documentation specs, [[wikilinks]] mesh mapping. |
-| **Reach** | `104` | `#reach-growth` | `ChatGPT o3` / `Gemini 2.5` | Distribution & GTM architect, viral loop modeling, customer acquisition, social sentiment, launch hooks. |
-| **Dev** | `105` | `#dev-terminal` | `Claude Code 3.7` / `Codex` | Full-stack systems engineer, sandbox execution, TypeScript/Python, test harnesses, self-healing patches. |
-| **Analytics** | `106` | `#analytics-metrics` | `DeepSeek R1` / `Gemini 2.5` | Data synthesizer, token economy optimization, latency tracking, SQL telemetry, Airbyte stream audits. |
+- **SynthOS Control Layer**: SynthOS is the host and administrative control layer.
+- **Independent Workspaces**: Hermes, Claude, Gemini, Codex, Cursor, Antigravity, OpenClaw, and Orchestrator operate as independent workspaces managed within the unified control plane.
+- **Jarvis Engine**: Jarvis is a global system service and HUD accessible system-wide across all workspaces. Jarvis is not owned by Hermes or any specific workspace.
+- **Apollo Service**: Apollo is a Hermes-specific voice/audio bridge, separate and distinct from global Jarvis.
+- **No Legacy Mission Control Product Silos**: Do not reintroduce the legacy Builderz/Mission Control architecture as the canonical product or wrap the app in model-specific UI silos.
 
 ---
 
-## 3. Mandatory Interactive UI & Button Validation Rule
+## 2. Unified Navigation Rules
 
-> [!IMPORTANT]
-> **MANDATORY RULE: Complete Control Validation**
-> Every button, label, tab trigger, drawer toggle, modal opener, Telegram message dispatcher, Kanban stage transition, filter chip, and execution trigger created in this system **MUST ALWAYS BE TESTED AND VERIFIED TO BE FULLY FUNCTIONAL**.
-> - Never create static mock buttons without click handlers.
-> - Never leave broken state listeners or dead links.
-> - Every action must provide instant visual feedback, clear state updates, and error resilience.
+The application uses a single unified shell with a two-tier navigation structure that applies universally:
 
----
-
-## 4. Multi-Agent Startup Curation Pipeline
-
-The Hermes fleet collaborates on a multi-stage startup ideation and curation workflow:
-1. **Stage 1 (Scout)**: Scrapes 200+ trending repositories, Product Hunt launches, and arXiv research papers to harvest developer pain points.
-2. **Stage 2 (Analytics)**: Runs TAM calculations, competitor feature matrices, and LLM token inference unit economics.
-3. **Stage 3 (Dev)**: Architects technical feasibility POCs, containerized sandboxes, and validates sub-50ms execution latencies.
-4. **Stage 4 (Reach)**: Formulates go-to-market viral loops, target early-adopter ICP personas, and short-form demo hooks.
-5. **Stage 5 (Scribe)**: Synthesizes findings into comprehensive Obsidian investment memos at `[[Startup-Theses/]]` with 20+ bidirectional `[[wikilinks]]`.
-6. **Stage 6 (Orchestrator)**: Conducts final quality audit, verifies permanent rules, approves move to `Done`, and vectorizes into memory.
+- **Left Rail**: Hosts major environments, workspaces, and system areas only (`OPERATIONS`, `WORKSPACES`, `BUILD`, `KNOWLEDGE`, `GOVERNANCE`, `PRODUCTS`, `SYSTEM`, `MASTER ADMIN`). Workspace child pages are strictly prohibited in the left rail.
+- **Top Navigation (`WorkspaceTopNav`)**: Dynamically hosts contextual tools, runtime views, and capability matrix tabs specific to the active workspace.
+- **Global Header**: Hosts global utilities and system-wide services, including the global Jarvis engine.
+- **No Fragmented Shells**: Do not create duplicate dashboards, parallel navigation systems, or fragmented sub-apps.
 
 ---
 
-## 5. Mission Control Curriculum (Parts 01 - 08)
+## 3. Engineering & Verification Directives
 
-The system incorporates all 32 steps and troubleshooting diagnostics from the official guide:
-- **Part 01**: Foundation — Orchestrator Identity & Permanent Rules (Steps 1–4)
-- **Part 02**: The Specialist Fleet — Scout, Scribe, Reach, Dev (Steps 5–7)
-- **Part 03**: Logging & Retention Systems (Steps 8–10)
-- **Part 04**: Telegram Routing — One Channel per Agent (Steps 11–15b)
-- **Part 05**: Read-Only Data Layer & Server Verification (Steps 15c–16)
-- **Part 06**: Mission Control Dashboard — Wire Every Tab Live (`board.db`, Telegram chat, Content Library, Hermes Cron) (Steps 17–28)
-- **Part 07**: Remote Access & Isometric 3D Office Active/Idle Glow (Steps 29–30)
-- **Part 08**: Troubleshooting Diagnostics (Tailscale, Complexity Routing, T1 Routing Plugin, T2 Kanban Drag-and-Drop) (Steps 31–32, T1, T2)
+- **Evidence-Based Status Badges**: Use status indicators (`LIVE`, `PARTIAL`, `NOT CONNECTED`, `MISSING`) strictly when supported by runtime verification evidence.
+- **Zero Simulation / No Mock Stubs**: Do not create fake routes, simulated capabilities, or mock stub buttons to artificially fill navigation.
+- **Capability Completion Standard**: Mark a capability complete only when real execution is proven with traceable runtime evidence.
+- **Preserve & Extend**: Preserve existing working screens and integrations. Extend existing components and routes before creating replacements.
+- **Bounded Incremental Execution**: Make bounded, incremental changes only. Do not redesign layouts, navigation, or visual styling unless explicitly requested.
+- **Visual Design Integrity**: Preserve the high-density dark enterprise aesthetic (`#05060A`, `#080A16`, `#615EFF` accents, `#1A1D33` borders, and typography pairings).

@@ -1,6 +1,6 @@
 {
   "name": "Remix Remix Synthos 2",
-  "description": "Unified AI Operating System connecting Hermes, Obsidian Vaults, and multi-model agent dashboards (ChatGPT, DeepSeek, Claude Code, Gemini, Antigravity, Perplexity, Codex, Bot Mode, and Jarvis) with authentic Airbyte dark aesthetic.",
+  "description": "SynthOS Administrative Control Plane and multi-agent execution orchestrator managing Mission Control, task dispatch, Aegis verification, and system subsystems with an authentic high-density dark enterprise aesthetic.",
   "requestFramePermissions": [
     "microphone"
   ],
