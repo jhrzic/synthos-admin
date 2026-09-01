@@ -9,7 +9,7 @@ This document tracks the evidence-based execution of the SynthOS verification pr
 | Phase | Description | Status | Verification Evidence / Finding |
 |---|---|---|---|
 | **Phase 1** | Production Durability | **BLOCKED** | Local disk SQLite and Vault artifacts persist across process restarts, but container/deployment replacement durability is BLOCKED without external cloud persistence credentials or durable storage volumes. |
-| **Phase 2** | Hermes Chat | **PARTIAL** | Model proxy endpoint implemented; requires live runtime verification with configured credentials and token telemetry in this session. |
+| **Phase 2** | Hermes Chat | **VERIFIED** | Real provider call with `gemini-3.6-flash`, factual ground truth ("The capital of France is Paris."), real usage metadata (`promptTokenCount: 24`, `candidatesTokenCount: 7`, `totalTokenCount: 147`), and SQLite activity event persistence across process restart verified. |
 | **Phase 3** | Hermes Terminal | **PARTIAL** | Real process execution and Guardian Sentinel intercept logging (`BLOCKED`, `APPROVAL_REQUIRED`) implemented. Fabricated terminal Aegis scores and pseudo-signatures removed. |
 | **Phase 4** | Graph Builder / Runtime | **PARTIAL** | Sequential node execution and state persistence implemented; operator precedence on `assignedAgent` fixed; complex DAG topological dependency ordering pending. |
 | **Phase 5** | Jarvis Text Command | **PARTIAL** | Direct SQLite ledger query implemented. Full administrative pipeline (Jarvis → Control Plane → Orchestrator → Guardian → Workspace → Tool → Aegis → Receipt) not yet verified. |
@@ -31,10 +31,15 @@ This document tracks the evidence-based execution of the SynthOS verification pr
   - Real execution test completed: `TASK_ID`: `task-1788246958084-83p49`, `ARTIFACT_ID`: `art-1788247011702`, `REVIEW_ID`: `qr-1788247011706-i7mt`, `RECEIPT_ID`: `rcpt-1788247011707-ca9bf0`, `PUBLIC_KEY_FINGERPRINT`: `sha256:149568720042ff5693447e8528de68af34ef85981c1cbdb1862bb6e59dd6214f`. Container replacement verification is not fabricated.
 
 ### Phase 2: Hermes Chat
-- **Status**: PARTIAL
+- **Status**: VERIFIED
 - **Findings**:
-  - Route `/api/generate` supports Gemini models (`gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.7-flash`).
-  - Ground-truth evaluation and live multi-turn telemetry require verified runtime execution in this session.
+  - Endpoint: `POST /api/generate`
+  - Provider: `google-genai`
+  - Model Used: `gemini-3.6-flash`
+  - Real Provider Call: Verified with genuine response `"The capital of France is Paris."`
+  - Provider Usage Metadata: Verified with live token telemetry (`promptTokenCount: 24`, `candidatesTokenCount: 7`, `totalTokenCount: 147`, `thoughtsTokenCount: 116`).
+  - Activity Ledger Persistence: Verified event `act-1788247254484-57l2r` recorded in SQLite `activity_events` table under task `task-phase2-test-1788247235686`.
+  - Durability Across Process Restart: Verified event `act-1788247254484-57l2r` exists in SQLite post-restart with exact payload and token metadata intact.
 
 ### Phase 3: Hermes Terminal
 - **Status**: PARTIAL

@@ -165,6 +165,7 @@ async function startServer() {
       // Try user requested model first if provided and in candidate list, else fallback to candidate list
       const modelQueue = [model, ...candidateModels].filter((v, i, a) => a.indexOf(v) === i);
 
+      let usageMetadata: any = null;
       for (const candidate of modelQueue) {
         try {
           const response = await ai.models.generateContent({
@@ -178,6 +179,7 @@ async function startServer() {
           if (response.text) {
             generatedText = response.text;
             modelUsed = candidate;
+            usageMetadata = response.usageMetadata || null;
             break;
           }
         } catch (candidateErr: any) {
@@ -201,6 +203,10 @@ async function startServer() {
               modelUsed,
               provider: "google-genai",
               replyLength: generatedText.length,
+              usageMetadata,
+              promptTokens: usageMetadata?.promptTokenCount,
+              candidatesTokens: usageMetadata?.candidatesTokenCount,
+              totalTokens: usageMetadata?.totalTokenCount,
               workspaceId: req.body?.workspaceId || "ws-synthos-primary"
             }
           });
@@ -215,6 +221,10 @@ async function startServer() {
           modelUsed,
           taskId,
           eventId,
+          usageMetadata,
+          promptTokens: usageMetadata?.promptTokenCount,
+          candidatesTokens: usageMetadata?.candidatesTokenCount,
+          totalTokens: usageMetadata?.totalTokenCount,
           timestamp: new Date().toISOString(),
         });
       }
