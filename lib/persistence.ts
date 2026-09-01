@@ -359,6 +359,55 @@ export function getTaskQualityReviews(taskId: string): QualityReviewRecord[] {
   return (db.prepare('SELECT * FROM quality_reviews WHERE task_id = ? ORDER BY created_at ASC').all(taskId) as QualityReviewRecord[]) || [];
 }
 
+// --------------------------------------------------------------------------
+// Deterministic Package Metadata Tool & Verification
+// --------------------------------------------------------------------------
+
+export interface PackageMetadataResult {
+  packageName: string;
+  packageVersion: string;
+  relativePath: string;
+  absolutePath: string;
+  sourceHash: string;
+}
+
+export function read_package_metadata(): PackageMetadataResult {
+  const pkgPath = path.join(process.cwd(), 'package.json');
+  if (!fs.existsSync(pkgPath)) {
+    throw new Error('package.json not found at process.cwd()');
+  }
+  const rawContent = fs.readFileSync(pkgPath, 'utf8');
+  const pkg = JSON.parse(rawContent);
+  const hash = `sha256:${crypto.createHash('sha256').update(rawContent, 'utf8').digest('hex')}`;
+  return {
+    packageName: pkg.name || 'unknown',
+    packageVersion: pkg.version || '0.0.0',
+    relativePath: 'package.json',
+    absolutePath: pkgPath,
+    sourceHash: hash
+  };
+}
+
+export function deleteTaskRecords(taskId: string): void {
+  const db = getDatabase();
+  const artifacts = getTaskArtifacts(taskId);
+  for (const art of artifacts) {
+    if (art.disk_path && fs.existsSync(art.disk_path)) {
+      try {
+        fs.unlinkSync(art.disk_path);
+      } catch {
+        // ignore disk deletion failure
+      }
+    }
+  }
+  db.prepare('DELETE FROM receipts WHERE task_id = ?').run(taskId);
+  db.prepare('DELETE FROM quality_reviews WHERE task_id = ?').run(taskId);
+  db.prepare('DELETE FROM artifacts WHERE task_id = ?').run(taskId);
+  db.prepare('DELETE FROM activity_events WHERE task_id = ?').run(taskId);
+  db.prepare('DELETE FROM task_status_history WHERE task_id = ?').run(taskId);
+  db.prepare('DELETE FROM tasks WHERE task_id = ?').run(taskId);
+}
+
 export function runDeterministicAegisVerification(taskId: string, expectedOutputText?: string): {
   decision: 'VERIFIED' | 'FAILED' | 'INCONCLUSIVE';
   score: number | null;
@@ -580,6 +629,83 @@ export function runDeterministicAegisVerification(taskId: string, expectedOutput
         status: "FAIL",
         evidence: "ARTIFACT_SAVED activity event missing from ledger"
       });
+    }
+
+    // 10. Specific Deterministic Domain Checks for package version / metadata tasks
+    const isPackageVersionTask = /package(\.json)?\s*(version|metadata|name)?|version\s+and\s+save/i.test(
+      `${task.title || ''} ${task.description || ''}`
+    );
+
+    if (isPackageVersionTask) {
+      let pkgMeta: PackageMetadataResult | null = null;
+      try {
+        pkgMeta = read_package_metadata();
+      } catch {
+        pkgMeta = null;
+      }
+
+      // Check: package_metadata_source_exists
+      if (pkgMeta && fs.existsSync(pkgMeta.absolutePath)) {
+        checks.push({
+          check: "package_metadata_source_exists",
+          status: "PASS",
+          evidence: `Verified package.json exists at ${pkgMeta.absolutePath} (size: ${fs.statSync(pkgMeta.absolutePath).size} bytes)`
+        });
+      } else {
+        checks.push({
+          check: "package_metadata_source_exists",
+          status: "FAIL",
+          evidence: "package.json does not exist on disk or could not be read"
+        });
+      }
+
+      // Check artifact text content
+      const diskContentStr = diskBuffer ? diskBuffer.toString('utf8') : '';
+
+      // Check: artifact_version_matches_package_json
+      if (pkgMeta && diskContentStr.includes(pkgMeta.packageVersion)) {
+        checks.push({
+          check: "artifact_version_matches_package_json",
+          status: "PASS",
+          evidence: `Artifact correctly includes actual package version "${pkgMeta.packageVersion}" matching package.json`
+        });
+      } else {
+        checks.push({
+          check: "artifact_version_matches_package_json",
+          status: "FAIL",
+          evidence: pkgMeta ? `Artifact does not contain actual package version "${pkgMeta.packageVersion}"` : "Cannot verify package version"
+        });
+      }
+
+      // Check: artifact_package_name_matches_package_json
+      if (pkgMeta && diskContentStr.includes(pkgMeta.packageName)) {
+        checks.push({
+          check: "artifact_package_name_matches_package_json",
+          status: "PASS",
+          evidence: `Artifact correctly includes actual package name "${pkgMeta.packageName}" matching package.json`
+        });
+      } else {
+        checks.push({
+          check: "artifact_package_name_matches_package_json",
+          status: "FAIL",
+          evidence: pkgMeta ? `Artifact does not contain actual package name "${pkgMeta.packageName}"` : "Cannot verify package name"
+        });
+      }
+
+      // Check: artifact_source_hash_matches_package_json
+      if (pkgMeta && diskContentStr.includes(pkgMeta.sourceHash)) {
+        checks.push({
+          check: "artifact_source_hash_matches_package_json",
+          status: "PASS",
+          evidence: `Artifact correctly includes actual sourceHash "${pkgMeta.sourceHash}" matching package.json SHA-256`
+        });
+      } else {
+        checks.push({
+          check: "artifact_source_hash_matches_package_json",
+          status: "FAIL",
+          evidence: pkgMeta ? `Artifact does not contain actual sourceHash "${pkgMeta.sourceHash}"` : "Cannot verify package source hash"
+        });
+      }
     }
 
     // Decision logic

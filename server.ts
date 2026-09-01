@@ -25,7 +25,9 @@ import {
   getTaskWithHistory, 
   getTaskActivityEvents, 
   getTaskArtifacts, 
-  getDatabasePath 
+  getDatabasePath,
+  read_package_metadata,
+  deleteTaskRecords
 } from "./lib/persistence";
 
 dotenv.config();
@@ -1171,6 +1173,50 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
 2. Compliance with Permanent Operating Rules
 3. Guardian Aegis Verification Summary
 4. State Machine & Board.db State Transition`;
+        }
+
+        // Domain-specific grounding for package metadata & version reading tasks
+        const isPackageVersionRequest = /package(\.json)?\s*(version|metadata|name)?|version\s+and\s+save/i.test(
+          `${taskTitle} ${description}`
+        );
+        if (isPackageVersionRequest) {
+          toolCalls = ["read_package_metadata", "obsidian_vault_writer"];
+          const packageMetadataResult = read_package_metadata();
+          rolePrompt = `You are the SynthOS Runtime Worker Agent.
+TASK: "${taskTitle}"
+DESCRIPTION: "${description}"
+
+AUTHORITATIVE REAL REPOSITORY EVIDENCE (READ DIRECTLY FROM DISK VIA read_package_metadata):
+=== AUTHORITATIVE TOOL EXECUTION RESULT: read_package_metadata ===
+source: ${packageMetadataResult.relativePath}
+packageName: ${packageMetadataResult.packageName}
+packageVersion: ${packageMetadataResult.packageVersion}
+sourceHash: ${packageMetadataResult.sourceHash}
+absolutePath: ${packageMetadataResult.absolutePath}
+==================================================================
+
+CRITICAL EXECUTION CONSTRAINTS:
+1. You MUST use and report ONLY the real repository evidence provided above.
+2. You are STRICTLY FORBIDDEN from inventing or claiming:
+   - Package registries or external API lookups (e.g. PackageRegistry.query)
+   - board.db checks or database records
+   - Fake cryptographic signatures, keys, or signature language
+   - Certificates or root-of-trust claims
+   - Network protocols or TLS 1.3 claims
+   - Hallucinated version values (you MUST report version: "${packageMetadataResult.packageVersion}")
+   - Hallucinated dates or timestamps
+   - Audit systems or fictional test suites
+   - Any tool executions not present in the evidence above
+
+3. You MUST include this EXACT machine-readable EVIDENCE section in your output:
+
+## EVIDENCE
+source: package.json
+packageName: ${packageMetadataResult.packageName}
+packageVersion: ${packageMetadataResult.packageVersion}
+sourceHash: ${packageMetadataResult.sourceHash}
+
+4. Provide a clear, factual, and concise description of the package metadata read from package.json without any fabricated claims.`;
         }
 
         const modelQueue = [assignedModel, ...candidateModels].filter((v, i, a) => a.indexOf(v) === i && !v.includes("claude") && !v.includes("o3") && !v.includes("sonar"));
