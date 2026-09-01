@@ -108,4 +108,14 @@ describe('SYNTHOS GLOBAL SHELL INVARIANT: Jarvis Non-Removable Architecture Rule
     const commandPaletteContent = fs.readFileSync(path.resolve(process.cwd(), 'src/components/CommandPalette.tsx'), 'utf-8');
     expect(commandPaletteContent).toContain("id: 'jarvis'");
   });
+
+  it('8. Explicit Assert: Triggering the HUD routes the user to the correct "jarvis" tab and not "hermes-apollo"', () => {
+    // Read the current JarvisOverlayHUD implementation to verify it invokes setActiveTab with 'jarvis'
+    const hudFileContent = fs.readFileSync(path.resolve(process.cwd(), 'src/components/JarvisOverlayHUD.tsx'), 'utf-8');
+    expect(hudFileContent).toContain("setActiveTab('jarvis')");
+    
+    // Explicitly verify the App.tsx handler also resolves to 'jarvis'
+    expect(appFileContent).toContain("onOpenFullJarvis={() => setActiveTab('jarvis')}");
+    expect(appFileContent).not.toContain("onOpenFullJarvis={() => setActiveTab('hermes-apollo')}");
+  });
 });

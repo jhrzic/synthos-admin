@@ -6,19 +6,26 @@ interface JarvisOverlayHUDProps {
   settings: JarvisSettings;
   onTriggerVoice: () => void;
   onOpenFullJarvis: () => void;
+  setActiveTab?: (tab: any) => void;
 }
 
 export const JarvisOverlayHUD: React.FC<JarvisOverlayHUDProps> = ({
   settings,
   onTriggerVoice,
   onOpenFullJarvis,
+  setActiveTab,
 }) => {
   if (!settings.hudOverlay) return null;
 
   return (
     <div className="fixed bottom-4 right-4 z-40">
       <div 
-        onClick={onOpenFullJarvis}
+        onClick={() => {
+          if (setActiveTab) {
+            setActiveTab('jarvis');
+          }
+          onOpenFullJarvis();
+        }}
         className="bg-[#0B0D18]/95 backdrop-blur-md border border-[#242844] hover:border-[#615EFF] p-3 rounded-2xl shadow-2xl flex items-center gap-3 cursor-pointer group transition duration-200"
       >
         <div className="relative w-9 h-9 rounded-xl bg-gradient-to-tr from-[#615EFF]/20 to-[#A5A2FF]/30 border border-[#615EFF]/50 flex items-center justify-center text-[#A5A2FF]">

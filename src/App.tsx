@@ -2039,6 +2039,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           setIsGlobalVoiceOpen(true);
         }}
         onOpenFullJarvis={() => setActiveTab('jarvis')}
+        setActiveTab={setActiveTab}
       />
 
       {/* Global Shared SynthOS Voice Overlay */}
