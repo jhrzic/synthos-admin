@@ -309,7 +309,7 @@ export interface AIModelInfo {
   name: string;
   provider: string;
   version: string;
-  status: 'active' | 'idle' | 'running' | 'error';
+  status: 'active' | 'idle' | 'running' | 'error' | 'requires_key' | 'unconfigured' | 'partial';
   latency: number;
   tokensPerSec: number;
   contextWindow: string;

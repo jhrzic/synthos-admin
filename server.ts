@@ -3027,9 +3027,51 @@ sourceHash: ${packageMetadataResult.sourceHash}
     ]);
   });
 
+  app.get("/api/providers/status", (req, res) => {
+    const stateDbPath = getDatabasePath();
+    const vaultPath = path.join(process.cwd(), "vault");
+    const hasDb = fs.existsSync(stateDbPath);
+    const hasVault = fs.existsSync(vaultPath);
+
+    res.json({
+      success: true,
+      providers: {
+        gemini: {
+          status: process.env.GEMINI_API_KEY ? "CONFIGURED" : "NOT_CONFIGURED",
+          provider: "google-genai",
+          models: ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.7-flash"]
+        },
+        openrouter: {
+          status: process.env.OPENROUTER_API_KEY ? "CONFIGURED" : "ZERO_COST_FALLBACK_ONLY",
+          provider: "openrouter"
+        },
+        fishAudio: {
+          status: process.env.FISH_AUDIO_API_KEY ? "CONFIGURED" : "NOT_CONFIGURED",
+          provider: "fish-audio"
+        },
+        telegram: {
+          status: process.env.TELEGRAM_BOT_TOKEN ? "CONFIGURED" : "NOT_CONFIGURED",
+          provider: "telegram-bot-api"
+        }
+      },
+      storage: {
+        sqlite: hasDb ? "INITIALIZED" : "PENDING_INIT",
+        sqlitePath: stateDbPath,
+        vault: hasVault ? "LOCAL_DISK_PRESENT" : "NOT_FOUND",
+        vaultPath
+      },
+      runtime: {
+        environment: "Cloud-Run-Sandbox",
+        nodeVersion: process.version,
+        port: 3000,
+        timestamp: new Date().toISOString()
+      }
+    });
+  });
+
   app.get("/api/status", (req, res) => {
-    const stateDbPath = path.join(os.homedir(), ".hermes", "state.db");
-    const obsidianPath = path.join(os.homedir(), "obsidian");
+    const stateDbPath = getDatabasePath();
+    const obsidianPath = path.join(process.cwd(), "vault");
     const hasLocalState = fs.existsSync(stateDbPath);
     const hasObsidian = fs.existsSync(obsidianPath);
 
@@ -3043,7 +3085,9 @@ sourceHash: ${packageMetadataResult.sourceHash}
       hermesDbClassification: hasLocalState ? "LOCAL_FOUND" : "LOCAL_ONLY_NOT_FOUND",
       geminiConfigured: !!process.env.GEMINI_API_KEY,
       fishAudioConfigured: !!process.env.FISH_AUDIO_API_KEY,
-      synapses: ["chatgpt", "deepseek", "claudecode", "gemini", "antigravity", "perplexity", "codex"],
+      openrouterConfigured: !!process.env.OPENROUTER_API_KEY,
+      telegramConfigured: !!process.env.TELEGRAM_BOT_TOKEN,
+      synapses: ["gemini", "antigravity"],
       botMode: "ACTIVE",
       jarvisStatus: "READY",
       lastSyncTime: new Date().toISOString(),

@@ -92,6 +92,30 @@ export const WorkspacesView: React.FC = () => {
   const [newWsTier, setNewWsTier] = useState<'free' | 'pro' | 'enterprise'>('pro');
   const [notification, setNotification] = useState<string | null>(null);
 
+  React.useEffect(() => {
+    fetch('/api/providers/status')
+      .then(res => res.json())
+      .then(data => {
+        if (data.success) {
+          const geminiStatus = data.providers?.gemini?.status === 'CONFIGURED' ? 'ONLINE' : 'NOT_CONFIGURED';
+          const openrouterStatus = data.providers?.openrouter?.status === 'CONFIGURED' ? 'ONLINE' : 'ZERO_COST_ONLY';
+          const obsidianStatus = data.storage?.vault === 'LOCAL_DISK_PRESENT' ? 'LOCAL_FOUND' : 'NOT_CONNECTED';
+          const hermesDbStatus = data.storage?.sqlite === 'INITIALIZED' ? 'LOCAL_ATTACHED' : 'PENDING';
+
+          setWorkspaces(prev => prev.map(ws => ({
+            ...ws,
+            apiHealth: {
+              gemini: geminiStatus as any,
+              openrouter: openrouterStatus as any,
+              hermesDb: hermesDbStatus as any,
+              obsidianSync: obsidianStatus as any,
+            }
+          })));
+        }
+      })
+      .catch(err => console.warn('Could not fetch live provider status:', err));
+  }, []);
+
   const handleSwitchWorkspace = (ws: WorkspaceTenant) => {
     setActiveWorkspaceId(ws.id);
     synthosControl.logEvent({
