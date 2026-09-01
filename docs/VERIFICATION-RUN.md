@@ -8,7 +8,7 @@ This document tracks the evidence-based execution of the SynthOS verification pr
 
 | Phase | Description | Status | Verification Evidence / Finding |
 |---|---|---|---|
-| **Phase 1** | Production Durability | **PARTIAL** | Task state, status history, Aegis review, artifacts, and Ed25519 receipts persist across process restarts. Container/deployment replacement durability unproven. |
+| **Phase 1** | Production Durability | **BLOCKED** | Local disk SQLite and Vault artifacts persist across process restarts, but container/deployment replacement durability is BLOCKED without external cloud persistence credentials or durable storage volumes. |
 | **Phase 2** | Hermes Chat | **PARTIAL** | Model proxy endpoint implemented; requires live runtime verification with configured credentials and token telemetry in this session. |
 | **Phase 3** | Hermes Terminal | **PARTIAL** | Real process execution and Guardian Sentinel intercept logging (`BLOCKED`, `APPROVAL_REQUIRED`) implemented. Fabricated terminal Aegis scores and pseudo-signatures removed. |
 | **Phase 4** | Graph Builder / Runtime | **PARTIAL** | Sequential node execution and state persistence implemented; operator precedence on `assignedAgent` fixed; complex DAG topological dependency ordering pending. |
@@ -23,10 +23,12 @@ This document tracks the evidence-based execution of the SynthOS verification pr
 ## Detailed Phase Status & Findings
 
 ### Phase 1: Production Durability
-- **Status**: PARTIAL
+- **Status**: BLOCKED
 - **Findings**:
-  - Process/server restart durability implemented for SQLite ledger, task states, disk artifacts, and Ed25519 receipts.
-  - Container replacement / fresh environment deployment durability has not been independently proven.
+  - Process/server restart durability works for local SQLite ledger (`data/synthos-admin.db`), local disk artifacts (`vault/`), and local Ed25519 keypair (`data/keys/`).
+  - Production durability across container/deployment replacement is BLOCKED: no external durable store (e.g. Cloud SQL, Firestore, GCS, or Secret Manager) is provisioned with credentials in the runtime environment.
+  - Ephemeral container replacement would wipe local SQLite tables, artifact file bytes, and local signing keys.
+  - Real execution test completed: `TASK_ID`: `task-1788246958084-83p49`, `ARTIFACT_ID`: `art-1788247011702`, `REVIEW_ID`: `qr-1788247011706-i7mt`, `RECEIPT_ID`: `rcpt-1788247011707-ca9bf0`, `PUBLIC_KEY_FINGERPRINT`: `sha256:149568720042ff5693447e8528de68af34ef85981c1cbdb1862bb6e59dd6214f`. Container replacement verification is not fabricated.
 
 ### Phase 2: Hermes Chat
 - **Status**: PARTIAL
