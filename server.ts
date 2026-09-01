@@ -6,6 +6,16 @@ import { exec, spawn } from "child_process";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import { 
+  createInitialTask, 
+  updateTaskStatus, 
+  recordActivityEvent, 
+  recordArtifact, 
+  getTaskWithHistory, 
+  getTaskActivityEvents, 
+  getTaskArtifacts, 
+  getDatabasePath 
+} from "./lib/persistence";
 
 dotenv.config();
 
@@ -995,7 +1005,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
   app.post("/api/execute-agent-task", async (req, res) => {
     try {
       const { 
-        taskId, 
+        taskId = `task-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`, 
         taskTitle = "", 
         description = "", 
         assignedAgent = "scout", 
@@ -1003,14 +1013,50 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         inputs = "", 
         dependencies = [], 
         sourceUrl = "",
-        isParent = false
+        workspaceId = "ws-synthos-primary"
       } = req.body || {};
 
       console.log(`[Agent Execution] Starting execution for Task "${taskTitle}" (${taskId}) via ${assignedAgent} / ${assignedModel}...`);
       const startTime = Date.now();
+      const startTimeIso = new Date(startTime).toISOString();
 
+      // 1. Persist task as TODO & record TASK_CREATED
+      createInitialTask({
+        taskId,
+        workspaceId,
+        title: taskTitle,
+        description,
+        assignedAgent,
+        assignedModel,
+        createdAt: startTimeIso
+      });
+      recordActivityEvent({
+        taskId,
+        eventType: "TASK_CREATED",
+        agentId: "orchestrator",
+        payload: { title: taskTitle, status: "TODO" },
+        createdAt: startTimeIso
+      });
+
+      // 2. Persist READY status & record AGENT_ASSIGNED
+      updateTaskStatus(taskId, "READY");
+      recordActivityEvent({
+        taskId,
+        eventType: "AGENT_ASSIGNED",
+        agentId: assignedAgent,
+        payload: { agent: assignedAgent, model: assignedModel, status: "READY" }
+      });
+
+      // Check API Key
       const apiKey = process.env.GEMINI_API_KEY || "";
       if (!apiKey) {
+        updateTaskStatus(taskId, "FAILED");
+        recordActivityEvent({
+          taskId,
+          eventType: "PROVIDER_FAILED",
+          agentId: assignedAgent,
+          payload: { reason: "BLOCKED_MISSING_CREDENTIAL", error: "GEMINI_API_KEY environment variable is not configured" }
+        });
         return res.status(400).json({
           success: false,
           status: "BLOCKED",
@@ -1019,6 +1065,15 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
           taskId
         });
       }
+
+      // 3. Immediately before provider call: RUNNING & EXECUTION_STARTED
+      updateTaskStatus(taskId, "RUNNING");
+      recordActivityEvent({
+        taskId,
+        eventType: "EXECUTION_STARTED",
+        agentId: assignedAgent,
+        payload: { model: assignedModel, status: "RUNNING" }
+      });
 
       let executionOutput = "";
       let modelUsed = assignedModel;
@@ -1133,8 +1188,24 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
         console.warn("[Agent Task GenAI Error]:", lastProviderError);
       }
 
-      // If provider execution failed or threw errors across all candidates
+      // Provider fails:
+      // persist PROVIDER_FAILED
+      // persist task status FAILED
+      // persist FAILED status history
+      // return failure
+      // No artifact, No fake verification, No DONE
       if (!executionOutput) {
+        updateTaskStatus(taskId, "FAILED");
+        recordActivityEvent({
+          taskId,
+          eventType: "PROVIDER_FAILED",
+          agentId: assignedAgent,
+          payload: { 
+            error: lastProviderError || "Empty response from provider", 
+            hadProviderError 
+          }
+        });
+
         if (hadProviderError && lastProviderError) {
           return res.status(502).json({
             success: false,
@@ -1154,46 +1225,19 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
         });
       }
 
+      // Provider succeeds:
+      // persist PROVIDER_COMPLETED
+      recordActivityEvent({
+        taskId,
+        eventType: "PROVIDER_COMPLETED",
+        agentId: assignedAgent,
+        payload: { model: modelUsed, outputLength: executionOutput.length }
+      });
+
       const elapsedMs = Date.now() - startTime;
-      const receiptId = `receipt-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-      const qualityReviewId = `qr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-      const artifactId = `art-${Date.now()}`;
       const nowIso = new Date().toISOString();
 
-      const verificationReceipt = {
-        receiptId,
-        qualityReviewId,
-        taskId,
-        guardianPassed: true,
-        aegisScore: 99.2,
-        decision: "APPROVED_ZERO_REGRESSION",
-        signature: `0x${Math.random().toString(16).substring(2)}${Math.random().toString(16).substring(2)}`,
-        signedPayload: {
-          taskId,
-          taskTitle,
-          agent: assignedAgent,
-          modelUsed,
-          outputHash: `sha256:${Buffer.from(executionOutput).toString("hex").substring(0, 32)}`,
-          verifiedAt: nowIso
-        },
-        timestamp: nowIso
-      };
-
-      const qualityReviewRow = {
-        review_id: qualityReviewId,
-        task_id: taskId,
-        reviewer: "Guardian-Aegis-Sentinel-v4",
-        score: 99.2,
-        decision: "PASSED_WITH_DISTINCTION",
-        checks: {
-          zeroHallucinationGate: "PASSED",
-          deterministicValidation: "PASSED",
-          schemaCompliance: "PASSED",
-          securityBoundary: "PASSED"
-        },
-        reviewed_at: nowIso
-      };
-
+      // Write artifact to physical disk
       const sanitizedTitle = (taskTitle || "untitled").replace(/[^a-zA-Z0-9_-]/g, "-");
       const vaultRelPath = `Startup-Theses/${sanitizedTitle}.md`;
       const vaultDiskDir = path.join(process.cwd(), "vault", "Startup-Theses");
@@ -1202,119 +1246,67 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
       }
       const vaultDiskPath = path.join(vaultDiskDir, `${sanitizedTitle}.md`);
 
-      const artifactContent = `# ${taskTitle}\n\n**Executed by**: ${assignedAgent.toUpperCase()} (${modelUsed})\n**Timestamp**: ${nowIso}\n**Vault Path**: \`${vaultRelPath}\`\n\n---\n\n${executionOutput}\n\n---\n\n### Guardian Aegis Verification\n- Receipt ID: \`${verificationReceipt.receiptId}\`\n- Quality Review ID: \`${qualityReviewId}\`\n- Aegis Score: **${verificationReceipt.aegisScore} / 100**\n- Cryptographic Signature: \`${verificationReceipt.signature}\`\n- Decision: \`${qualityReviewRow.decision}\``;
+      const artifactContent = `# ${taskTitle}\n\n**Executed by**: ${assignedAgent.toUpperCase()} (${modelUsed})\n**Timestamp**: ${nowIso}\n**Vault Path**: \`${vaultRelPath}\`\n\n---\n\n${executionOutput}\n`;
 
-      // Write artifact to physical disk
       fs.writeFileSync(vaultDiskPath, artifactContent, "utf8");
 
-      const artifact = {
-        id: artifactId,
-        title: taskTitle,
-        folder: "Startup-Theses",
-        filePath: vaultRelPath,
+      // Calculate real SHA-256 of artifact contents & persist artifact record & ARTIFACT_SAVED
+      const artifactId = `art-${Date.now()}`;
+      const persistedArtifact = recordArtifact({
+        artifactId,
+        taskId,
+        relativePath: vaultRelPath,
         diskPath: vaultDiskPath,
-        wikilinks: ["Startup-Theses/Master-Plan", "Aegis-Receipts/Verification", "Architecture/Agentic-OS"],
         content: artifactContent,
         createdAt: nowIso
-      };
+      });
 
-      const activityEvents = [
-        {
-          event_id: `act-${Date.now()}-1`,
-          task_id: taskId,
-          event_type: "TASK_CREATED",
-          agent_id: "orchestrator",
-          payload: { title: taskTitle, status: "TODO" },
-          timestamp: new Date(startTime - 400).toISOString()
+      recordActivityEvent({
+        taskId,
+        eventType: "ARTIFACT_SAVED",
+        agentId: assignedAgent,
+        payload: {
+          artifactId: persistedArtifact.artifact_id,
+          relativePath: persistedArtifact.relative_path,
+          diskPath: persistedArtifact.disk_path,
+          contentHash: persistedArtifact.content_hash,
+          sizeBytes: persistedArtifact.size_bytes
         },
-        {
-          event_id: `act-${Date.now()}-2`,
-          task_id: taskId,
-          event_type: "AGENT_ASSIGNED",
-          agent_id: assignedAgent,
-          payload: { agent: assignedAgent, model: assignedModel, status: "READY" },
-          timestamp: new Date(startTime - 200).toISOString()
-        },
-        {
-          event_id: `act-${Date.now()}-3`,
-          task_id: taskId,
-          event_type: "DISPATCHED_TO_SANDBOX",
-          agent_id: assignedAgent,
-          payload: { model: modelUsed, tools: toolCalls, status: "RUNNING" },
-          timestamp: new Date(startTime).toISOString()
-        },
-        {
-          event_id: `act-${Date.now()}-4`,
-          task_id: taskId,
-          event_type: "AEGIS_QUALITY_VERIFIED",
-          agent_id: "guardian_aegis",
-          payload: { receipt_id: receiptId, review_id: qualityReviewId, score: 99.2, status: "REVIEW" },
-          timestamp: new Date(startTime + elapsedMs - 50).toISOString()
-        },
-        {
-          event_id: `act-${Date.now()}-5`,
-          task_id: taskId,
-          event_type: "ARTIFACT_SAVED_AND_COMMITTED",
-          agent_id: assignedAgent,
-          payload: { artifact_id: artifactId, path: vaultRelPath, disk_path: vaultDiskPath, status: "DONE" },
-          timestamp: nowIso
-        }
-      ];
+        createdAt: nowIso
+      });
 
-      const kanbanTransitions = [
-        { state: "TODO", timestamp: new Date(startTime - 400).toISOString() },
-        { state: "READY", timestamp: new Date(startTime - 200).toISOString() },
-        { state: "RUNNING", timestamp: new Date(startTime).toISOString() },
-        { state: "REVIEW", timestamp: new Date(startTime + elapsedMs - 50).toISOString() },
-        { state: "DONE", timestamp: nowIso }
-      ];
+      // Temporary terminal state: AWAITING_VERIFICATION (do not mark DONE yet)
+      updateTaskStatus(taskId, "AWAITING_VERIFICATION");
+
+      const { task: savedTask, statusHistory } = getTaskWithHistory(taskId);
+      const activityEvents = getTaskActivityEvents(taskId);
+      const artifactsList = getTaskArtifacts(taskId);
 
       return res.json({
         success: true,
         taskId,
-        status: "DONE",
+        status: "AWAITING_VERIFICATION",
         outputs: executionOutput,
-        claimedBy: `${assignedAgent.charAt(0).toUpperCase() + assignedAgent.slice(1)} Agent (${assignedModel})`,
-        claimedAt: new Date(startTime).toISOString(),
-        latestAction: `Completed execution in ${elapsedMs}ms. Verified by Guardian Aegis.`,
+        claimedBy: `${assignedAgent.charAt(0).toUpperCase() + assignedAgent.slice(1)} Agent (${modelUsed})`,
+        claimedAt: startTimeIso,
+        latestAction: `Completed provider execution in ${elapsedMs}ms. Stored artifact (${persistedArtifact.content_hash}). Awaiting Aegis verification.`,
         modelUsed,
         toolCalls,
-        verificationReceipt,
-        qualityReview: qualityReviewRow,
-        artifact,
-        activityEvents,
-        kanbanTransitions,
-        rawDatabaseRows: {
-          task: {
-            task_id: taskId,
-            workspace_id: "ws-synthos-primary",
-            title: taskTitle,
-            description,
-            assigned_agent: assignedAgent,
-            assigned_model: assignedModel,
-            status: "DONE",
-            created_at: new Date(startTime - 400).toISOString(),
-            updated_at: nowIso
-          },
-          agent: {
-            agent_id: assignedAgent,
-            agent_name: `${assignedAgent.toUpperCase()} Specialist Agent`,
-            runtime: "Cloud Run Sandbox Container (Node.js 22 LTS + TypeScript 5.8)",
-            connection_status: "CONNECTED_HEALTHY",
-            thread_id: assignedAgent === "dev" ? "105" : assignedAgent === "scout" ? "102" : assignedAgent === "scribe" ? "103" : assignedAgent === "reach" ? "104" : assignedAgent === "analytics" ? "106" : "101"
-          },
-          quality_review: qualityReviewRow,
-          receipt: verificationReceipt,
-          artifact: {
-            artifact_id: artifactId,
-            task_id: taskId,
-            file_path: vaultRelPath,
-            disk_path: vaultDiskPath,
-            file_size_bytes: Buffer.byteLength(artifactContent, "utf8"),
-            created_at: nowIso
-          },
-          activity: activityEvents
+        artifact: {
+          id: persistedArtifact.artifact_id,
+          title: taskTitle,
+          folder: "Startup-Theses",
+          filePath: persistedArtifact.relative_path,
+          diskPath: persistedArtifact.disk_path,
+          contentHash: persistedArtifact.content_hash,
+          sizeBytes: persistedArtifact.size_bytes,
+          content: artifactContent,
+          createdAt: nowIso
         },
+        task: savedTask,
+        statusHistory,
+        activityEvents,
+        artifacts: artifactsList,
         executionMetrics: {
           latencyMs: elapsedMs,
           tokensConsumed: Math.floor(Math.random() * 450) + 120,
@@ -1328,6 +1320,54 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
         status: "BLOCKED",
         error: err?.message || "Task execution failed"
       });
+    }
+  });
+
+  // READ-ONLY VERIFICATION ENDPOINTS (Query SQLite directly)
+  app.get("/api/execution/tasks/:taskId", (req, res) => {
+    try {
+      const { taskId } = req.params;
+      const data = getTaskWithHistory(taskId);
+      if (!data.task) {
+        return res.status(404).json({ error: "Task not found", taskId });
+      }
+      return res.json({
+        success: true,
+        task: data.task,
+        statusHistory: data.statusHistory
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || "Failed to query task" });
+    }
+  });
+
+  app.get("/api/execution/tasks/:taskId/activity", (req, res) => {
+    try {
+      const { taskId } = req.params;
+      const activity = getTaskActivityEvents(taskId);
+      return res.json({
+        success: true,
+        taskId,
+        count: activity.length,
+        activityEvents: activity
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || "Failed to query activity" });
+    }
+  });
+
+  app.get("/api/execution/tasks/:taskId/artifacts", (req, res) => {
+    try {
+      const { taskId } = req.params;
+      const artifacts = getTaskArtifacts(taskId);
+      return res.json({
+        success: true,
+        taskId,
+        count: artifacts.length,
+        artifacts
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || "Failed to query artifacts" });
     }
   });
 
