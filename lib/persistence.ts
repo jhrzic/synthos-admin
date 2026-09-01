@@ -704,11 +704,35 @@ export function verifyReceiptSignature(
 }
 
 export function verifyReceipt(receipt: {
+  algorithm?: string;
   payload_json: string;
   signature: string;
   public_key: string;
 }): boolean {
-  return verifyReceiptSignature(receipt.payload_json, receipt.signature, receipt.public_key);
+  try {
+    const trustedKeyInfo = getSigningPublicKey();
+
+    // 1. Confirm algorithm === "Ed25519"
+    if (receipt.algorithm && receipt.algorithm !== 'Ed25519') {
+      return false;
+    }
+
+    // 2. Confirm receipt.public_key exactly matches the trusted SynthOS public key
+    const cleanReceiptKey = (receipt.public_key || '').trim().replace(/\r\n/g, '\n');
+    const cleanTrustedKey = (trustedKeyInfo.publicKeyPem || '').trim().replace(/\r\n/g, '\n');
+    if (!cleanReceiptKey || cleanReceiptKey !== cleanTrustedKey) {
+      return false;
+    }
+
+    // 3. Cryptographically verify signature using trusted SynthOS public key
+    return verifyReceiptSignature(
+      receipt.payload_json,
+      receipt.signature,
+      trustedKeyInfo.publicKeyPem
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function recordReceipt(params: {
