@@ -141,13 +141,25 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
   onRunAudit,
   onExecutePrompt
 }) => {
-  const [activeSection, setActiveSection] = useState<MasterAdminSection>(() => {
-    if (initialSubTab && initialSubTab !== 'overview') {
-      const sanitized = initialSubTab.replace('master-admin-', '') as MasterAdminSection;
-      return sanitized;
-    }
-    return 'overview';
-  });
+  const normalizeMasterAdminSection = (subTab?: string): MasterAdminSection => {
+    if (!subTab || subTab === 'overview' || subTab === 'master-admin') return 'overview';
+
+    let sanitized = subTab.replace('master-admin-', '');
+
+    if (sanitized === 'providers') sanitized = 'models';
+    if (sanitized === 'security') sanitized = 'guardian';
+    if (sanitized === 'storage') sanitized = 'memory';
+
+    return sanitized as MasterAdminSection;
+  };
+
+  const [activeSection, setActiveSection] = useState<MasterAdminSection>(() =>
+    normalizeMasterAdminSection(initialSubTab)
+  );
+
+  useEffect(() => {
+    setActiveSection(normalizeMasterAdminSection(initialSubTab));
+  }, [initialSubTab]);
 
   // Authoritative live diagnostics from server
   const [diagnostics, setDiagnostics] = useState<LiveDiagnostics | null>(null);
