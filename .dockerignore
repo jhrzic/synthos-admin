@@ -1,0 +1,12 @@
+node_modules
+dist
+coverage
+.git
+.vscode
+*.log
+.env
+.env.local
+data
+vault
+backups
+synthos-admin.mp4

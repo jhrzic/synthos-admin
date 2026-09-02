@@ -1,0 +1,40 @@
+# SynthOS Admin — single-service compose file.
+#
+# Deliberately does NOT bundle Windmill. ADR-006 treats Windmill as an
+# already-running external service this application connects to over
+# WINDMILL_BASE_URL — this repo does not own that deployment, and bundling
+# a second, redundant Windmill instance here would risk exactly the
+# duplicate-deployment problem the task that produced this file warned
+# against. Point WINDMILL_BASE_URL at your real Windmill instance's URL,
+# wherever it runs.
+#
+# Usage:
+#   cp .env.example .env   # fill in real values — never commit .env
+#   docker compose up -d --build
+#   curl http://localhost:3000/health
+
+services:
+  synthos-admin:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+    volumes:
+      - synthos-data:/app/data
+      - synthos-vault:/app/vault
+      - synthos-backups:/app/backups
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  synthos-data:
+  synthos-vault:
+  synthos-backups:

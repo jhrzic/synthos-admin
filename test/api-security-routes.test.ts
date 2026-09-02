@@ -187,6 +187,11 @@ describe('Pass III API security: the explicit public allowlist (E2) — never ac
     expect(routeLine('/api/auth/setup-token/:token/complete')).not.toMatch(/requireAuth|requireWorkspaceMember|requirePlatformAdmin/);
   });
 
+  it('Pass VII: liveness/readiness probes are public by design — an orchestrator has no session (B1/B2)', () => {
+    expect(routeLine('/health')).not.toMatch(/requireAuth|requireWorkspaceMember|requirePlatformAdmin/);
+    expect(routeLine('/api/ready')).not.toMatch(/requireAuth|requireWorkspaceMember|requirePlatformAdmin/);
+  });
+
   it('no route outside the documented allowlist is missing every guard', () => {
     const allRouteMatches = [...serverContent.matchAll(/app\.(get|post|put|patch|delete)\(\s*(?:\[)?"([^"]+)"/g)];
     const guarded = new Set([
@@ -194,6 +199,7 @@ describe('Pass III API security: the explicit public allowlist (E2) — never ac
       '/api/auth/setup-required', '/api/auth/setup', '/api/auth/login', '/api/auth/logout', '/api/auth/me',
       '/api/auth/setup-token/:token', '/api/auth/setup-token/:token/complete',
       '/api/skills/discover',
+      '/health', '/api/ready', // Pass VII — liveness/readiness, public by design (B1/B2): an orchestrator has no session
       '*', // SPA shell fallback — no data of its own
     ]);
     const unguardedUnexpected: string[] = [];

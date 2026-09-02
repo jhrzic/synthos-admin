@@ -57,6 +57,7 @@ import { executeSkill } from "./lib/skill-execution";
 import { probeMcpServer, decryptCredential } from "./lib/mcp-client";
 import { recordRuntimeEvent, listRecentRuntimeEvents } from "./lib/runtime-events";
 import { getRuntimeStatus } from "./lib/runtime-status";
+import { buildEnvReadinessReport, buildStartupSummary } from "./lib/env-readiness";
 import * as windmillClient from "./lib/windmill-client";
 import {
   listVisibleWindmillTargets, listPlatformWindmillTargets, resolveWindmillTarget,
@@ -206,7 +207,13 @@ function enforceTaskWorkspaceAccess(
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  // Pass VII / Workstream M — configurable for real deployment (a PaaS or
+  // container orchestrator commonly assigns PORT); 3000 remains the local
+  // dev default. The loopback self-call in /api/graphs/execute already
+  // reads this same PORT constant, so it can never disagree with the real
+  // listening port.
+  const envPort = Number(process.env.PORT);
+  const PORT = Number.isInteger(envPort) && envPort > 0 && envPort < 65536 ? envPort : 3000;
 
   // Random per-process secret proving a request to /api/execute-agent-task
   // genuinely originated from this server's own /api/graphs/execute node
@@ -4245,6 +4252,46 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // that were never backed by any real check (hermesVersion, serverRuntime,
   // synapses, botMode, jarvisStatus) — removed rather than sanitized, since
   // there is no honest real value to report for them here.
+  // -------------------------------------------------------------------------
+  // Pass VII / Workstream B — liveness vs. readiness, deliberately separate
+  // concepts (B1/B2). Both are intentionally public (no requireAuth) — an
+  // orchestrator/load balancer has no session to present. Neither returns a
+  // DB dump, a filesystem path, or any secret value.
+  // -------------------------------------------------------------------------
+
+  // B1 — liveness: the process is up and can handle a request. Does not
+  // touch the database, Vault, or any external system — a slow/degraded
+  // subsystem must never make an orchestrator kill a healthy process.
+  app.get("/health", (_req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
+  // B2 — readiness: core required systems are usable. An OPTIONAL
+  // integration being NOT_CONFIGURED never fails readiness — only a real
+  // core-subsystem problem does (DB unreachable, required env invalid).
+  // Reuses the same real getRuntimeStatus()/env-readiness evidence the
+  // Master Admin Runtime tab and startup log use — one source of truth,
+  // never a second hand-rolled check that could drift from it.
+  app.get("/api/ready", async (_req, res) => {
+    try {
+      const envReport = buildEnvReadinessReport();
+      const runtime = await getRuntimeStatus();
+      const coreSystems = ["Vault", "Memory Index (FTS5)"];
+      const coreFailed = runtime.systems.filter((s) => coreSystems.includes(s.system) && (s.status === "FAILED"));
+      const ready = envReport.coreReady && coreFailed.length === 0;
+
+      res.status(ready ? 200 : 503).json({
+        ready,
+        timestamp: new Date().toISOString(),
+        requiredEnvMissing: envReport.requiredMissing,
+        requiredEnvInvalid: envReport.invalid,
+        systems: runtime.systems.map((s) => ({ system: s.system, status: s.status })),
+      });
+    } catch (err: any) {
+      res.status(503).json({ ready: false, error: "Readiness check failed to run.", timestamp: new Date().toISOString() });
+    }
+  });
+
   app.get("/api/status", requireAuth, (req, res) => {
     const hasLocalState = fs.existsSync(getDatabasePath());
     const hasObsidian = fs.existsSync(path.join(process.cwd(), "vault"));
@@ -5312,6 +5359,19 @@ sourceHash: ${packageMetadataResult.sourceHash}
     app.get("*", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
+  }
+
+  // Pass VII / Workstream A2 — startup readiness summary. Stdout only, no
+  // secret values, printed once per process start. CONFIGURED here means
+  // "a value is present" (DEGRADED, honestly) — never CONNECTED; live
+  // connectivity is proven per-subsystem at request time (GET /api/ready,
+  // /api/master-admin/windmill/status, /api/hermes/health, etc.).
+  for (const line of buildStartupSummary()) {
+    console.log(`[Startup] ${line.subsystem}: ${line.status} — ${line.detail}`);
+  }
+  const envReport = buildEnvReadinessReport();
+  if (!envReport.coreReady) {
+    console.error(`[Startup] REQUIRED environment variables missing/invalid: ${[...envReport.requiredMissing, ...envReport.invalid].join(', ')}`);
   }
 
   app.listen(PORT, "0.0.0.0", () => {
