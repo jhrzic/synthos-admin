@@ -1368,7 +1368,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
 
           {/* TON Network Workspace */}
           {activeTab === 'ton' && (
-            <TONNetworkView />
+            <TONNetworkView activeWorkspaceId={activeWorkspaceId} />
           )}
 
           {/* Twins Concierge Workspace */}

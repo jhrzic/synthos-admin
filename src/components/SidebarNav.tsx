@@ -96,6 +96,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
         { id: 'kanban' as ActiveTab, label: 'Kanban', icon: Kanban, badge: '6 Stg', color: '#00D26A' },
         { id: 'graph-runs' as ActiveTab, label: 'Active Runs', icon: Activity, color: '#EC4899' },
         { id: 'agent-wireframe' as ActiveTab, label: 'Agent Wireframe', icon: Network, color: '#615EFF' },
+        { id: 'agent-fleet' as ActiveTab, label: 'Agent Fleet', icon: Bot, color: '#EAB308' },
         { id: 'guardian-aegis' as ActiveTab, label: 'Approvals', icon: ShieldCheck, color: '#F59E0B' },
         { id: 'receipts' as ActiveTab, label: 'Results & Receipts', icon: FileCheck, color: '#38BDF8' },
       ]
@@ -118,7 +119,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
       category: 'BUILD',
       items: [
         { id: 'graph-builder' as ActiveTab, label: 'Graph Builder', icon: GitMerge, color: '#38BDF8' },
-        { id: 'graph-runs' as ActiveTab, label: 'Graph Runtime', icon: Activity, color: '#EC4899' },
+        { id: 'graph-runs' as ActiveTab, navId: 'graph-runs-orchestration', label: 'Graph Runtime', icon: Activity, color: '#EC4899' },
         { id: 'skill-registry' as ActiveTab, label: 'Skills Registry', icon: Cpu, color: '#615EFF' },
         { id: 'bot-mode' as ActiveTab, label: 'Automation', icon: Terminal, color: '#F59E0B' },
         { id: 'startup-generator' as ActiveTab, label: 'Launchpad', icon: Zap, color: '#00D26A' },
@@ -137,9 +138,9 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
     {
       category: 'GOVERNANCE',
       items: [
-        { id: 'guardian-aegis' as ActiveTab, label: 'Guardian Gate', icon: Shield, color: '#F59E0B' },
+        { id: 'guardian-aegis' as ActiveTab, navId: 'guardian-aegis-governance', label: 'Guardian Gate', icon: Shield, color: '#F59E0B' },
         { id: 'system-audit' as ActiveTab, label: 'Aegis Verifier', icon: ShieldCheck, color: '#00D26A' },
-        { id: 'receipts' as ActiveTab, label: 'Cryptographic Receipts', icon: FileCheck, color: '#38BDF8' },
+        { id: 'receipts' as ActiveTab, navId: 'receipts-governance', label: 'Cryptographic Receipts', icon: FileCheck, color: '#38BDF8' },
         { id: 'activity-ledger' as ActiveTab, label: 'Activity Ledger', icon: Activity, color: '#A5A2FF' },
         { id: 'policies' as ActiveTab, label: 'Operating Policies', icon: Lock, color: '#EC4899' },
       ]
@@ -288,7 +289,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
                       return (
                         <div key={item.id} className="space-y-0.5">
                           <button
-                            id={`nav-${item.id}`}
+                            id={`nav-${(item as { navId?: string }).navId ?? item.id}`}
                             onClick={() => {
                               setActiveTab(item.id);
                               setIsMobileOpen(false);

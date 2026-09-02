@@ -288,6 +288,56 @@ export function getDatabase(): any {
         ON knowledge_candidates(workspace_id, promotion_state, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_knowledge_candidates_task
         ON knowledge_candidates(workspace_id, task_id);
+
+      -- TON telemetry. Migrated from the real, shipped implementation at
+      -- ~/synthos/mission-control (ton-analytics.ts, ton_telemetry_events).
+      -- Values shown anywhere in the UI must come from these rows or remain
+      -- unavailable — never sample/demo data. occurred_at/created_at are TEXT
+      -- ISO-8601 here (not INTEGER unixepoch) to match this repo's existing
+      -- timestamp convention; SQLite's date() works directly on ISO-8601.
+      CREATE TABLE IF NOT EXISTS ton_telemetry_events (
+        event_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        event_type TEXT NOT NULL CHECK (event_type IN (
+          'campaign', 'acquisition', 'install', 'attribution', 'fraud_block',
+          'wallet_link', 'escrow_deposit', 'verification', 'settlement', 'payout'
+        )),
+        channel TEXT,
+        wallet_hint TEXT,
+        amount_usdt REAL,
+        spend_usd REAL,
+        revenue_usd REAL,
+        verified INTEGER NOT NULL DEFAULT 0 CHECK (verified IN (0, 1)),
+        blocked_reason TEXT,
+        latency_ms INTEGER,
+        tx_hash TEXT,
+        detail_json TEXT,
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ton_telemetry_workspace_time
+        ON ton_telemetry_events(workspace_id, occurred_at);
+      CREATE INDEX IF NOT EXISTS idx_ton_telemetry_workspace_type_time
+        ON ton_telemetry_events(workspace_id, event_type, occurred_at);
+
+      -- TON guardians. Migrated from ~/synthos/mission-control's
+      -- ton-guardians.ts, adapted: the source installs guardians as rows in
+      -- a real "agents" table this repo does not have (agents here are role
+      -- strings, not DB rows — see server.ts's assignedAgent usage). This
+      -- table stands alone rather than inventing a generic agents table.
+      -- Exactly 5 real guardians exist in the source (attribution, fraud,
+      -- treasury, compliance, settlement) — not 8. A row here means that
+      -- guardian was genuinely installed for this workspace; there is no
+      -- other source of truth for guardian state.
+      CREATE TABLE IF NOT EXISTS ton_guardians (
+        workspace_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'offline',
+        config_json TEXT,
+        installed_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, name)
+      );
     `);
   }
   return dbInstance;
