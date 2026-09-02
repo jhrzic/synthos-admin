@@ -3,6 +3,16 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 // @ts-ignore
 import { DatabaseSync } from 'node:sqlite';
+import {
+  calculateKilConfidence,
+  evidenceQuality,
+  isPromoted,
+  trackRecord,
+  verificationGate,
+  PROMOTION_THRESHOLD,
+  QUALITY_FLOOR,
+  type KilCheckResults,
+} from './kil';
 
 export interface TaskRecord {
   task_id: string;
@@ -204,6 +214,80 @@ export function getDatabase(): any {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+
+      -- Knowledge Intelligence Layer (KIL). Migrated from the real, shipped
+      -- implementation in ~/synthos/mission-control (synthos-kil.ts,
+      -- synthos-kil-observations.ts). Scoring lives in lib/kil.ts as pure
+      -- functions; this table only stores what was decided, so a past
+      -- promotion can be explained from its own row rather than recomputed
+      -- against today's weights.
+      --
+      -- Deliberately omitted vs. the source schema: cron_job_id. This
+      -- deployment has no scheduler/loop concept (scheduling is deferred to
+      -- Windmill, per project docs) — there is nothing for that column to
+      -- ever reference, so it is not carried forward as dead compatibility
+      -- surface. agent_id and task_id are TEXT here (not INTEGER) to match
+      -- this repo's existing id convention (tasks.task_id, agents are role
+      -- strings like "scout"/"dev", not rows in a table).
+      CREATE TABLE IF NOT EXISTS kil_observations (
+        observation_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        task_id TEXT,
+        agent_id TEXT,
+        verification INTEGER NOT NULL CHECK (verification IN (0, 1)),
+        evidence REAL NOT NULL,
+        frequency REAL NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        confidence REAL NOT NULL,
+        promoted INTEGER NOT NULL DEFAULT 0 CHECK (promoted IN (0, 1)),
+        promotion_threshold REAL NOT NULL,
+        quality_floor REAL NOT NULL,
+        checks_json TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_kil_observations_workspace
+        ON kil_observations(workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_kil_observations_promoted
+        ON kil_observations(workspace_id, promoted);
+      CREATE INDEX IF NOT EXISTS idx_kil_observations_task
+        ON kil_observations(workspace_id, task_id);
+
+      -- Verified knowledge candidate projection. Migrated from the real
+      -- shipped implementation (synthos-verified-knowledge.ts /
+      -- knowledge_candidates), narrowed to what this repo's schema can
+      -- actually back. The source table also FKs to mission_id, graph_run_id
+      -- and activity_id (mission-control's missions/graph_runs/activity_ledger
+      -- tables); this repo has no "mission" concept above a task at all, and
+      -- its graph_runs/activity_events aren't linked to a task the way the
+      -- source's schema assumes. Rather than invent those relationships,
+      -- this table preserves the three fields that map onto real rows here
+      -- and can be genuinely integrity-checked: task_id, kil_observation_id,
+      -- receipt_id. This is a narrower provenance guarantee than the source
+      -- table's four-way check, not an equivalent one — reported, not hidden.
+      CREATE TABLE IF NOT EXISTS knowledge_candidates (
+        candidate_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        candidate_key TEXT NOT NULL,
+        label TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        kil_observation_id TEXT NOT NULL,
+        receipt_id TEXT NOT NULL,
+        vault_path TEXT NOT NULL,
+        verification_state TEXT NOT NULL DEFAULT 'verified'
+          CHECK (verification_state IN ('verified', 'failed')),
+        promotion_state TEXT NOT NULL DEFAULT 'pending'
+          CHECK (promotion_state IN ('pending', 'promoted', 'rejected')),
+        promoted_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (workspace_id, candidate_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_knowledge_candidates_workspace_state
+        ON knowledge_candidates(workspace_id, promotion_state, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_knowledge_candidates_task
+        ON knowledge_candidates(workspace_id, task_id);
     `);
   }
   return dbInstance;
@@ -1141,5 +1225,277 @@ export function getTaskReceipts(taskId: string): ReceiptRecord[] {
     SELECT * FROM receipts WHERE task_id = ? ORDER BY created_at ASC
   `).all(taskId);
   return rows as ReceiptRecord[];
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge Intelligence Layer (KIL) persistence.
+//
+// Migrated from the real, shipped implementation at
+// ~/synthos/mission-control/src/lib/synthos-kil-observations.ts. Scoring
+// itself lives in lib/kil.ts as pure functions (also a direct port); this
+// module is the only accessor for what those functions decided.
+//
+// The one rule, carried forward unchanged from the source: every read and
+// every write is filtered by workspace_id. There is no unscoped variant here
+// and none should be added — matches the same discipline already enforced
+// on tasks/activity/receipts elsewhere in this file.
+// ---------------------------------------------------------------------------
+
+export interface KilObservationRecord {
+  observation_id: string;
+  workspace_id: string;
+  task_id: string | null;
+  agent_id: string | null;
+  /** V(K): 1 when every blocking safety check passed. */
+  verification: number;
+  /** E(K): mean of the five continuous quality vectors. */
+  evidence: number;
+  /** F(K): the computed track-record score, not the raw attempt count. */
+  frequency: number;
+  attempts: number;
+  confidence: number;
+  promoted: number;
+  promotion_threshold: number;
+  quality_floor: number;
+  checks_json: string | null;
+  created_at: string;
+}
+
+/**
+ * Score one verification and write the observation. Returns what was decided.
+ *
+ * Promotion requires BOTH the confidence bar and the quality floor: a long
+ * track record cannot buy promotion for structurally incomplete work.
+ */
+export function recordKilObservation(params: {
+  workspaceId: string;
+  taskId?: string | null;
+  agentId?: string | null;
+  checks: KilCheckResults;
+  attempts: number;
+}): KilObservationRecord {
+  const db = getDatabase();
+  const evidence = evidenceQuality(params.checks);
+  const confidence = calculateKilConfidence({ checks: params.checks, attempts: params.attempts });
+  const promoted = isPromoted(confidence, evidence);
+  const observationId = `kil-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO kil_observations (
+      observation_id, workspace_id, task_id, agent_id, verification, evidence, frequency,
+      attempts, confidence, promoted, promotion_threshold, quality_floor, checks_json, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    observationId,
+    params.workspaceId,
+    params.taskId ?? null,
+    params.agentId ?? null,
+    verificationGate(params.checks),
+    evidence,
+    trackRecord(params.attempts),
+    Math.max(0, Math.floor(params.attempts)),
+    confidence,
+    promoted ? 1 : 0,
+    PROMOTION_THRESHOLD,
+    QUALITY_FLOOR,
+    JSON.stringify(params.checks),
+    now
+  );
+
+  return db.prepare('SELECT * FROM kil_observations WHERE observation_id = ? AND workspace_id = ?')
+    .get(observationId, params.workspaceId) as KilObservationRecord;
+}
+
+export interface ListKilObservationsOptions {
+  promotedOnly?: boolean;
+  taskId?: string;
+  limit?: number;
+}
+
+/** Most recent first. */
+export function listKilObservations(
+  workspaceId: string,
+  options: ListKilObservationsOptions = {}
+): KilObservationRecord[] {
+  const db = getDatabase();
+  const clauses = ['workspace_id = ?'];
+  const params: any[] = [workspaceId];
+
+  if (options.promotedOnly) clauses.push('promoted = 1');
+  if (options.taskId) {
+    clauses.push('task_id = ?');
+    params.push(options.taskId);
+  }
+
+  const limit = Math.min(Math.max(options.limit ?? 50, 1), 500);
+  const rows = db.prepare(
+    `SELECT * FROM kil_observations WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC LIMIT ?`
+  ).all(...params, limit);
+  return rows as KilObservationRecord[];
+}
+
+export interface KilSummary {
+  total: number;
+  promoted: number;
+  blocked: number;
+  /** Share promoted, 0-1. Null when nothing has been observed. */
+  promotionRate: number | null;
+  /** Mean E(K). Null when nothing has been observed. */
+  averageEvidence: number | null;
+}
+
+export function summariseKil(workspaceId: string): KilSummary {
+  const db = getDatabase();
+  const row = db.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN promoted = 1 THEN 1 ELSE 0 END) AS promoted,
+      SUM(CASE WHEN verification = 0 THEN 1 ELSE 0 END) AS blocked,
+      AVG(evidence) AS avg_evidence
+    FROM kil_observations WHERE workspace_id = ?
+  `).get(workspaceId) as { total: number | null; promoted: number | null; blocked: number | null; avg_evidence: number | null } | undefined;
+
+  const total = row?.total ?? 0;
+  const promoted = row?.promoted ?? 0;
+  return {
+    total,
+    promoted,
+    blocked: row?.blocked ?? 0,
+    // No observations means unknown, not zero.
+    promotionRate: total > 0 ? promoted / total : null,
+    averageEvidence: total > 0 ? (row?.avg_evidence ?? null) : null,
+  };
+}
+
+/**
+ * An agent's prior attempts, for F(K). Counts this workspace's observations
+ * only — a track record earned for one client does not transfer to another.
+ */
+export function kilAgentAttempts(workspaceId: string, agentId: string): number {
+  const db = getDatabase();
+  const row = db.prepare(
+    'SELECT COUNT(*) AS n FROM kil_observations WHERE workspace_id = ? AND agent_id = ?'
+  ).get(workspaceId, agentId) as { n: number | null } | undefined;
+  return row?.n ?? 0;
+}
+
+/**
+ * The most recent observation for a task, scoped to the workspace. Null when
+ * the task has never been through the gate.
+ */
+export function latestKilObservationForTask(workspaceId: string, taskId: string): KilObservationRecord | null {
+  const db = getDatabase();
+  const row = db.prepare(
+    `SELECT * FROM kil_observations WHERE workspace_id = ? AND task_id = ? ORDER BY created_at DESC LIMIT 1`
+  ).get(workspaceId, taskId);
+  return (row as KilObservationRecord) || null;
+}
+
+// ---------------------------------------------------------------------------
+// Verified knowledge candidate projection.
+//
+// Migrated from ~/synthos/mission-control/src/lib/synthos-verified-knowledge.ts,
+// narrowed to what this repo's schema can actually back. The source table
+// also FKs to mission_id, graph_run_id and activity_id; this repo has no
+// "mission" concept above a task, and its graph_runs/activity_events are not
+// linked to a task the way the source schema assumes. This preserves the
+// three-way check that DOES map onto real rows here (task + verified KIL
+// observation + receipt, all in the same workspace) rather than inventing
+// the other relationships. That is a narrower provenance guarantee than the
+// source's four-way check — reported here, not hidden.
+// ---------------------------------------------------------------------------
+
+export interface KnowledgeCandidateRecord {
+  candidate_id: string;
+  workspace_id: string;
+  candidate_key: string;
+  label: string;
+  task_id: string;
+  kil_observation_id: string;
+  receipt_id: string;
+  vault_path: string;
+  verification_state: 'verified' | 'failed';
+  promotion_state: 'pending' | 'promoted' | 'rejected';
+  promoted_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function isValidVaultPath(value: string): boolean {
+  return value.length > 0 && !value.startsWith('/') && !value.split('/').includes('..');
+}
+
+/**
+ * Idempotently projects one verified KIL observation + receipt into a
+ * workspace-scoped knowledge candidate. Throws if the task, a verified KIL
+ * observation for it, or a receipt for it cannot be found in this workspace
+ * — a candidate must be backed by real rows, never invented ones.
+ */
+export function projectKnowledgeCandidate(params: {
+  workspaceId: string;
+  taskId: string;
+  kilObservationId: string;
+  receiptId: string;
+  vaultPath: string;
+  label: string;
+}): { candidate: KnowledgeCandidateRecord; created: boolean } {
+  const db = getDatabase();
+  const label = params.label.trim();
+  if (!label) throw new Error('label is required');
+  if (!isValidVaultPath(params.vaultPath)) throw new Error('vaultPath must be a workspace-relative path');
+
+  const task = db.prepare('SELECT task_id FROM tasks WHERE task_id = ? AND workspace_id = ?')
+    .get(params.taskId, params.workspaceId);
+  if (!task) throw new Error('Task does not belong to this workspace');
+
+  const observation = db.prepare(
+    'SELECT observation_id FROM kil_observations WHERE observation_id = ? AND workspace_id = ? AND task_id = ? AND verification = 1'
+  ).get(params.kilObservationId, params.workspaceId, params.taskId);
+  if (!observation) throw new Error('Verified KIL observation was not found in this workspace for this task');
+
+  const receipt = db.prepare(`
+    SELECT r.receipt_id FROM receipts r
+    JOIN tasks t ON t.task_id = r.task_id
+    WHERE r.receipt_id = ? AND r.task_id = ? AND t.workspace_id = ?
+  `).get(params.receiptId, params.taskId, params.workspaceId);
+  if (!receipt) throw new Error('Receipt was not found in this workspace for this task');
+
+  // Same identity as the source's candidateKey(): repeat projection of the
+  // same evidence is a no-op, not a duplicate row.
+  const candidateKey = [params.taskId, params.kilObservationId, params.receiptId, params.vaultPath].join(':');
+  const existing = db.prepare('SELECT * FROM knowledge_candidates WHERE workspace_id = ? AND candidate_key = ?')
+    .get(params.workspaceId, candidateKey);
+  if (existing) return { candidate: existing as KnowledgeCandidateRecord, created: false };
+
+  const candidateId = `kc-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO knowledge_candidates (
+      candidate_id, workspace_id, candidate_key, label, task_id, kil_observation_id,
+      receipt_id, vault_path, verification_state, promotion_state, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'verified', 'pending', ?, ?)
+  `).run(
+    candidateId, params.workspaceId, candidateKey, label, params.taskId,
+    params.kilObservationId, params.receiptId, params.vaultPath, now, now
+  );
+
+  const row = db.prepare('SELECT * FROM knowledge_candidates WHERE candidate_id = ? AND workspace_id = ?')
+    .get(candidateId, params.workspaceId);
+  return { candidate: row as KnowledgeCandidateRecord, created: true };
+}
+
+export function getKnowledgeCandidate(workspaceId: string, candidateId: string): KnowledgeCandidateRecord | null {
+  const db = getDatabase();
+  const row = db.prepare('SELECT * FROM knowledge_candidates WHERE candidate_id = ? AND workspace_id = ?')
+    .get(candidateId, workspaceId);
+  return (row as KnowledgeCandidateRecord) || null;
+}
+
+export function listWorkspaceKnowledgeCandidates(workspaceId: string, limit = 50): KnowledgeCandidateRecord[] {
+  const db = getDatabase();
+  const rows = db.prepare('SELECT * FROM knowledge_candidates WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?')
+    .all(workspaceId, Math.min(Math.max(limit, 1), 500));
+  return rows as KnowledgeCandidateRecord[];
 }
 

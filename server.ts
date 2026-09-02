@@ -39,10 +39,12 @@ import {
   resolveWorkspaceId,
   DEFAULT_WORKSPACE_ID,
   listWorkspaceTasks,
-  listWorkspaceReceipts
+  listWorkspaceReceipts,
+  projectKnowledgeCandidate
 } from "./lib/persistence";
 import { hermesAdapter } from "./src/services/hermesAdapter";
 import { classifyModelRequest } from "./lib/model-router";
+import { verifyTaskAtGate } from "./lib/kil-gate";
 
 dotenv.config();
 
@@ -1660,6 +1662,43 @@ sourceHash: ${packageMetadataResult.sourceHash}
             },
             createdAt: nowIso
           });
+
+          // ---------------------------------------------------------------
+          // Knowledge Intelligence Layer (KIL) — deterministic content-quality
+          // gate, independent of Aegis's execution-integrity gate above.
+          // Isolated in its own try/catch: a KIL failure must never affect
+          // the task's own status, the receipt, or this response — matches
+          // the source implementation's own rule that a low score is
+          // recorded and left alone, never enforced as a blocker here.
+          // ---------------------------------------------------------------
+          try {
+            const gate = verifyTaskAtGate({
+              taskId,
+              workspaceId,
+              title: taskTitle,
+              description,
+              groundingContext: [taskTitle, description, sourceUrl, inputs].filter(Boolean).join('\n\n'),
+              assignedAgent,
+              output: executionOutput,
+            });
+
+            if (gate.observation.promoted) {
+              try {
+                projectKnowledgeCandidate({
+                  workspaceId,
+                  taskId,
+                  kilObservationId: gate.observation.observation_id,
+                  receiptId,
+                  vaultPath: persistedArtifact.relative_path,
+                  label: taskTitle,
+                });
+              } catch (projectErr: any) {
+                console.warn("[KIL] Knowledge candidate projection skipped:", projectErr?.message || projectErr);
+              }
+            }
+          } catch (kilErr: any) {
+            console.warn("[KIL] Gate verification skipped:", kilErr?.message || kilErr);
+          }
         } else {
           // Signature verification failed
           updateTaskStatus(taskId, "FAILED");
