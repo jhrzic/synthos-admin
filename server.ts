@@ -49,6 +49,8 @@ import { buildTonReadiness } from "./lib/ton-readiness";
 import { probeTonReadiness } from "./lib/ton-probe";
 import { tonAnalyticsSnapshot, recordTonTelemetry } from "./lib/ton-analytics";
 import { tonGuardianViews, installTonGuardians } from "./lib/ton-guardians";
+import { listWorkspaceVaultEntries, getWorkspaceVaultEntry, previewWorkspaceVaultEntry } from "./lib/vault";
+import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory } from "./lib/memory-index";
 
 dotenv.config();
 
@@ -1703,6 +1705,20 @@ sourceHash: ${packageMetadataResult.sourceHash}
           } catch (kilErr: any) {
             console.warn("[KIL] Gate verification skipped:", kilErr?.message || kilErr);
           }
+
+          // ---------------------------------------------------------------
+          // Local memory index — the artifact just written is real and
+          // Aegis-verified with a signed receipt (we're inside the
+          // receiptVerificationPassed branch), which is the "verified
+          // receipt/artifact relationship" the index prefers to index from.
+          // Isolated in its own try/catch: an indexing failure must never
+          // affect task completion, the receipt, or this response.
+          // ---------------------------------------------------------------
+          try {
+            indexVaultArtifact(workspaceId, persistedArtifact.artifact_id);
+          } catch (indexErr: any) {
+            console.warn("[Memory Index] Indexing skipped:", indexErr?.message || indexErr);
+          }
         } else {
           // Signature verification failed
           updateTaskStatus(taskId, "FAILED");
@@ -1859,7 +1875,11 @@ sourceHash: ${packageMetadataResult.sourceHash}
 
   app.get("/api/graphs", (req, res) => {
     try {
-      const graphs = listGraphs();
+      const resolved = resolveWorkspaceId(req.query.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const graphs = listGraphs(resolved.workspaceId);
       return res.json({
         success: true,
         graphs: graphs.map(g => ({
@@ -1875,8 +1895,12 @@ sourceHash: ${packageMetadataResult.sourceHash}
 
   app.post("/api/graphs", (req, res) => {
     try {
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
       const { graphId = `graph-${Date.now()}`, name = "Unnamed Graph", description = "", nodes = [], edges = [] } = req.body || {};
-      const saved = saveGraph({ graphId, name, description, nodes, edges });
+      const saved = saveGraph({ graphId, workspaceId: resolved.workspaceId, name, description, nodes, edges });
       return res.json({
         success: true,
         graph: {
@@ -1892,8 +1916,12 @@ sourceHash: ${packageMetadataResult.sourceHash}
 
   app.get("/api/graphs/:graphId", (req, res) => {
     try {
+      const resolved = resolveWorkspaceId(req.query.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
       const { graphId } = req.params;
-      const g = getGraph(graphId);
+      const g = getGraph(graphId, resolved.workspaceId);
       if (!g) return res.status(404).json({ success: false, error: "Graph not found", graphId });
       return res.json({
         success: true,
@@ -1910,7 +1938,11 @@ sourceHash: ${packageMetadataResult.sourceHash}
 
   app.get("/api/graph-runs", (req, res) => {
     try {
-      const runs = listGraphRuns();
+      const resolved = resolveWorkspaceId(req.query.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const runs = listGraphRuns(resolved.workspaceId);
       return res.json({
         success: true,
         runs: runs.map(r => ({
@@ -1925,8 +1957,12 @@ sourceHash: ${packageMetadataResult.sourceHash}
 
   app.get("/api/graph-runs/:runId", (req, res) => {
     try {
+      const resolved = resolveWorkspaceId(req.query.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
       const { runId } = req.params;
-      const r = getGraphRun(runId);
+      const r = getGraphRun(runId, resolved.workspaceId);
       if (!r) return res.status(404).json({ success: false, error: "Graph run not found", runId });
       return res.json({
         success: true,
@@ -1942,7 +1978,13 @@ sourceHash: ${packageMetadataResult.sourceHash}
 
   app.post("/api/graphs/execute", async (req, res) => {
     try {
-      const { 
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const workspaceId = resolved.workspaceId;
+
+      const {
         graphId = `graph-${Date.now()}`,
         name = "Sequential DAG",
         nodes = [],
@@ -1954,10 +1996,14 @@ sourceHash: ${packageMetadataResult.sourceHash}
         return res.status(400).json({ success: false, error: "Graph must contain at least one node." });
       }
 
-      // 1. Persist graph definition
-      saveGraph({ graphId, name, nodes, edges });
+      // 1. Persist graph definition — graph ownership is authoritative from
+      // here on; saveGraph() rejects if graphId already exists in another
+      // workspace instead of silently reassigning it.
+      saveGraph({ graphId, workspaceId, name, nodes, edges });
 
-      // 2. Initialize Graph Run in SQLite
+      // 2. Initialize Graph Run in SQLite — inherits workspaceId from the
+      // graph just saved (saveGraphRun derives it from graphs.workspace_id;
+      // passing it here too makes a mismatch fail loudly rather than silently).
       const initialState = {
         graphId,
         nodeResults: {},
@@ -1968,6 +2014,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
       saveGraphRun({
         runId,
         graphId,
+        workspaceId,
         status: "RUNNING",
         currentNodeId: nodes[0].id,
         state: initialState
@@ -2009,7 +2056,10 @@ sourceHash: ${packageMetadataResult.sourceHash}
             assignedAgent: nodeAgent,
             assignedModel: nodeModel,
             inputs: previousOutput,
-            workspaceId: "ws-synthos-primary"
+            // The graph's authoritative workspace, not a hardcoded constant —
+            // a spawned task must inherit the owning graph's workspace, never
+            // a default unrelated to it.
+            workspaceId
           })
         });
 
@@ -2443,16 +2493,10 @@ sourceHash: ${packageMetadataResult.sourceHash}
           tasks.map((t: any, idx: number) => `${idx + 1}. [${t.status}] ${t.title} (${t.assigned_agent} / ${t.assigned_model}) - ID: ${t.task_id}`).join("\n");
       } else if (lower.includes("graph") || lower.includes("pipeline") || lower.includes("dag")) {
         intent = "ADMIN_GRAPH_QUERY";
-        // NOTE: graphs/graph_runs carry no workspace_id anywhere in the
-        // current schema — not on the tables, not on the write path
-        // (POST /api/graphs, /api/graphs/execute). This is a real, known
-        // gap left unresolved here deliberately: closing it would mean
-        // changing graph execution's write path and schema, which this fix
-        // is explicitly scoped not to touch. Reported, not silently patched.
-        const graphs = listGraphs();
-        const runs = listGraphRuns();
+        const graphs = listGraphs(jarvisWorkspaceId);
+        const runs = listGraphRuns(jarvisWorkspaceId);
         evidence = { graphsCount: graphs.length, runsCount: runs.length, latestRun: runs[0] };
-        reply = `SynthOS Graph Control Plane:\n- Total Graph DAGs: ${graphs.length}\n- Total Graph Execution Runs: ${runs.length}\n- Latest Run: ${runs[0]?.run_id || 'None'} [${runs[0]?.status || 'IDLE'}]`;
+        reply = `SynthOS Graph Control Plane for workspace ${jarvisWorkspaceId}:\n- Total Graph DAGs: ${graphs.length}\n- Total Graph Execution Runs: ${runs.length}\n- Latest Run: ${runs[0]?.run_id || 'None'} [${runs[0]?.status || 'IDLE'}]`;
       } else if (lower.includes("receipt") || lower.includes("signature") || lower.includes("aegis")) {
         intent = "ADMIN_RECEIPT_QUERY";
         const receipts = listWorkspaceReceipts(jarvisWorkspaceId, 5);
@@ -3115,6 +3159,83 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // synthetic telemetry is ever generated by these routes — POST is a real
   // ingestion surface for an external system to report real events.
   // ==========================================
+
+  // ==========================================
+  // VAULT — REAL BACKEND OVER REAL ARTIFACTS
+  // Read-only. artifacts is written only by /api/execute-agent-task; this
+  // surface never accepts a client-supplied filesystem path — every read is
+  // resolved from a real artifact_id through lib/vault.ts's safety checks.
+  // ==========================================
+
+  app.get("/api/vault", (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.query.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const entries = listWorkspaceVaultEntries(resolved.workspaceId);
+      const withPreview = entries.map((entry) => ({
+        ...entry,
+        preview: previewWorkspaceVaultEntry(resolved.workspaceId, entry.artifact_id),
+      }));
+      return res.json({ success: true, workspaceId: resolved.workspaceId, count: withPreview.length, entries: withPreview });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list Vault entries" });
+    }
+  });
+
+  app.get("/api/vault/:artifactId", (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.query.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const entry = getWorkspaceVaultEntry(resolved.workspaceId, req.params.artifactId);
+      if (!entry) {
+        return res.status(404).json({ success: false, error: "Vault entry not found" });
+      }
+      return res.json({ success: true, workspaceId: resolved.workspaceId, entry });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to read Vault entry" });
+    }
+  });
+
+  // ==========================================
+  // MEMORY — REAL SQLite FTS5 INDEX OVER REAL VAULT CONTENT
+  // No vector infrastructure, no external search service. Indexing happens
+  // automatically as a side effect of real, verified task completion (see
+  // /api/execute-agent-task); /api/memory/reindex exists only to rebuild the
+  // index from what's already in the Vault, never to seed sample data.
+  // ==========================================
+
+  app.get("/api/memory/search", (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.query.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const q = typeof req.query.q === "string" ? req.query.q : "";
+      const limitRaw = Number(req.query.limit);
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 20;
+      const results = searchWorkspaceMemory(resolved.workspaceId, q, limit);
+      return res.json({ success: true, workspaceId: resolved.workspaceId, query: q, count: results.length, results });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Memory search failed" });
+    }
+  });
+
+  app.post("/api/memory/reindex", (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const result = reindexWorkspaceMemory(resolved.workspaceId);
+      return res.json({ success: true, workspaceId: resolved.workspaceId, ...result });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Memory reindex failed" });
+    }
+  });
 
   app.get("/api/ton/status", async (req, res) => {
     try {

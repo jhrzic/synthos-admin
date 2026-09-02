@@ -25,6 +25,15 @@ interface JarvisViewProps {
   onUpdateSettings: (newSettings: Partial<JarvisSettings>) => void;
   onAddNoteToVault: (title: string, content: string, tags: string[]) => void;
   onSendQuery: (query: string, targetModel: string) => Promise<string>;
+  /**
+   * Routes to the real, workspace-scoped /api/jarvis/command dispatcher —
+   * which itself decides, server-side, whether a directive is a supported
+   * admin query (tasks/graphs/receipts) or ordinary conversation. Jarvis's
+   * own text submission uses this instead of the generic onSendQuery path,
+   * so its "show my tasks"-style directives actually reach that real
+   * infrastructure instead of a generic chat call that can't answer them.
+   */
+  onJarvisCommand: (command: string) => Promise<string>;
 }
 
 export const JarvisView: React.FC<JarvisViewProps> = ({
@@ -32,6 +41,7 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
   onUpdateSettings,
   onAddNoteToVault,
   onSendQuery,
+  onJarvisCommand,
 }) => {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [inputText, setInputText] = useState('');
@@ -40,9 +50,13 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
   const [transientCaption, setTransientCaption] = useState<string | null>(null);
   const [hudLogs, setHudLogs] = useState<string[]>([
     "[KERNEL]: AI Assistant OS initialized.",
-    "[SYNAPSE]: Obsidian memory core linked at ~/Documents/Obsidian/Hermes-Vault",
-    "[SECURITY]: Vault write permissions & sandbox execution active.",
-    "[AUDIO]: Fish Audio neural voice stream online (<150ms latency)."
+    // No live Obsidian desktop application connection exists in this
+    // deployment — see the Vault screen for its real, honest status.
+    "[VAULT]: Obsidian application connection: NOT_CONNECTED. Vault artifacts are served from local SQLite/disk storage.",
+    "[SECURITY]: Guardian policy checks active on terminal/task execution paths.",
+    // Fish Audio's real connectivity depends on FISH_AUDIO_API_KEY being
+    // configured — never claimed "online" here without that evidence.
+    "[AUDIO]: Voice synthesis availability depends on configured provider credentials."
   ]);
 
   const [activeVoiceResponse, setActiveVoiceResponse] = useState<string>(
@@ -237,11 +251,10 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
       clearTranscript();
       const started = startListening();
       if (!started) {
-        // Fallback simulation
-        showCaptionWithAutoDismiss("Listening for directive...");
-        setTimeout(() => {
-          handleFinalSpeech("Summarize today's frontier AI research and sync to Obsidian vault");
-        }, 1800);
+        // Real speech recognition is unavailable in this browser/context.
+        // Never inject a fabricated transcript as if the user spoke it —
+        // show the truthful state and let them type instead.
+        showCaptionWithAutoDismiss("Voice input is not available. Type your directive below.");
       }
     }
   };
@@ -258,7 +271,7 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
     setHudLogs(prev => [`[USER DIRECTIVE]: ${query}`, ...prev]);
 
     try {
-      const reply = await onSendQuery(query, 'gemini');
+      const reply = await onJarvisCommand(query);
       setActiveVoiceResponse(reply);
       showCaptionWithAutoDismiss(reply.slice(0, 120) + (reply.length > 120 ? '...' : ''));
       setHudLogs(prev => [`[ASSISTANT EXECUTION]: ${reply.slice(0, 80)}...`, ...prev]);

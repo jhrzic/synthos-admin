@@ -815,7 +815,13 @@ Please research and resolve all missing fields according to the Required Field S
     }
   };
 
-  // Run topological graph compiler & simulator
+  // Local structural dry-run of the graph definition. This does NOT call the
+  // real execution backend (POST /api/graphs/execute) and therefore makes no
+  // model calls, spends no budget, and produces no verified receipts — it
+  // only checks that every agent node has left DRAFT status. Real, paid
+  // execution (with real Aegis verification and receipts) happens from the
+  // Graph Runs screen against a saved graph, so this preview is never
+  // mislabeled as a completed run.
   const handleRunGraph = async () => {
     // Check if any agent nodes are still in draft
     const draftNodes = nodes.filter((n) => n.type === 'agent' && n.status === 'draft');
@@ -832,25 +838,24 @@ Please research and resolve all missing fields according to the Required Field S
     setActiveStepIndex(0);
     setExecutionLogs((prev) => [
       ...prev,
-      `[GraphCompiler]: Executing topological sort across ${nodes.length} nodes and ${edges.length} edges...`,
+      `[GraphCompiler]: DRY-RUN PREVIEW ONLY — validating topology across ${nodes.length} nodes and ${edges.length} edges. This does not call the live execution backend, spend budget, or produce a verified receipt.`,
     ]);
 
-    // Reset statuses to running sequence
     for (let i = 0; i < nodes.length; i++) {
       const currentNode = nodes[i];
       setActiveStepIndex(i);
       setNodes((prev) => prev.map((n) => (n.id === currentNode.id ? { ...n, status: 'running' } : n)));
       setExecutionLogs((prev) => [
         ...prev,
-        `[Step ${i + 1}/${nodes.length}]: Executing [${currentNode.label}] (${currentNode.type.toUpperCase()}) | Model: ${currentNode.requiredFields.model_assignment || 'Default'} | SLA: ${currentNode.requiredFields.cost_latency_budget || 'Nominal'}...`,
+        `[Step ${i + 1}/${nodes.length}]: Checking [${currentNode.label}] (${currentNode.type.toUpperCase()}) config | Model assignment: ${currentNode.requiredFields.model_assignment || 'Default'} | SLA target: ${currentNode.requiredFields.cost_latency_budget || 'Nominal'}...`,
       ]);
 
-      await new Promise((res) => setTimeout(res, 850));
+      await new Promise((res) => setTimeout(res, 350));
 
       setNodes((prev) => prev.map((n) => (n.id === currentNode.id ? { ...n, status: 'success' } : n)));
       setExecutionLogs((prev) => [
         ...prev,
-        `[Step ${i + 1}/${nodes.length}]: Completed [${currentNode.label}] · Status 200 OK · Output verified against guardrails: "${currentNode.requiredFields.guardrails || 'Passed'}"`,
+        `[Step ${i + 1}/${nodes.length}]: [${currentNode.label}] structurally valid (dry-run only — not executed).`,
       ]);
     }
 
@@ -858,17 +863,8 @@ Please research and resolve all missing fields according to the Required Field S
     setActiveStepIndex(-1);
     setExecutionLogs((prev) => [
       ...prev,
-      `[GraphRunner]: Graph compilation & execution finished with 0 errors. Verified outputs in [[Obsidian-Knowledge-Graph]].`,
+      `[GraphCompiler]: Dry-run preview finished — all nodes structurally valid. No model calls were made. To actually run this graph against the live execution backend, save it and dispatch it from Graph Runs.`,
     ]);
-
-    if (onAddNoteToVault) {
-      onAddNoteToVault(
-        `Compiled-DAG-Run-${Date.now().toString().slice(-4)}`,
-        `# Compiled Graph Execution DAG Summary\n\n- Template: ${selectedTemplateId}\n- Total Nodes: ${nodes.length}\n- Edges Connected: ${edges.length}\n- Guardrail Checks: All Passed\n- Verification Receipt: Cryptographically signed`,
-        ['graph-run', 'workflow', 'synthos-compiler'],
-        'Pipeline-Runs'
-      );
-    }
   };
 
   const getNodeColor = (type: GraphNode['type'], status: GraphNode['status']) => {

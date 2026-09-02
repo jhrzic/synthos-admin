@@ -301,6 +301,29 @@ export default function App() {
     }
   };
 
+  // Real, workspace-scoped Jarvis admin-command dispatcher. Jarvis's own
+  // text/voice submission uses this instead of handleSendQuery — the
+  // backend route itself decides whether the directive is a supported admin
+  // query (tasks/graphs/receipts) or ordinary conversation, and answers
+  // accordingly. Only Jarvis calls this; every other onSendQuery consumer
+  // (Hermes chat, Twins, Skills test, etc.) is unaffected.
+  const handleJarvisCommand = async (command: string): Promise<string> => {
+    try {
+      const res = await fetch('/api/jarvis/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command, workspaceId: activeWorkspaceId }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.success === false) {
+        return `[STATUS: DEGRADED - JARVIS_COMMAND_UNAVAILABLE]\n${data.error || `HTTP ${res.status}`}`;
+      }
+      return data.reply || 'Directive acknowledged.';
+    } catch (err: any) {
+      return `[STATUS: DEGRADED - JARVIS_COMMAND_UNAVAILABLE]\nReason: ${err?.message || 'Network error / API gateway unreachable'}`;
+    }
+  };
+
   // Add Note to Obsidian Vault with full Workspace Memory Provenance
   const handleAddNoteToVault = (
     title: string, 
@@ -1474,6 +1497,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               onAddNoteToVault={(title, content, tags) => handleAddNoteToVault(title, content, tags, 'Agent-Memories')}
               onSendQuery={handleSendQuery}
               onSelectTab={setActiveTab}
+              activeWorkspaceId={activeWorkspaceId}
             />
           )}
 
@@ -1724,6 +1748,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               onAddNoteToVault={(title, content, tags) => handleAddNoteToVault(title, content, tags, 'Agent-Memories')}
               onSendQuery={handleSendQuery}
               onSelectTab={setActiveTab}
+              activeWorkspaceId={activeWorkspaceId}
             />
           )}
 
@@ -1738,6 +1763,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               onSendToModel={(content, modelId) => {
                 setActiveTab(modelId as ActiveTab);
               }}
+              activeWorkspaceId={activeWorkspaceId}
             />
           )}
 
@@ -1924,6 +1950,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               onSendToModel={(content, modelId) => {
                 setActiveTab(modelId as ActiveTab);
               }}
+              activeWorkspaceId={activeWorkspaceId}
             />
           )}
 
@@ -1946,6 +1973,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               onUpdateSettings={handleUpdateJarvisSettings}
               onAddNoteToVault={(title, content, tags) => handleAddNoteToVault(title, content, tags, 'Jarvis-Directives')}
               onSendQuery={handleSendQuery}
+              onJarvisCommand={handleJarvisCommand}
             />
           )}
 
@@ -2051,6 +2079,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
         settings={jarvisSettings}
         onUpdateSettings={(newSettings) => setJarvisSettings((prev) => ({ ...prev, ...newSettings }))}
         onSendQuery={handleSendQuery}
+        onJarvisCommand={handleJarvisCommand}
         onAddKanbanTask={handleAddKanbanTask}
         onAddNoteToVault={(title, content, tags, folder) => handleAddNoteToVault(title, content, tags, folder || 'Voice-Directives')}
         onOpenFullJarvis={() => {

@@ -1,11 +1,26 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import { AgentInfo, AIModelInfo, ObsidianNote } from '../types';
-import { INITIAL_AGENT_MEMORIES, AgentMemoryStatus } from '../data/agentDefinitions';
-import { 
-  HardDrive, Brain, Database, FileText, CheckCircle2, 
-  Sparkles, RefreshCw, Save, Trash2, Eye, Download, Shield,
-  Terminal, Search, Layers, Clock
-} from 'lucide-react';
+import { Search, Loader2, AlertTriangle, FileText, RefreshCw, Database, ExternalLink } from 'lucide-react';
+
+/**
+ * FTS5's snippet() returns plain text from real Vault content — which
+ * ultimately originates from LLM task output, not something to trust as
+ * pre-sanitized HTML. Escape it before ever touching innerHTML, then apply
+ * the `[`/`]` match-highlight markers (chosen as snippet() delimiters
+ * specifically because they aren't HTML metacharacters, so this ordering is
+ * safe) on the escaped text.
+ */
+function highlightSnippet(raw: string): string {
+  const escaped = raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+  return escaped
+    .replace(/\[/g, '<mark class="bg-[#615EFF]/30 text-white rounded px-0.5">')
+    .replace(/\]/g, '</mark>');
+}
 
 interface AgentMemoryViewProps {
   agents: Record<string, AgentInfo>;
@@ -14,225 +29,185 @@ interface AgentMemoryViewProps {
   onAddNoteToVault: (title: string, content: string, tags: string[]) => void;
   onSendQuery: (query: string, model: string) => Promise<string>;
   onSelectTab: (tab: any) => void;
+  activeWorkspaceId?: string;
 }
 
+interface MemorySearchResult {
+  artifact_id: string;
+  workspace_id: string;
+  title: string;
+  snippet: string;
+  source_path: string;
+  updated_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// SYNTHOS — Memory search.
+//
+// Real SQLite FTS5 search over the same Vault artifacts shown in the Vault
+// screen (see lib/memory-index.ts). An artifact is indexed automatically
+// once its task completes with Aegis verification and a signed receipt —
+// there is no separate "agent memory file" system with its own storage;
+// that concept doesn't exist as a real backend anywhere in this app, so it
+// is not simulated here either.
+// ---------------------------------------------------------------------------
+
 export const AgentMemoryView: React.FC<AgentMemoryViewProps> = ({
-  agents,
-  models,
-  notes,
-  onAddNoteToVault,
-  onSendQuery,
   onSelectTab,
+  activeWorkspaceId,
 }) => {
-  const [memories, setMemories] = useState<AgentMemoryStatus[]>(INITIAL_AGENT_MEMORIES);
-  const [selectedAgentKey, setSelectedAgentKey] = useState<string>('orchestrator');
-  const [selectedFileName, setSelectedFileName] = useState<string>('memory.md');
-  const [fileContent, setFileContent] = useState<string>(`# Long-Term Memory: Orchestrator
-**Owner**: Chief Executive
-**Active Goals**:
-1. Oversee multi-agent Kanban execution on board.db
-2. Enforce permanent operating rules across all 15 agents
-3. Maintain continuous Obsidian Knowledge Graph vector synchronization
+  const workspaceId = activeWorkspaceId || 'ws-synthos-primary';
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<MemorySearchResult[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [reindexing, setReindexing] = useState(false);
+  const [reindexNotice, setReindexNotice] = useState<string | null>(null);
 
-## Operating Context
-- Fleet Profile: Multi-Agent Swarm (15 persistent agents)
-- Routing Engine: OpenRouter dynamic token arbitrator
-- Inotify Watcher: Active at /agents/orchestrator/workspace
-- Synapse Matrix: 184 cross-vault connections established`);
+  const runSearch = useCallback(async (q: string) => {
+    if (!q.trim()) {
+      setResults([]);
+      setHasSearched(true);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/memory/search?workspaceId=${encodeURIComponent(workspaceId)}&q=${encodeURIComponent(q)}`);
+      const data = await res.json();
+      if (!res.ok || data.success === false) {
+        setError(data.error || `HTTP ${res.status}`);
+        setResults(null);
+      } else {
+        setResults(data.results || []);
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Network error contacting Memory search API.');
+      setResults(null);
+    } finally {
+      setLoading(false);
+      setHasSearched(true);
+    }
+  }, [workspaceId]);
 
-  const [notice, setNotice] = useState<string | null>(null);
-  const [isCompacting, setIsCompacting] = useState<boolean>(false);
-
-  const activeMem = memories.find(m => m.agentKey === selectedAgentKey) || memories[0];
-
-  const handleSelectAgent = (key: string) => {
-    setSelectedAgentKey(key);
-    const m = memories.find(item => item.agentKey === key) || memories[0];
-    const firstFile = m.files[0] || 'memory.md';
-    setSelectedFileName(firstFile);
-    setFileContent(`# Long-Term Memory: ${m.agentName}\n**File**: ${firstFile}\n**Allocated**: ${m.memorySizeKB} KB\n**Last Synchronized**: ${m.lastIndexed}\n\n## Core Directives\n- Permanent agent identity locked in SOUL.md\n- Workspace path: /agents/${m.agentKey}/workspace\n- Vector Synapses: ${m.synapseConnections} connected nodes\n\n## Dynamic State Cache\n- 0 unhandled promise rejections\n- Active telemetry ping: ${m.signalTelemetry.latencyMs}ms\n- Inotify event stream: Active`);
-  };
-
-  const handleSaveMemoryFile = () => {
-    setNotice(`Saved updates to /agents/${selectedAgentKey}/${selectedFileName}!`);
-    setTimeout(() => setNotice(null), 3000);
-  };
-
-  const handleCompactMemory = () => {
-    setIsCompacting(true);
-    setNotice(`Compacting vector embeddings and purging duplicate tokens for ${activeMem.agentName}...`);
-    setTimeout(() => {
-      setMemories(prev => prev.map(m => m.agentKey === selectedAgentKey ? {
-        ...m,
-        memorySizeKB: Number((m.memorySizeKB * 0.85).toFixed(1)),
-        retentionState: 'OPTIMAL',
-        lastIndexed: 'Just now'
-      } : m));
-      setIsCompacting(false);
-      setNotice(`Memory compaction complete. Reclaimed 15% vector storage for ${activeMem.agentName}!`);
-      setTimeout(() => setNotice(null), 4000);
-    }, 1200);
-  };
-
-  const handleExportToVault = () => {
-    const title = `Vault-Memory-Audit-${activeMem.agentName}-${selectedFileName.replace(/\./g, '-')}`;
-    onAddNoteToVault(title, fileContent, ['memory', 'audit', activeMem.agentKey]);
-    setNotice(`Exported ${selectedFileName} to Obsidian Vault!`);
-    setTimeout(() => setNotice(null), 3000);
+  const handleReindex = async () => {
+    setReindexing(true);
+    setReindexNotice(null);
+    try {
+      const res = await fetch('/api/memory/reindex', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setReindexNotice(`Reindexed ${data.indexed} artifact(s), skipped ${data.skipped}.`);
+        if (hasSearched && query.trim()) runSearch(query);
+      } else {
+        setReindexNotice(`FAILED — ${data.error || `HTTP ${res.status}`}`);
+      }
+    } catch (err: any) {
+      setReindexNotice(`FAILED — ${err?.message || 'network error'}`);
+    } finally {
+      setReindexing(false);
+    }
   };
 
   return (
-    <div className="space-y-6 animate-fadeIn pb-12">
-      {/* Top Banner */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pt-2 border-b border-[#1A1D2E] pb-6">
-        <div>
-          <div className="inline-flex items-center gap-2 mb-2">
-            <span className="airbyte-badge">
-              HERMES LONG-TERM AGENT MEMORY
-            </span>
-            <span className="text-xs font-mono text-[#00D26A] flex items-center gap-1">
-              <HardDrive className="w-3 h-3" />
-              15 AGENT WORKSPACES ISOLATED
-            </span>
+    <div className="space-y-6 font-mono pb-12">
+      <div className="bg-gradient-to-r from-[#615EFF]/20 via-[#0B0D1B] to-[#EC4899]/20 border border-[#615EFF]/40 rounded-2xl p-6 space-y-4">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="w-12 h-12 rounded-2xl bg-[#615EFF]/20 border border-[#615EFF]/50 flex items-center justify-center text-[#615EFF] shrink-0">
+              <Database className="w-6 h-6" />
+            </div>
+            <div>
+              <h1 className="text-xl font-bold text-white tracking-tight font-['Space_Grotesk']">Memory</h1>
+              <p className="text-xs text-[#8E94B8] mt-1 font-sans">
+                Local SQLite FTS5 search over real Vault content · Workspace: <span className="text-white">{workspaceId}</span>
+              </p>
+            </div>
           </div>
-          <h1 className="text-2xl sm:text-4xl font-extrabold text-white tracking-tight font-['Space_Grotesk']">
-            Long-Term Agent Memory Subsystem
-          </h1>
-          <p className="text-xs sm:text-sm text-[#8E94B8] mt-1">
-            Dedicated workspace file inspection, SOUL.md identities, memory compaction, and inotify vector CDC synchronization.
-          </p>
-        </div>
-
-        <div className="flex items-center gap-3">
           <button
-            onClick={handleCompactMemory}
-            disabled={isCompacting}
-            className="airbyte-btn-secondary px-4 py-2.5 text-xs font-semibold flex items-center gap-2"
+            onClick={handleReindex}
+            disabled={reindexing}
+            className="px-3 py-1.5 rounded-lg bg-[#0B0D1B] border border-[#1F2442] text-[#8E94B8] hover:text-white transition cursor-pointer disabled:opacity-50 text-xs font-bold flex items-center gap-1.5"
+            title="Rebuild the index from what's currently in this workspace's Vault"
           >
-            <RefreshCw className={`w-4 h-4 text-[#A5A2FF] ${isCompacting ? 'animate-spin' : ''}`} />
-            <span>{isCompacting ? 'COMPACTING...' : 'COMPACT MEMORY'}</span>
+            <RefreshCw className={`w-3.5 h-3.5 ${reindexing ? 'animate-spin' : ''}`} /> REINDEX
           </button>
+        </div>
+        {reindexNotice && <p className="text-[11px] text-[#8E94B8]">{reindexNotice}</p>}
 
+        <div className="relative">
+          <Search className="w-4 h-4 text-[#8E94B8] absolute left-3 top-3" />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') runSearch(query); }}
+            placeholder="Search real Vault content for this workspace…"
+            className="w-full pl-10 pr-24 py-2.5 bg-[#070811] border border-[#1F2442] rounded-xl text-sm text-white placeholder-[#5A6083] focus:outline-none focus:border-[#615EFF]/50"
+          />
           <button
-            onClick={handleExportToVault}
-            className="airbyte-btn-primary px-4 py-2.5 text-xs font-bold flex items-center gap-2 shadow-lg shadow-[#615EFF]/25"
+            onClick={() => runSearch(query)}
+            disabled={loading}
+            className="absolute right-1.5 top-1.5 px-3 py-1.5 bg-[#615EFF] text-white text-xs font-bold rounded-lg cursor-pointer disabled:opacity-50"
           >
-            <Database className="w-3.5 h-3.5" />
-            <span>EXPORT TO OBSIDIAN</span>
+            {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Search'}
           </button>
         </div>
       </div>
 
-      {notice && (
-        <div className="p-3 bg-[#615EFF]/15 border border-[#615EFF]/40 rounded-xl text-xs font-mono text-[#A5A2FF] flex items-center gap-2 animate-fadeIn">
-          <Sparkles className="w-4 h-4 text-[#615EFF] shrink-0" />
-          <span>{notice}</span>
+      {error && (
+        <div className="bg-[#FF5E8E]/10 border border-[#FF5E8E]/30 rounded-2xl p-4 flex items-start gap-2 text-xs text-[#FF5E8E]">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" /> {error}
         </div>
       )}
 
-      {/* Main Grid: Agent Selector + Memory File Explorer + Editor */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left: Agent Workspace Selector */}
-        <div className="lg:col-span-4 space-y-4">
-          <h2 className="text-xs font-mono font-bold uppercase text-white flex items-center gap-2">
-            <Brain className="w-4 h-4 text-[#615EFF]" />
-            Agent Workspaces ({memories.length})
-          </h2>
-
-          <div className="space-y-2 max-h-[640px] overflow-y-auto pr-1">
-            {memories.map((mem) => {
-              const isSelected = mem.agentKey === selectedAgentKey;
-              return (
-                <div
-                  key={mem.agentKey}
-                  onClick={() => handleSelectAgent(mem.agentKey)}
-                  className={`p-3.5 rounded-xl border transition cursor-pointer flex items-center justify-between ${
-                    isSelected
-                      ? 'bg-[#181B34] border-[#615EFF] shadow-lg shadow-[#615EFF]/15'
-                      : 'bg-[#0B0D1B] border-[#181B2E] hover:border-[#282D4E]'
-                  }`}
-                >
-                  <div className="flex items-center gap-3">
-                    <div className={`w-2.5 h-2.5 rounded-full ${isSelected ? 'bg-[#615EFF]' : 'bg-[#00D26A]'}`} />
-                    <div>
-                      <div className="text-xs font-bold text-white">
-                        {mem.agentName}
-                      </div>
-                      <div className="text-[10px] text-[#6E759D] font-mono mt-0.5">
-                        {mem.memorySizeKB} KB • {mem.files.length} Files
-                      </div>
-                    </div>
-                  </div>
-
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#615EFF]/20 text-[#A5A2FF]">
-                    {mem.retentionState}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Right: Workspace Files & Live Memory Editor */}
-        <div className="lg:col-span-8 space-y-4">
-          <div className="airbyte-card p-6 space-y-5">
-            {/* Header & File Tabs */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#1A1D30] pb-4">
-              <div>
-                <h3 className="text-base font-bold text-white font-['Space_Grotesk']">
-                  Workspace: /agents/{selectedAgentKey}/
-                </h3>
-                <p className="text-xs text-[#8E94B8] mt-0.5">
-                  Live inotify file watcher synchronization enabled.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handleSaveMemoryFile}
-                  className="px-3.5 py-1.5 rounded-lg bg-[#615EFF] hover:bg-[#5653D9] text-white text-xs font-mono font-bold flex items-center gap-1.5 transition shadow"
-                >
-                  <Save className="w-3.5 h-3.5" />
-                  <span>SAVE CHANGES</span>
-                </button>
-              </div>
+      {hasSearched && !error && (
+        <div className="bg-[#0B0D1B] border border-[#1D2139] rounded-2xl p-5">
+          {results === null || results.length === 0 ? (
+            <div className="text-center py-10 space-y-2">
+              <Database className="w-8 h-8 text-[#8E94B8] mx-auto opacity-40" />
+              <p className="text-xs text-[#8E94B8]">
+                {!query.trim()
+                  ? 'Enter a search term to query this workspace\'s indexed Vault content.'
+                  : 'No indexed content matches this query in this workspace.'}
+              </p>
             </div>
-
-            {/* File Switcher */}
-            <div className="flex flex-wrap items-center gap-2">
-              {activeMem.files.map((file) => (
-                <button
-                  key={file}
-                  onClick={() => setSelectedFileName(file)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-mono transition flex items-center gap-1.5 ${
-                    selectedFileName === file
-                      ? 'bg-[#1E2342] text-white border border-[#615EFF]'
-                      : 'bg-[#080A14] text-[#8E94B8] hover:text-white border border-[#181B2E]'
-                  }`}
-                >
-                  <FileText className="w-3 h-3 text-[#A5A2FF]" />
-                  <span>{file}</span>
-                </button>
+          ) : (
+            <div className="space-y-2">
+              <div className="text-[10px] text-[#8E94B8] uppercase font-bold">{results.length} result{results.length === 1 ? '' : 's'}</div>
+              {results.map((r) => (
+                <div key={r.artifact_id} className="p-3.5 bg-[#070811] border border-[#151728] rounded-xl space-y-1.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 text-xs text-white font-semibold">
+                      <FileText className="w-3.5 h-3.5 text-[#615EFF] shrink-0" />
+                      {r.title}
+                    </div>
+                    <button
+                      onClick={() => onSelectTab('obsidian')}
+                      className="text-[10px] text-[#8E94B8] hover:text-white flex items-center gap-1 cursor-pointer shrink-0"
+                      title="Open in Vault"
+                    >
+                      Open in Vault <ExternalLink className="w-3 h-3" />
+                    </button>
+                  </div>
+                  <p
+                    className="text-[11px] text-[#A3A8CC] leading-relaxed"
+                    dangerouslySetInnerHTML={{ __html: highlightSnippet(r.snippet) }}
+                  />
+                  <div className="flex gap-3 text-[10px] text-[#5A6083]">
+                    <span>{r.source_path}</span>
+                    <span>{new Date(r.updated_at).toLocaleString()}</span>
+                  </div>
+                </div>
               ))}
             </div>
-
-            {/* Editor */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-xs font-mono text-[#8E94B8]">
-                <span>Editing: <strong>{selectedFileName}</strong></span>
-                <span>Sub-15ms Vector CDC Active</span>
-              </div>
-
-              <textarea
-                value={fileContent}
-                onChange={(e) => setFileContent(e.target.value)}
-                rows={15}
-                className="w-full bg-[#05060B] border border-[#1E223D] rounded-xl p-4 text-xs font-mono text-white placeholder-[#53597D] focus:outline-none focus:border-[#615EFF] leading-relaxed"
-              />
-            </div>
-          </div>
+          )}
         </div>
-      </div>
+      )}
     </div>
   );
 };

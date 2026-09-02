@@ -98,6 +98,7 @@ export interface AegisCheckResult {
 
 export interface GraphRecord {
   graph_id: string;
+  workspace_id: string | null;
   name: string;
   description: string;
   nodes_json: string;
@@ -109,6 +110,7 @@ export interface GraphRecord {
 export interface GraphRunRecord {
   run_id: string;
   graph_id: string;
+  workspace_id: string | null;
   status: string;
   current_node_id: string | null;
   state_json: string;
@@ -197,6 +199,7 @@ export function getDatabase(): any {
 
       CREATE TABLE IF NOT EXISTS graphs (
         graph_id TEXT PRIMARY KEY,
+        workspace_id TEXT,
         name TEXT NOT NULL,
         description TEXT,
         nodes_json TEXT NOT NULL,
@@ -208,6 +211,7 @@ export function getDatabase(): any {
       CREATE TABLE IF NOT EXISTS graph_runs (
         run_id TEXT PRIMARY KEY,
         graph_id TEXT NOT NULL,
+        workspace_id TEXT,
         status TEXT NOT NULL,
         current_node_id TEXT,
         state_json TEXT NOT NULL,
@@ -339,12 +343,60 @@ export function getDatabase(): any {
         PRIMARY KEY (workspace_id, name)
       );
     `);
+
+    // Backfill migration: graphs/graph_runs predate workspace_id. This runs
+    // once per database (the PRAGMA check below finds the column already
+    // present on every subsequent start and skips). ws-synthos-primary here
+    // is a one-time migration-compatibility value for rows that already
+    // existed before this column did — it is never used as a live default
+    // for new graphs/graph_runs, which always carry a caller-resolved
+    // workspace_id (see resolveWorkspaceId in server.ts routes).
+    const graphCols = dbInstance.prepare("PRAGMA table_info(graphs)").all() as Array<{ name: string }>;
+    if (!graphCols.some((c) => c.name === 'workspace_id')) {
+      dbInstance.exec("ALTER TABLE graphs ADD COLUMN workspace_id TEXT");
+      dbInstance.prepare("UPDATE graphs SET workspace_id = ? WHERE workspace_id IS NULL").run(DEFAULT_WORKSPACE_ID);
+    }
+    const graphRunCols = dbInstance.prepare("PRAGMA table_info(graph_runs)").all() as Array<{ name: string }>;
+    if (!graphRunCols.some((c) => c.name === 'workspace_id')) {
+      dbInstance.exec("ALTER TABLE graph_runs ADD COLUMN workspace_id TEXT");
+      dbInstance.prepare("UPDATE graph_runs SET workspace_id = ? WHERE workspace_id IS NULL").run(DEFAULT_WORKSPACE_ID);
+    }
+
+    dbInstance.exec(`
+      CREATE INDEX IF NOT EXISTS idx_graphs_workspace ON graphs(workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_graph_runs_workspace ON graph_runs(workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_graph_runs_workspace_graph ON graph_runs(workspace_id, graph_id);
+    `);
+
+    // Local memory index (SQLite FTS5) over real, verified Vault artifacts.
+    // workspace_id/artifact_id/source_path/updated_at are UNINDEXED — stored
+    // for filtering and display, never full-text-matched — which is the
+    // standard FTS5 pattern for scoping a virtual table without a separate
+    // companion join table. artifact_id is the stable key used to avoid
+    // duplicate rows on reindex (delete-then-insert, see lib/memory-index.ts).
+    dbInstance.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS memory_index USING fts5(
+        workspace_id UNINDEXED,
+        artifact_id UNINDEXED,
+        title,
+        content,
+        source_path UNINDEXED,
+        updated_at UNINDEXED,
+        tokenize = 'porter unicode61'
+      );
+    `);
   }
   return dbInstance;
 }
 
+// Graphs are workspace-owned. saveGraph() requires a resolved workspaceId on
+// every call (callers resolve it via resolveWorkspaceId() before calling,
+// same pattern as tasks). Ownership is immutable once a graph exists: a
+// save() against an existing graph_id in a different workspace is rejected,
+// not silently reassigned or merged.
 export function saveGraph(params: {
   graphId: string;
+  workspaceId: string;
   name: string;
   description?: string;
   nodes: any[];
@@ -356,22 +408,28 @@ export function saveGraph(params: {
   const edgesJson = JSON.stringify(params.edges || []);
   const desc = params.description || '';
 
-  const existing = db.prepare('SELECT graph_id FROM graphs WHERE graph_id = ?').get(params.graphId);
+  const existing = db.prepare('SELECT graph_id, workspace_id FROM graphs WHERE graph_id = ?')
+    .get(params.graphId) as { graph_id: string; workspace_id: string | null } | undefined;
+
   if (existing) {
+    if (existing.workspace_id !== params.workspaceId) {
+      throw new Error(`Graph ${params.graphId} belongs to a different workspace`);
+    }
     db.prepare(`
-      UPDATE graphs 
+      UPDATE graphs
       SET name = ?, description = ?, nodes_json = ?, edges_json = ?, updated_at = ?
-      WHERE graph_id = ?
-    `).run(params.name, desc, nodesJson, edgesJson, now, params.graphId);
+      WHERE graph_id = ? AND workspace_id = ?
+    `).run(params.name, desc, nodesJson, edgesJson, now, params.graphId, params.workspaceId);
   } else {
     db.prepare(`
-      INSERT INTO graphs (graph_id, name, description, nodes_json, edges_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(params.graphId, params.name, desc, nodesJson, edgesJson, now, now);
+      INSERT INTO graphs (graph_id, workspace_id, name, description, nodes_json, edges_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(params.graphId, params.workspaceId, params.name, desc, nodesJson, edgesJson, now, now);
   }
 
   return {
     graph_id: params.graphId,
+    workspace_id: params.workspaceId,
     name: params.name,
     description: desc,
     nodes_json: nodesJson,
@@ -381,45 +439,86 @@ export function saveGraph(params: {
   };
 }
 
-export function getGraph(graphId: string): GraphRecord | null {
+/**
+ * Scoped lookup. Returns null both when the graph doesn't exist and when it
+ * belongs to a different workspace — the two cases are indistinguishable to
+ * the caller, so a request can't be used to probe for another workspace's
+ * graph ids.
+ */
+export function getGraph(graphId: string, workspaceId: string): GraphRecord | null {
   const db = getDatabase();
-  return (db.prepare('SELECT * FROM graphs WHERE graph_id = ?').get(graphId) as GraphRecord) || null;
+  return (db.prepare('SELECT * FROM graphs WHERE graph_id = ? AND workspace_id = ?')
+    .get(graphId, workspaceId) as GraphRecord) || null;
 }
 
-export function listGraphs(): GraphRecord[] {
+export function listGraphs(workspaceId: string): GraphRecord[] {
   const db = getDatabase();
-  return (db.prepare('SELECT * FROM graphs ORDER BY updated_at DESC').all() as GraphRecord[]) || [];
+  return (db.prepare('SELECT * FROM graphs WHERE workspace_id = ? ORDER BY updated_at DESC')
+    .all(workspaceId) as GraphRecord[]) || [];
 }
 
+/**
+ * Graph runs inherit their workspace from the owning graph — never from a
+ * caller-supplied value. On first insert, workspace_id is looked up from
+ * `graphs` for graphId; if the caller also passed a workspaceId and it
+ * disagrees with the graph's real owner, the run is rejected rather than
+ * silently reassigned to either side. Updates to an existing run never touch
+ * workspace_id — it is set once, at creation, and is immutable after that.
+ */
 export function saveGraphRun(params: {
   runId: string;
   graphId: string;
   status: string;
   currentNodeId?: string | null;
   state?: any;
+  workspaceId?: string;
 }): GraphRunRecord {
   const db = getDatabase();
   const now = new Date().toISOString();
   const stateJson = JSON.stringify(params.state || {});
   const currentNodeId = params.currentNodeId || null;
 
-  const existing = db.prepare('SELECT run_id FROM graph_runs WHERE run_id = ?').get(params.runId);
+  const existing = db.prepare('SELECT run_id, workspace_id FROM graph_runs WHERE run_id = ?')
+    .get(params.runId) as { run_id: string; workspace_id: string | null } | undefined;
+
   if (existing) {
     db.prepare(`
-      UPDATE graph_runs 
+      UPDATE graph_runs
       SET status = ?, current_node_id = ?, state_json = ?, updated_at = ?
       WHERE run_id = ?
     `).run(params.status, currentNodeId, stateJson, now, params.runId);
-  } else {
-    db.prepare(`
-      INSERT INTO graph_runs (run_id, graph_id, status, current_node_id, state_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(params.runId, params.graphId, params.status, currentNodeId, stateJson, now, now);
+
+    return {
+      run_id: params.runId,
+      graph_id: params.graphId,
+      workspace_id: existing.workspace_id,
+      status: params.status,
+      current_node_id: currentNodeId,
+      state_json: stateJson,
+      created_at: now,
+      updated_at: now
+    };
   }
+
+  const graph = db.prepare('SELECT workspace_id FROM graphs WHERE graph_id = ?')
+    .get(params.graphId) as { workspace_id: string | null } | undefined;
+  if (!graph) {
+    throw new Error(`Cannot create a run for unknown graph ${params.graphId}`);
+  }
+  if (params.workspaceId && params.workspaceId !== graph.workspace_id) {
+    throw new Error(`Graph ${params.graphId} does not belong to workspace ${params.workspaceId}`);
+  }
+  const workspaceId = graph.workspace_id;
+
+  db.prepare(`
+    INSERT INTO graph_runs (run_id, graph_id, workspace_id, status, current_node_id, state_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(params.runId, params.graphId, workspaceId, params.status, currentNodeId, stateJson, now, now);
 
   return {
     run_id: params.runId,
     graph_id: params.graphId,
+    workspace_id: workspaceId,
     status: params.status,
     current_node_id: currentNodeId,
     state_json: stateJson,
@@ -428,14 +527,17 @@ export function saveGraphRun(params: {
   };
 }
 
-export function getGraphRun(runId: string): GraphRunRecord | null {
+/** Scoped lookup — same non-disclosure behavior as getGraph(). */
+export function getGraphRun(runId: string, workspaceId: string): GraphRunRecord | null {
   const db = getDatabase();
-  return (db.prepare('SELECT * FROM graph_runs WHERE run_id = ?').get(runId) as GraphRunRecord) || null;
+  return (db.prepare('SELECT * FROM graph_runs WHERE run_id = ? AND workspace_id = ?')
+    .get(runId, workspaceId) as GraphRunRecord) || null;
 }
 
-export function listGraphRuns(): GraphRunRecord[] {
+export function listGraphRuns(workspaceId: string): GraphRunRecord[] {
   const db = getDatabase();
-  return (db.prepare('SELECT * FROM graph_runs ORDER BY updated_at DESC').all() as GraphRunRecord[]) || [];
+  return (db.prepare('SELECT * FROM graph_runs WHERE workspace_id = ? ORDER BY updated_at DESC')
+    .all(workspaceId) as GraphRunRecord[]) || [];
 }
 
 export function createInitialTask(params: {

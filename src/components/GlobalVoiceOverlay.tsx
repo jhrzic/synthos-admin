@@ -17,6 +17,8 @@ interface GlobalVoiceOverlayProps {
   settings: JarvisSettings;
   onUpdateSettings?: (newSettings: Partial<JarvisSettings>) => void;
   onSendQuery: (query: string, targetModel: string) => Promise<string>;
+  /** Real, workspace-scoped /api/jarvis/command dispatcher — see JarvisView for the same contract. */
+  onJarvisCommand: (command: string) => Promise<string>;
   onAddKanbanTask?: (task: Omit<KanbanTask, 'id' | 'createdAt' | 'updatedAt' | 'subtasks'>) => void;
   onAddNoteToVault?: (title: string, content: string, tags: string[], folder?: string) => void;
   onOpenFullJarvis?: () => void;
@@ -30,6 +32,7 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
   settings,
   onUpdateSettings,
   onSendQuery,
+  onJarvisCommand,
   onAddKanbanTask,
   onAddNoteToVault,
   onOpenFullJarvis,
@@ -44,13 +47,11 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
 
   const [pipelineTrace, setPipelineTrace] = useState<{
     workspace: string;
-    guardianPassed: boolean;
     targetAgent: string;
     model: string;
     receiptId: string | null;
   }>({
     workspace: workspaceContext,
-    guardianPassed: true,
     targetAgent: 'orchestrator',
     model: 'hermes-3-llama-3.1-70b',
     receiptId: null,
@@ -153,38 +154,41 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
         });
       }
 
-      // Generate AI response
-      const prompt = `You are SynthOS Global Voice Assistant. The user gave a voice directive while inside the "${workspaceContext}" workspace.
-Directive: "${directiveText}"
-Respond concisely in 1-2 spoken sentences with clear confirmation of action taken and status.`;
-      
-      const reply = await onSendQuery(prompt, chosenModel);
+      // Dispatch through the real Jarvis command path — the raw directive
+      // text, not a wrapped prompt, so the backend's own admin-intent
+      // classification (task/graph/receipt keywords) sees exactly what the
+      // user said rather than a system-prompt wrapper that could shift or
+      // mask those keywords.
+      const reply = await onJarvisCommand(directiveText);
       
       setPipelineTrace({
         workspace: workspaceContext,
-        guardianPassed: true,
         targetAgent: target,
         model: chosenModel,
         receiptId: receiptId,
       });
 
-      setActiveStage(7); // Aegis & Receipt
+      setActiveStage(7); // Session reference assigned (not an Aegis receipt — see UI label)
       
       // Save transcript to Obsidian
       if (onAddNoteToVault) {
         onAddNoteToVault(
           `VoiceDirective-${Date.now().toString().slice(-4)}`,
-          `# Voice Directive Record\n\n**Workspace Context**: ${workspaceContext}\n**Target Agent**: ${target}\n**Model**: ${chosenModel}\n**Receipt**: ${receiptId}\n\n## Directive\n> ${directiveText}\n\n## Response\n${reply}\n\n#voice #directives #${workspaceContext}`,
+          `# Voice Directive Record\n\n**Workspace Context**: ${workspaceContext}\n**Target Agent (keyword-routed)**: ${target}\n**Session Reference**: ${receiptId}\n\n## Directive\n> ${directiveText}\n\n## Response\n${reply}\n\n#voice #directives #${workspaceContext}`,
           ['voice', 'directive', workspaceContext, target],
           'Voice-Directives'
         );
       }
 
-      // Add SynthOS Response Log
+      // Add SynthOS Response Log. handleJarvisCommand() always resolves
+      // (never throws) and returns an honest [STATUS: DEGRADED...] string on
+      // failure, so `reply` is truthy in practice — this fallback exists only
+      // as a last-resort default and must not claim a completion that may
+      // not have happened.
       setTranscriptLogs(prev => [...prev, {
         id: `synthos-${Date.now()}`,
         sender: 'synthos',
-        text: reply || `Directive accepted for ${target.toUpperCase()}. Task dispatched to board.db with Aegis Receipt #${receiptId}.`,
+        text: reply || `No response was returned for the ${target.toUpperCase()} directive.`,
         time: new Date().toLocaleTimeString()
       }]);
 
@@ -207,10 +211,12 @@ Respond concisely in 1-2 spoken sentences with clear confirmation of action take
       }
     } catch (e: any) {
       setIsProcessing(false);
+      // This path means the directive genuinely failed — never claim it
+      // dispatched successfully here.
       setTranscriptLogs(prev => [...prev, {
         id: `err-${Date.now()}`,
         sender: 'synthos',
-        text: `Directive dispatched locally to ${target.toUpperCase()} agent. Task logged in board.db.`,
+        text: `[STATUS: FAILED] The ${target.toUpperCase()} directive could not be dispatched: ${e?.message || 'unknown error'}.`,
         time: new Date().toLocaleTimeString()
       }]);
     }
@@ -312,8 +318,8 @@ Respond concisely in 1-2 spoken sentences with clear confirmation of action take
                   <span>Context: <strong className="text-white">[{pipelineTrace.workspace}]</strong></span>
                 </div>
                 <div className="flex items-center gap-1.5">
-                  <span className={`w-1.5 h-1.5 rounded-full ${activeStage >= 4 ? 'bg-[#00D26A]' : 'bg-[#2A2E4C]'}`} />
-                  <span>Guardian Boundary: <strong className="text-[#00D26A]">VERIFIED</strong></span>
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#2A2E4C]" />
+                  <span>Guardian Boundary: <strong className="text-[#8E94B8]">NOT_APPLICABLE — no policy check runs on this voice path</strong></span>
                 </div>
                 <div className="flex items-center gap-1.5">
                   <span className={`w-1.5 h-1.5 rounded-full ${activeStage >= 5 ? 'bg-[#00D26A]' : 'bg-[#2A2E4C]'}`} />
@@ -322,8 +328,12 @@ Respond concisely in 1-2 spoken sentences with clear confirmation of action take
                   <span>Model Router</span>
                 </div>
                 <div className="flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#2A2E4C]" />
+                  <span>Aegis Receipt: <strong className="text-[#8E94B8]">NOT_APPLICABLE — this reply is not Aegis-verified or signed</strong></span>
+                </div>
+                <div className="flex items-center gap-1.5">
                   <span className={`w-1.5 h-1.5 rounded-full ${activeStage >= 7 ? 'bg-[#00D26A]' : 'bg-[#2A2E4C]'}`} />
-                  <span>Aegis Receipt: <strong className="text-white">{pipelineTrace.receiptId || 'Standby'}</strong></span>
+                  <span>Session Reference: <strong className="text-white">{pipelineTrace.receiptId || 'Standby'}</strong></span>
                 </div>
               </div>
             </div>
