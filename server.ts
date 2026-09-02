@@ -37,6 +37,7 @@ import {
   getDatabase
 } from "./lib/persistence";
 import { hermesAdapter } from "./src/services/hermesAdapter";
+import { classifyModelRequest } from "./lib/model-router";
 
 dotenv.config();
 
@@ -123,25 +124,6 @@ function checkGuardianRules(cmd: string): {
   };
 }
 
-export function normalizeGeminiModel(model?: string): string {
-  if (!model) return "gemini-3.1-flash-lite";
-  const m = String(model).trim();
-  if (m === "gemini-3.1-flash-lite" || m === "models/gemini-3.1-flash-lite") {
-    return "gemini-3.1-flash-lite";
-  }
-  if (m === "gemini-3.7-flash" || m === "models/gemini-3.7-flash") {
-    return "gemini-3.7-flash";
-  }
-  if (m === "gemini-3.1-pro-preview" || m === "models/gemini-3.1-pro-preview") {
-    return "gemini-3.1-pro-preview";
-  }
-  // Default to confirmed live model for generic 'gemini' alias
-  if (m.toLowerCase() === "gemini" || m.toLowerCase() === "google" || m.toLowerCase() === "gemini-flash") {
-    return "gemini-3.1-flash-lite";
-  }
-  return m;
-}
-
 const DEFAULT_CANDIDATE_MODELS = ["gemini-3.1-flash-lite"];
 
 async function startServer() {
@@ -177,7 +159,20 @@ async function startServer() {
         },
       });
 
-      const targetModel = normalizeGeminiModel(model);
+      const classification = classifyModelRequest(model);
+      if (classification.provider === "UNSUPPORTED") {
+        return res.status(200).json({
+          success: false,
+          status: "DEGRADED",
+          reason: classification.reason,
+          error: classification.message,
+          requestedModel: classification.requestedModel,
+          modelUsed: null,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      const targetModel = classification.resolvedModel;
       const enhancedPrompt = `[Model: ${targetModel.toUpperCase()}]\n${systemInstruction ? `System Prompt: ${systemInstruction}\n` : ""}\nUser Query: ${prompt}`;
 
       const candidateModels = [targetModel, ...DEFAULT_CANDIDATE_MODELS].filter((v, i, a) => a.indexOf(v) === i);
@@ -812,7 +807,8 @@ ${finalMatrix.map((m: any) => `- **${m.idea}**: ${m.whatItDoes} (Priority: \`${m
       // Step 2: Scout Agent Analysis via Live Gemini Model
       const apiKey = process.env.GEMINI_API_KEY || "";
       let analysis = "";
-      if (apiKey) {
+      const ingestClassification = classifyModelRequest(model);
+      if (apiKey && ingestClassification.provider === "GEMINI") {
         const ai = new GoogleGenAI({
           apiKey,
           httpOptions: { headers: { "User-Agent": "aistudio-build" } }
@@ -825,12 +821,15 @@ Video ID: "${videoId}"
 
 Analyze this video topic for technical intelligence, agent workflow implications, and architectural takeaways in concise Markdown.`;
 
-        const targetModel = normalizeGeminiModel(model);
         const modelRes = await ai.models.generateContent({
-          model: targetModel,
+          model: ingestClassification.resolvedModel,
           contents: prompt
         });
         analysis = modelRes.text || "";
+      } else if (apiKey && ingestClassification.provider === "UNSUPPORTED") {
+        // Never silently substitute Gemini for a non-Gemini model request — skip
+        // analysis and log why, rather than routing to the wrong provider.
+        console.warn(`[YouTube Ingest] Skipping analysis: ${ingestClassification.message}`);
       }
 
       const taskId = `yt-ingest-${Date.now()}`;
@@ -1231,6 +1230,32 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         });
       }
 
+      // 2b. Provider identity gate — a non-Gemini model request must fail
+      // explicitly here, before the task ever claims RUNNING, rather than
+      // being silently substituted with a Gemini model.
+      const modelClassification = classifyModelRequest(assignedModel);
+      if (modelClassification.provider === "UNSUPPORTED") {
+        updateTaskStatus(taskId, "FAILED");
+        recordActivityEvent({
+          taskId,
+          eventType: "PROVIDER_UNSUPPORTED",
+          agentId: assignedAgent,
+          payload: {
+            reason: modelClassification.reason,
+            error: modelClassification.message,
+            requestedModel: modelClassification.requestedModel
+          }
+        });
+        return res.status(400).json({
+          success: false,
+          status: "FAILED",
+          reason: modelClassification.reason,
+          error: modelClassification.message,
+          requestedModel: modelClassification.requestedModel,
+          taskId
+        });
+      }
+
       // 3. Immediately before provider call: RUNNING & EXECUTION_STARTED
       updateTaskStatus(taskId, "RUNNING");
       recordActivityEvent({
@@ -1248,7 +1273,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       let providerUsageMetadata: any = null;
 
       // Step 1: Execute tool/model logic based on role with Live Gemini Model
-      const normalizedAssignedModel = normalizeGeminiModel(assignedModel);
+      const normalizedAssignedModel = modelClassification.resolvedModel;
       const candidateModels = [normalizedAssignedModel, ...DEFAULT_CANDIDATE_MODELS].filter((v, i, a) => a.indexOf(v) === i);
       
       try {
@@ -1372,8 +1397,10 @@ sourceHash: ${packageMetadataResult.sourceHash}
 4. Provide a clear, factual, and concise description of the package metadata read from package.json without any fabricated claims.`;
         }
 
-        const modelQueue = [normalizedAssignedModel, ...candidateModels].filter((v, i, a) => a.indexOf(v) === i && !v.includes("claude") && !v.includes("o3") && !v.includes("sonar"));
-        const modelsToTry = modelQueue.length > 0 ? modelQueue : candidateModels;
+        // No exclude-list needed here: the provider identity gate above already
+        // rejects any non-Gemini model before this point, so every candidate in
+        // this queue is guaranteed Gemini-family.
+        const modelsToTry = [normalizedAssignedModel, ...candidateModels].filter((v, i, a) => a.indexOf(v) === i);
 
         for (const m of modelsToTry) {
           try {
