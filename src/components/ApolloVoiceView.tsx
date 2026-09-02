@@ -275,7 +275,9 @@ export const ApolloVoiceView: React.FC<ApolloVoiceViewProps> = ({
     liveTranscript,
     clearTranscript,
     startListening,
-    stopListening
+    stopListening,
+    micState,
+    error: micError,
   } = useSpeechRecognition(handleVoiceCommandReceived);
 
   const handleStartListening = () => {
@@ -291,7 +293,9 @@ export const ApolloVoiceView: React.FC<ApolloVoiceViewProps> = ({
       setAudioLogs(prev => [...prev, {
         id: `err-${Date.now()}`,
         sender: 'system',
-        text: 'This browser does not support the Web Speech Recognition API — voice capture is unavailable. Type a directive below instead.',
+        text: micState === 'unsupported'
+          ? 'This browser does not support the Web Speech Recognition API — voice capture is unavailable. Type a directive below instead.'
+          : 'Voice input could not be started. Type a directive below instead.',
         timestamp: new Date().toLocaleTimeString()
       }]);
     }
@@ -302,6 +306,25 @@ export const ApolloVoiceView: React.FC<ApolloVoiceViewProps> = ({
     setIsListening(false);
     setIsSessionActive(false);
   };
+
+  // AA5/AA7/AA11 — a real browser mic error arriving mid-session (denied,
+  // no device, network) must flip Apollo's own listening state honestly —
+  // never leave the UI claiming "APOLLO LIVE" after the browser itself
+  // stopped capturing. Logged into Apollo's own transcript, never routed
+  // to Jarvis or silently swallowed.
+  useEffect(() => {
+    if (!micError) return;
+    if (micState === 'permission-denied' || micState === 'no-device' || micState === 'error') {
+      setIsListening(false);
+      setIsSessionActive(false);
+      setAudioLogs(prev => [...prev, {
+        id: `mic-err-${Date.now()}`,
+        sender: 'system',
+        text: micError.message,
+        timestamp: new Date().toLocaleTimeString(),
+      }]);
+    }
+  }, [micError, micState]);
 
   // Interactive Test Suite for scenarios
   const runScenarioTest = async (scenarioIndex: number) => {
@@ -355,16 +378,37 @@ export const ApolloVoiceView: React.FC<ApolloVoiceViewProps> = ({
 
           <button
             onClick={isListening ? handleStopListening : handleStartListening}
-            className={`px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 transition cursor-pointer shadow-lg ${
-              isListening 
-                ? 'bg-red-500 hover:bg-red-600 text-white shadow-red-500/20' 
-                : 'bg-[#FF5E8E] hover:bg-[#E04D7B] text-white shadow-[#FF5E8E]/20'
+            disabled={micState === 'unsupported'}
+            className={`px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 transition shadow-lg ${
+              micState === 'unsupported'
+                ? 'bg-[#1A1E36] text-[#5E6488] cursor-not-allowed'
+                : isListening
+                  ? 'bg-red-500 hover:bg-red-600 text-white shadow-red-500/20 cursor-pointer'
+                  : micState === 'permission-denied' || micState === 'no-device' || micState === 'error'
+                    ? 'bg-[#3A1A2C] hover:bg-[#4A2038] text-red-400 border border-red-500/40 cursor-pointer'
+                    : 'bg-[#FF5E8E] hover:bg-[#E04D7B] text-white shadow-[#FF5E8E]/20 cursor-pointer'
             }`}
+            title={
+              micState === 'unsupported' ? 'Voice input not supported in this browser'
+              : micState === 'permission-denied' ? 'Microphone permission denied — click to try again'
+              : micState === 'no-device' ? 'No microphone detected — click to try again'
+              : undefined
+            }
           >
-            {isListening ? (
+            {micState === 'unsupported' ? (
+              <>
+                <MicOff className="w-4 h-4" />
+                <span>MIC UNSUPPORTED</span>
+              </>
+            ) : isListening ? (
               <>
                 <MicOff className="w-4 h-4 animate-pulse" />
                 <span>STOP APOLLO LIVE</span>
+              </>
+            ) : (micState === 'permission-denied' || micState === 'no-device' || micState === 'error') ? (
+              <>
+                <AlertTriangle className="w-4 h-4" />
+                <span>MIC ERROR — RETRY</span>
               </>
             ) : (
               <>

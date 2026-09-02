@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { 
-  X, Mic, MicOff, Volume2, VolumeX, Sparkles, Shield, ShieldCheck, 
-  Terminal, Radio, ArrowRight, Zap, CheckCircle2, RefreshCw, 
-  ExternalLink, Layers, Bot, Activity, Brain, Database, Cpu
+import {
+  X, Mic, MicOff, Volume2, VolumeX, Sparkles, Shield, ShieldCheck,
+  Terminal, Radio, ArrowRight, Zap, CheckCircle2, RefreshCw,
+  ExternalLink, Layers, Bot, Activity, Brain, Database, Cpu, AlertTriangle
 } from 'lucide-react';
 import { JarvisSettings, KanbanTask, AgentRole } from '../types';
 import { JarvisMindVisualizer } from './JarvisMindVisualizer';
@@ -71,7 +71,9 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
     isListening,
     startListening,
     stopListening,
-    clearTranscript
+    clearTranscript,
+    micState,
+    error: micError,
   } = useSpeechRecognition(handleFinalTranscript);
 
   useEffect(() => {
@@ -389,6 +391,19 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
 
             {/* Input & Microphone Action Bar */}
             <div className="space-y-3">
+              {/* AA2/AA7/AA18 — real mic state, never a fabricated "Listening" */}
+              {micState === 'unsupported' && (
+                <div className="flex items-center gap-1.5 text-[10px] text-amber-400">
+                  <AlertTriangle className="w-3 h-3" />
+                  <span>Voice input isn't supported in this browser. Type your directive below.</span>
+                </div>
+              )}
+              {micError && (micState === 'permission-denied' || micState === 'no-device' || micState === 'error') && (
+                <div className="flex items-center gap-1.5 text-[10px] text-[#FF5E8E]">
+                  <AlertTriangle className="w-3 h-3" />
+                  <span>{micError.message}</span>
+                </div>
+              )}
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => {
@@ -398,14 +413,28 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
                       startListening();
                     }
                   }}
-                  className={`p-3 rounded-xl font-bold flex items-center justify-center transition cursor-pointer shadow-lg ${
-                    isListening
-                      ? 'bg-[#FF5E8E] text-white shadow-[#FF5E8E]/40 animate-pulse'
-                      : 'bg-[#615EFF] text-white hover:bg-[#524FE8] shadow-[#615EFF]/25'
+                  disabled={micState === 'unsupported'}
+                  className={`p-3 rounded-xl font-bold flex items-center justify-center transition shadow-lg ${
+                    micState === 'unsupported'
+                      ? 'bg-[#1A1E36] text-[#5E6488] cursor-not-allowed'
+                      : isListening
+                        ? 'bg-[#FF5E8E] text-white shadow-[#FF5E8E]/40 animate-pulse cursor-pointer'
+                        : micState === 'permission-denied' || micState === 'no-device' || micState === 'error'
+                          ? 'bg-[#3A1A2C] text-[#FF5E8E] border border-[#FF5E8E]/40 cursor-pointer'
+                          : 'bg-[#615EFF] text-white hover:bg-[#524FE8] shadow-[#615EFF]/25 cursor-pointer'
                   }`}
-                  title={isListening ? 'Stop Listening' : 'Start Speech Input'}
+                  title={
+                    micState === 'unsupported' ? 'Voice input not supported in this browser'
+                    : isListening ? 'Stop Listening'
+                    : micState === 'permission-denied' ? 'Microphone permission denied — click to try again'
+                    : micState === 'no-device' ? 'No microphone detected — click to try again'
+                    : 'Start Speech Input'
+                  }
                 >
-                  {isListening ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+                  {micState === 'unsupported' ? <MicOff className="w-5 h-5" />
+                    : isListening ? <MicOff className="w-5 h-5" />
+                    : (micState === 'permission-denied' || micState === 'no-device' || micState === 'error') ? <AlertTriangle className="w-5 h-5" />
+                    : <Mic className="w-5 h-5" />}
                 </button>
 
                 <div className="flex-1 relative">

@@ -146,11 +146,28 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
     }, 3500);
   }, []);
 
-  // Hook for speech recognition with immediate buffer flush
+  // AA4/AA10 — a final spoken transcript is delivered through the exact
+  // same dispatcher a typed directive uses (executeDirectiveRef, defined
+  // below — a plain-assignment ref, not a hook, so it's safe to reference
+  // here ahead of its definition), completing the required
+  // capture -> transcript -> dispatch -> response flow automatically,
+  // rather than only populating the text box and waiting for a manual
+  // click. clearTranscript() empties the interim-transcript display; the
+  // hook's own dedup guard (lastFinalRef) already prevents a duplicate
+  // final result from dispatching twice.
   const handleFinalSpeech = useCallback((transcript: string) => {
     if (!transcript.trim()) return;
-    setInputText(transcript);
+    setInputText('');
+    clearTranscript();
     showCaptionWithAutoDismiss(`Heard: "${transcript}"`);
+    executeDirectiveRef.current(transcript);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- clearTranscript
+    // is declared below (destructured from useSpeechRecognition, which this
+    // very callback is passed into) and is referentially stable across
+    // renders (see useSpeechRecognition's own useCallback with []), so it's
+    // safe to omit here — listing it would be a genuine reference-before-
+    // declaration error in the dependency array (unlike the callback body
+    // above, which only runs later and by then it's assigned).
   }, [showCaptionWithAutoDismiss]);
 
   const {
@@ -158,7 +175,9 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
     clearTranscript,
     isListening,
     startListening,
-    stopListening
+    stopListening,
+    micState,
+    error: micError,
   } = useSpeechRecognition(handleFinalSpeech);
 
   useEffect(() => {
@@ -315,20 +334,32 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
         // Real speech recognition is unavailable in this browser/context.
         // Never inject a fabricated transcript as if the user spoke it —
         // show the truthful state and let them type instead.
-        showCaptionWithAutoDismiss("Voice input is not available. Type your directive below.");
+        showCaptionWithAutoDismiss(
+          micState === 'unsupported'
+            ? "This browser doesn't support voice input. Type your directive below."
+            : "Voice input is not available. Type your directive below."
+        );
       }
     }
   };
 
-  const handleExecute = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!inputText.trim() || isLoading) return;
+  // AA7/AA11 — a real browser error (permission denied, no device, etc.)
+  // arriving mid-session, surfaced honestly rather than only console-logged.
+  useEffect(() => {
+    if (micError && (micState === 'permission-denied' || micState === 'no-device' || micState === 'error')) {
+      showCaptionWithAutoDismiss(micError.message);
+    }
+  }, [micError, micState, showCaptionWithAutoDismiss]);
 
-    const query = inputText;
-    setInputText('');
-    clearTranscript();
+  // AA4 — the one real dispatcher, shared by typed submission and voice
+  // transcript delivery, so a spoken directive reaches the exact same
+  // authenticated /api/jarvis/command path (via onJarvisCommand) with the
+  // same admin-intent routing as typed input — never a separate,
+  // parallel voice-only code path.
+  const executeDirective = useCallback(async (query: string) => {
+    if (!query.trim() || isLoading) return;
+
     setIsLoading(true);
-
     setHudLogs(prev => [`[USER DIRECTIVE]: ${query}`, ...prev]);
 
     try {
@@ -351,7 +382,23 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
     } finally {
       setIsLoading(false);
     }
+  }, [isLoading, onJarvisCommand, settings.voiceEnabled, settings.autoSyncObsidian, onAddNoteToVault, showCaptionWithAutoDismiss]);
+
+  const handleExecute = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!inputText.trim() || isLoading) return;
+    const query = inputText;
+    setInputText('');
+    clearTranscript();
+    await executeDirective(query);
   };
+
+  // Always-fresh reference to the latest executeDirective closure — plain
+  // assignment during render (not a useEffect) is intentional: it only
+  // needs to be current by the time the next browser speech-recognition
+  // event fires, which is always after this render completes.
+  const executeDirectiveRef = useRef(executeDirective);
+  executeDirectiveRef.current = executeDirective;
 
   const handleSaveSettings = () => {
     onUpdateSettings(settings);
@@ -657,14 +704,27 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
                   <button
                     type="button"
                     onClick={toggleListen}
+                    disabled={micState === 'unsupported'}
                     className={`p-2 rounded-lg border transition ${
-                      isListening
-                        ? 'bg-red-500 text-white border-red-400 animate-pulse'
-                        : 'bg-[#121422] text-[#8E94B8] hover:text-white border-[#222744]'
+                      micState === 'unsupported'
+                        ? 'bg-[#121422] text-[#4A4F6E] border-[#1A1E36] cursor-not-allowed'
+                        : isListening
+                          ? 'bg-red-500 text-white border-red-400 animate-pulse'
+                          : micState === 'permission-denied' || micState === 'no-device' || micState === 'error'
+                            ? 'bg-[#3A1A2C] text-red-400 border-red-500/40'
+                            : 'bg-[#121422] text-[#8E94B8] hover:text-white border-[#222744]'
                     }`}
-                    title="Toggle Microphone"
+                    title={
+                      micState === 'unsupported' ? "Voice input not supported in this browser"
+                      : micState === 'permission-denied' ? 'Microphone permission denied — click to try again'
+                      : micState === 'no-device' ? 'No microphone detected — click to try again'
+                      : 'Toggle Microphone'
+                    }
                   >
-                    {isListening ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
+                    {micState === 'unsupported' ? <MicOff className="w-3.5 h-3.5" />
+                      : isListening ? <MicOff className="w-3.5 h-3.5" />
+                      : (micState === 'permission-denied' || micState === 'no-device' || micState === 'error') ? <AlertCircle className="w-3.5 h-3.5" />
+                      : <Mic className="w-3.5 h-3.5" />}
                   </button>
                   <button
                     type="submit"

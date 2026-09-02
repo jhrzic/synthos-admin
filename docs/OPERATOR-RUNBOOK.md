@@ -258,3 +258,46 @@ hidden by the UI. There is no environment variable to re-enable it in production
 capability in a deployed environment, that is a deliberate architecture change, not a config flag,
 and should go through the same review this restriction did (see
 `docs/adr-007-launch-security-boundaries.md`).
+
+## 20. Voice input (microphone) — Jarvis and Apollo
+
+Both Jarvis (the global SynthOS assistant) and Apollo (the Hermes-specific assistant) accept spoken
+input through the browser's native Web Speech API (`SpeechRecognition` /
+`webkitSpeechRecognition`), via one shared hook (`src/hooks/useSpeechRecognition.ts`). This is a
+browser capability, not a server feature — there is no audio upload endpoint and no server-side
+speech-to-text; the browser transcribes locally/via its own vendor backend and this app only ever
+receives the resulting text.
+
+- **Browser support is honest, not assumed.** Only Chromium-family browsers (Chrome, Edge, Brave,
+  Opera) and Safari/WebKit implement this API. Firefox does not. The mic control reports a real
+  `unsupported` state (grayed out, disabled, explicit message) on an unsupported browser — it never
+  shows a mic control that silently does nothing.
+- **Secure context is required.** Per the Web Speech API spec, the page must be served over HTTPS
+  in production (or `localhost`/`127.0.0.1` in development, which counts as a secure context). A
+  reverse proxy terminating real TLS (§18) is therefore a hard requirement for voice input to work
+  for real users, not just for the rest of the app's security posture.
+- **Permission flow is real, never faked.** Calling `.start()` triggers the browser's native
+  microphone permission prompt (outside this app's DOM — it cannot be pre-answered or dismissed
+  from application code). Granted/denied/no-device are three distinct states
+  (`listening` / `permission-denied` / `no-device`), each with its own visible message — a denied
+  or missing-device mic never displays as "Listening."
+- **Jarvis and Apollo are architecturally separate voice assistants.** They share only the
+  capture/transcription infrastructure (the one hook above); each has its own transcript-routing
+  callback and its own dispatcher. A Jarvis voice command always reaches the same
+  `/api/jarvis/command` path a typed Jarvis command does — never a different, unauthenticated voice
+  route. An Apollo voice command never silently falls through to Jarvis, and Apollo's spoken
+  response is never a disguised raw chat completion presented as Apollo's own voice (see
+  `test/voice-routing-separation.test.ts`).
+- **Only one recognizer runs at a time.** Starting either assistant's mic stops the other's if it
+  was listening — this is enforced by the shared hook (a module-level singleton), not left to
+  chance.
+- **Apollo's current execution limitation is a runtime gap, not a mic gap.** Apollo can capture and
+  transcribe speech independently of whether a dedicated Hermes runtime is configured
+  (`HERMES_ADAPTER_BASE_URL` — see §10). When Apollo dispatches a transcribed command for execution,
+  it goes through the same shared, Gemini-backed `/api/execute-agent-task` pipeline the rest of this
+  app uses (no dedicated Hermes `execute()` contract exists yet — see §10 and
+  `docs/PRODUCTION-READINESS.md`'s Hermes section). This is honestly surfaced in the UI rather than
+  claimed as a working dedicated runtime.
+- **The existing TTS/voice-output configuration was not touched.** Fish Audio → ElevenLabs →
+  browser `speechSynthesis` fallback chain, and the selected voice, are exactly as they were before
+  this pass — voice *input* repair never required a voice *output* change.

@@ -27,6 +27,16 @@ The entire authority/verification/receipt spine works end to end without any API
   status aggregator (every row honestly `NOT_CONFIGURED` for anything actually unconfigured).
 - **Rate limiting, terminal dev-only gate, security headers** — all provable by hitting a real
   running instance (see `docs/PRODUCTION-READINESS.md`).
+- **Jarvis and Apollo voice input (microphone)** — real browser-native speech capture (Chromium/
+  WebKit only; Firefox shows an honest "unsupported" state), real permission/error states (never a
+  faked "Listening"), and real transcript routing: a spoken Jarvis command reaches the same
+  dispatcher a typed one does, and an Apollo command never leaks to Jarvis or to a generic chat
+  reply. Requires HTTPS in production (or `localhost` in development) — the browser's Web Speech
+  API refuses to run otherwise. Live audio capture itself needs a real microphone and a real human
+  speaking — it cannot be demoed in a headless/automated environment, only the surrounding
+  capability/permission/routing behavior can (see `docs/PRODUCTION-READINESS.md`'s Voice input
+  section). Apollo's *voice output* (TTS) and its *task execution* after a command is heard are
+  separate concerns from hearing it — see the row below for what execution actually goes through.
 
 ## Requires real credentials to demonstrate live
 

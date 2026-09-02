@@ -274,6 +274,63 @@ fires — the main chunk is still well over that threshold — a full fix would 
 large libraries (d3, recharts, motion) via `manualChunks`, a larger change than this pass's "no broad
 rewrite" instruction allowed.
 
+## Voice input — microphone (Pass IX, Jarvis + Apollo hearing repair)
+
+- [x] **Real browser capability detection**, never assumed: `isSpeechRecognitionSupported()`
+      checks for a real `SpeechRecognition`/`webkitSpeechRecognition` constructor; the shared hook
+      (`src/hooks/useSpeechRecognition.ts`) starts in a real `unsupported` `micState` on a browser
+      without it, and `startListening()` returns `false` rather than pretending to start. Proven by
+      test (`test/use-speech-recognition.test.ts`).
+- [x] **Listening state is driven by real browser events** (`onstart`/`onend`/`onerror`), never a
+      timer or an optimistic UI flip — proven by test with a real (mocked) constructible
+      `SpeechRecognition` firing real event callbacks.
+- [x] **Errors are classified, not swallowed.** `not-allowed`/`service-not-allowed` →
+      `permission-denied`; `audio-capture` → `no-device` (a missing microphone is reported
+      distinctly from a denied permission); `no-speech` is treated as transient, not a hard error;
+      every other browser error code surfaces a real `{ code, message }`, never a raw stack trace.
+- [x] **No empty/duplicate submission.** A whitespace-only final transcript is never submitted; the
+      same final transcript firing twice in rapid succession submits once (1.5s dedup window); two
+      distinct consecutive utterances both submit.
+- [x] **Only one recognizer active at a time**, enforced by a module-level singleton in the shared
+      hook — starting Apollo's mic stops Jarvis's real recognizer (and vice versa) as a genuine side
+      effect (`.stop()` called on the other instance's real object), not just a state flag.
+- [x] **Cleanup is real.** Unmounting a component while listening calls the real recognizer's
+      `.abort()` — no orphaned capture survives a surface close.
+- [x] **Jarvis and Apollo routing separation verified by source-level regression test**
+      (`test/voice-routing-separation.test.ts`, matching this repo's established convention): a
+      Jarvis transcript reaches only `executeDirective`/`onJarvisCommand`; an Apollo transcript
+      reaches only its own `handleVoiceCommandReceived`; Apollo contains no reference to
+      `onJarvisCommand` or `/api/jarvis/command`; Apollo's spoken responses are real templates tied
+      to actual task outcomes, never a raw `/api/generate` chat completion presented as its own
+      voice.
+- [x] **A real, previously-broken transcript-delivery bug was found and fixed in JarvisView.**
+      Before this pass, a finished Jarvis voice transcript populated the text input but was never
+      submitted — the user had to manually click Execute after speaking. Voice input is now
+      auto-submitted through the same dispatcher a typed command uses (`executeDirective`), proven
+      by both the fixed regression test in `test/jarvis-admin-wiring.test.ts` and the new
+      `test/voice-routing-separation.test.ts`.
+- [x] **TTS/voice-output configuration untouched.** `voiceEngine.ts` and `fishAudio.ts` were never
+      opened for editing this pass; JarvisView's Fish Audio → ElevenLabs → browser-`speechSynthesis`
+      provider chain and voice-selection logic are byte-identical to before, proven by source-level
+      assertion in `test/voice-routing-separation.test.ts`. `TTS_VOICE_CHANGED: NO`.
+- [x] **Real browser validation performed** against a real `NODE_ENV=production node dist/server.cjs`
+      instance in a real Chrome session (Pass IX): Apollo's "START APOLLO LIVE" control produced a
+      real `onstart`→`LISTENING` transition (live waveform, running session timer) and a clean
+      `onend`→idle transition on stop, with zero console errors either way. Jarvis's Global Voice
+      Core mic control was exercised the same way with zero console errors. `isSecureContext` was
+      confirmed `true` and a real `SpeechRecognition` global was confirmed present in that browser.
+      No physical microphone hardware exists in this sandboxed environment — the native
+      OS-level Chrome permission prompt (if any) is outside the page DOM and cannot be granted by
+      automation, and `navigator.permissions.query({name:'microphone'})` reported `prompt`
+      (never resolved to `granted`), so **live audio capture was not, and cannot honestly be
+      claimed to have been, proven end-to-end** — only the real code path up to and including the
+      browser's own permission gate was. `MIC_BROWSER_TEST: ENVIRONMENT_BLOCKED`.
+- [ ] Not done this pass: real end-to-end proof of actual spoken audio being transcribed and
+      dispatched, which requires real microphone hardware and a human in the loop — BLOCKED on
+      environment, not on code. `CommandPalette.tsx`'s own separate, pre-existing
+      `SpeechRecognition` implementation was deliberately left out of scope (the task named only
+      Jarvis and Apollo); it does not share the repaired hook and was not touched.
+
 ## Known deployment gaps (worth fixing before GA, not blocking beta)
 
 - `PORT` is now configurable (Pass VII); no `engines` field pins a minimum Node version yet.

@@ -20,12 +20,26 @@ afterAll(() => {
 
 describe('Jarvis admin intent wiring: previously orphaned /api/jarvis/command is now reached by the live UI (WIRED, not RETIRED or left ORPHANED)', () => {
   it('2. JarvisView\'s directive submission calls the real admin-command dispatcher, not generic chat', () => {
-    const handleExecute = jarvisViewContent.slice(
-      jarvisViewContent.indexOf('const handleExecute'),
-      jarvisViewContent.indexOf('const handleExecute') + 800
+    // Pass IX — handleExecute (typed submission) and handleFinalSpeech
+    // (voice transcript delivery) both now delegate to the one shared
+    // executeDirective() dispatcher, so a spoken directive reaches the
+    // real /api/jarvis/command path exactly like typed input (AA4) —
+    // check the dispatcher itself, not the (now thin) form-submit wrapper.
+    const executeDirective = jarvisViewContent.slice(
+      jarvisViewContent.indexOf('const executeDirective'),
+      jarvisViewContent.indexOf('const executeDirective') + 800
     );
-    expect(handleExecute).toContain('onJarvisCommand(query)');
-    expect(handleExecute).not.toContain("onSendQuery(query, 'gemini')");
+    expect(executeDirective).toContain('onJarvisCommand(query)');
+    expect(executeDirective).not.toContain("onSendQuery(query, 'gemini')");
+
+    // The typed-submission wrapper still exists and still funnels into the
+    // same real dispatcher via executeDirective — never a second, parallel
+    // call path for typed vs. spoken input.
+    expect(jarvisViewContent).toContain('await executeDirective(query)');
+
+    // AA4 — a final spoken transcript is actually delivered, not just
+    // dropped into the text box and left for a manual click.
+    expect(jarvisViewContent).toContain('executeDirectiveRef.current(transcript)');
   });
 
   it('7. GlobalVoiceOverlay\'s directive submission uses the same dispatcher (voice text, not new streaming audio)', () => {
