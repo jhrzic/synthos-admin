@@ -57,8 +57,18 @@ import { executeSkill } from "./lib/skill-execution";
 import { probeMcpServer, decryptCredential } from "./lib/mcp-client";
 import { recordRuntimeEvent, listRecentRuntimeEvents } from "./lib/runtime-events";
 import { getRuntimeStatus } from "./lib/runtime-status";
+import * as windmillClient from "./lib/windmill-client";
+import {
+  listVisibleWindmillTargets, listPlatformWindmillTargets, resolveWindmillTarget,
+  createWindmillTarget, updateWindmillTarget, isValidRemotePath, WindmillTargetKind,
+} from "./lib/windmill-targets";
+import {
+  listWorkspaceExternalExecutions, getWorkspaceExternalExecution, submitExternalExecution,
+  refreshExternalExecutionStatus, cancelExternalExecution, retryExternalExecution,
+  ingestExternalExecutionResult, listAllExternalExecutions, submitAndAwaitExternalExecution,
+} from "./lib/external-executions";
 
-const VALID_EXECUTION_TARGET_TYPES = new Set<ExecutionTargetType>(["model", "deterministic", "mcp_tool", "hermes_runtime"]);
+const VALID_EXECUTION_TARGET_TYPES = new Set<ExecutionTargetType>(["model", "deterministic", "mcp_tool", "hermes_runtime", "windmill"]);
 import { createJarvisSession, listUserJarvisSessions, getOwnedJarvisSession, listSessionMessages, appendJarvisMessage } from "./lib/jarvis-sessions";
 import { createBackup, listBackups, readManifestFromArchive, validateBackupArchive, stageRestore } from "./lib/backup";
 import {
@@ -2262,28 +2272,107 @@ sourceHash: ${packageMetadataResult.sourceHash}
         const nodeModel = currentNode.assignedModel || "gemini-3.6-flash";
         const nodeDescription = `${currentNode.description || taskTitle}${previousOutput ? `\n\nUpstream Context from previous step:\n${previousOutput.slice(0, 1000)}` : ""}`;
 
-        // Dispatch through real execution spine. The internal service
-        // token proves this call originated from this same process's own
-        // graph-execution loop — the outer /api/graphs/execute request was
-        // already authorized (requireWorkspaceMember) before this ran.
-        const executionResponse = await fetch(`http://127.0.0.1:${PORT}/api/execute-agent-task`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-Internal-Service-Token": INTERNAL_SERVICE_TOKEN },
-          body: JSON.stringify({
-            taskId: nodeTaskId,
-            taskTitle,
-            description: nodeDescription,
-            assignedAgent: nodeAgent,
-            assignedModel: nodeModel,
-            inputs: previousOutput,
-            // The graph's authoritative workspace, not a hardcoded constant —
-            // a spawned task must inherit the owning graph's workspace, never
-            // a default unrelated to it.
-            workspaceId
-          })
-        });
+        // ADR-006 / Workstream G — a node only ever routes to Windmill when
+        // it explicitly declares both runtime:"windmill" and a
+        // windmillTargetId (G2 — no hidden fallback). Every other node
+        // takes the existing native dispatch path below, byte-for-byte
+        // unchanged.
+        const isWindmillNode = currentNode.runtime === "windmill"
+          && typeof currentNode.windmillTargetId === "string"
+          && currentNode.windmillTargetId.trim().length > 0;
 
-        const nodeExecData = await executionResponse.json();
+        let nodeExecData: any;
+        if (isWindmillNode) {
+          // G4/E2 — bounded synchronous submit+await inside this one HTTP
+          // request, the same posture as the native dispatch below (this
+          // loop already blocks per node). Workspace comes from the
+          // already-authorized outer request, never from the node payload
+          // (rule 6/7) — resolveWindmillTarget re-checks the target is
+          // actually visible to this workspace regardless of what the
+          // node claims.
+          const actorUserId = (req as AuthedRequest).authUser?.user_id || "unknown";
+          const execution = await submitAndAwaitExternalExecution({
+            workspaceId,
+            createdByUserId: actorUserId,
+            targetId: currentNode.windmillTargetId,
+            input: { prompt: nodeDescription, upstreamOutput: previousOutput },
+            taskId: nodeTaskId,
+            graphRunId: runId,
+            graphNodeId: currentNode.id,
+          });
+
+          if (execution.status === "SUCCEEDED" && execution.result_receipt_id && execution.task_id) {
+            // Rule 15/F4 — a SUCCEEDED remote job only reaches this branch
+            // because ingestExternalExecutionResult already ran Aegis and
+            // only signed a receipt on VERIFIED (see lib/external-executions.ts).
+            const nodeArtifacts = getTaskArtifacts(execution.task_id);
+            const nodeReceipts = getTaskReceipts(execution.task_id);
+            const nodeReviews = getTaskQualityReviews(execution.task_id);
+            const nodeArtifact = nodeArtifacts.find((a) => a.artifact_id === execution.result_artifact_id) || nodeArtifacts[nodeArtifacts.length - 1];
+            const nodeReceipt = nodeReceipts.find((r) => r.receipt_id === execution.result_receipt_id);
+            const nodeReview = nodeReviews[nodeReviews.length - 1];
+            let artifactContentText = "";
+            try {
+              if (nodeArtifact?.disk_path) artifactContentText = fs.readFileSync(nodeArtifact.disk_path, "utf8");
+            } catch { /* falls back to empty — never fabricated */ }
+
+            nodeExecData = {
+              success: true,
+              status: "DONE",
+              outputs: artifactContentText,
+              artifact: nodeArtifact ? {
+                id: nodeArtifact.artifact_id,
+                filePath: nodeArtifact.relative_path,
+                contentHash: nodeArtifact.content_hash,
+                content: artifactContentText,
+              } : null,
+              review: nodeReview ? { reviewId: nodeReview.review_id, decision: nodeReview.decision, score: nodeReview.score } : null,
+              receipt: nodeReceipt ? {
+                receiptId: nodeReceipt.receipt_id,
+                signature: nodeReceipt.signature,
+                verified: verifyReceipt(nodeReceipt),
+              } : null,
+              externalExecutionId: execution.id,
+              externalRuntime: "windmill",
+            };
+          } else {
+            // O3/rule 15 — never mark this a SUCCESS. A remote job still
+            // in flight, cancelled, or that failed Aegis all land here
+            // honestly as an unverified node.
+            nodeExecData = {
+              success: false,
+              status: execution.status === "SUCCEEDED" ? "FAILED" : execution.status,
+              error: execution.error_message_safe
+                || `Windmill node ended in status "${execution.status}" without a SynthOS-verified receipt.`,
+              externalExecutionId: execution.id,
+              externalStatus: execution.status,
+              externalRuntime: "windmill",
+            };
+          }
+        } else {
+          // Dispatch through real execution spine. The internal service
+          // token proves this call originated from this same process's own
+          // graph-execution loop — the outer /api/graphs/execute request was
+          // already authorized (requireWorkspaceMember) before this ran.
+          const executionResponse = await fetch(`http://127.0.0.1:${PORT}/api/execute-agent-task`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Internal-Service-Token": INTERNAL_SERVICE_TOKEN },
+            body: JSON.stringify({
+              taskId: nodeTaskId,
+              taskTitle,
+              description: nodeDescription,
+              assignedAgent: nodeAgent,
+              assignedModel: nodeModel,
+              inputs: previousOutput,
+              // The graph's authoritative workspace, not a hardcoded constant —
+              // a spawned task must inherit the owning graph's workspace, never
+              // a default unrelated to it.
+              workspaceId
+            })
+          });
+
+          nodeExecData = await executionResponse.json();
+        }
 
         // Strict verification gate: Node must reach DONE and have valid verified receipt
         const isNodeVerified = nodeExecData.success && nodeExecData.status === "DONE" && nodeExecData.receipt?.verified === true;
@@ -2731,6 +2820,27 @@ sourceHash: ${packageMetadataResult.sourceHash}
         evidence = receipts;
         reply = `Verified Cryptographic Receipts Ledger for workspace ${jarvisWorkspaceId} (${receipts.length} recent):\n` +
           receipts.map((r: any) => `• Receipt ${r.receipt_id} (Task: ${r.task_id}) - Algorithm: ${r.algorithm}`).join("\n");
+      } else if (lower.includes("windmill") && (lower.includes("status") || lower.includes("connect") || lower.includes("health"))) {
+        // ADR-006 / U1/U2 — read-only, workspace-scoped. Jarvis never
+        // triggers a real Windmill job from natural language (U3, deferred).
+        intent = "ADMIN_WINDMILL_STATUS_QUERY";
+        const health = await windmillClient.health();
+        evidence = health;
+        reply = health.status === "NOT_CONFIGURED"
+          ? "Windmill is not configured on this deployment (WINDMILL_BASE_URL/TOKEN/WORKSPACE are unset)."
+          : health.status === "CONNECTED"
+            ? `Windmill is CONNECTED — authenticated as "${health.identity}"${health.version ? ` (version ${health.version})` : ""}.`
+            : `Windmill is ${health.status}: ${health.error || "no further detail."}`;
+      } else if (lower.includes("windmill") || lower.includes("external job") || lower.includes("external execution")) {
+        intent = "ADMIN_EXTERNAL_EXECUTIONS_QUERY";
+        const executions = listWorkspaceExternalExecutions(jarvisWorkspaceId, 10);
+        evidence = executions;
+        const failedCount = executions.filter((e) => e.status === "FAILED").length;
+        reply = lower.includes("fail")
+          ? `${failedCount} of ${executions.length} recent external executions in workspace ${jarvisWorkspaceId} failed:\n` +
+            executions.filter((e) => e.status === "FAILED").map((e) => `• ${e.id} (${e.remote_path}) — ${e.error_message_safe || "no error detail recorded"}`).join("\n")
+          : `${executions.length} recent external execution(s) in workspace ${jarvisWorkspaceId}:\n` +
+            executions.map((e) => `• [${e.status}] ${e.remote_path} — ${e.id}`).join("\n");
       } else {
         // Natural Language Directive via Live Model
         const apiKey = process.env.GEMINI_API_KEY || "";
@@ -3713,8 +3823,9 @@ sourceHash: ${packageMetadataResult.sourceHash}
       if ("error" in resolved) {
         return res.status(400).json({ success: false, error: resolved.error });
       }
-      const { prompt, query } = req.body || {};
-      const result = await executeSkill(resolved.workspaceId, req.params.skillId, { prompt, query });
+      const { prompt, query, windmillInput } = req.body || {};
+      const actorUserId = (req as AuthedRequest).authUser?.user_id || "unknown";
+      const result = await executeSkill(resolved.workspaceId, req.params.skillId, { prompt, query, windmillInput }, actorUserId);
       if (!result) {
         return res.status(404).json({ success: false, error: "Skill not found." });
       }
@@ -3774,6 +3885,214 @@ sourceHash: ${packageMetadataResult.sourceHash}
       return res.json({ success: true, ...result });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to test skill" });
+    }
+  });
+
+  // ===========================================================================
+  // ADR-006 — Windmill external execution control plane.
+  //
+  // Windmill target registry (Workstream K): the only mechanism that turns a
+  // logical id into a remote script/flow path. No route below or elsewhere
+  // ever accepts a caller-supplied remote path directly.
+  // ===========================================================================
+
+  app.get("/api/windmill/targets", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.query.workspaceId);
+      if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
+      return res.json({ success: true, targets: listVisibleWindmillTargets(resolved.workspaceId) });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list Windmill targets" });
+    }
+  });
+
+  app.post("/api/windmill/targets", requireWorkspaceAdmin(fromBody), (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
+      const { name, remotePath, kind, description, inputSchema, enabled } = req.body || {};
+      if (!name || typeof name !== "string" || !name.trim()) {
+        return res.status(400).json({ success: false, error: "name is required." });
+      }
+      if (!remotePath || !isValidRemotePath(remotePath)) {
+        return res.status(400).json({ success: false, error: "remotePath must be a bounded path of letters, digits, \"_\", \"-\", and \"/\" only." });
+      }
+      const resolvedKind: WindmillTargetKind = kind === "flow" ? "flow" : "script";
+      const actorUserId = (req as AuthedRequest).authUser!.user_id;
+      const target = createWindmillTarget({
+        workspaceId: resolved.workspaceId, name: name.trim(), remotePath, kind: resolvedKind,
+        description, inputSchema, enabled, createdByUserId: actorUserId,
+      });
+      return res.json({ success: true, target });
+    } catch (err: any) {
+      return res.status(400).json({ success: false, error: err?.message || "Failed to create Windmill target" });
+    }
+  });
+
+  app.patch("/api/windmill/targets/:targetId", requireWorkspaceAdmin(fromBody), (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
+      const { name, remotePath, kind, description, inputSchema, enabled } = req.body || {};
+      const patch: any = {};
+      if (name !== undefined) patch.name = name;
+      if (remotePath !== undefined) patch.remote_path = remotePath;
+      if (kind !== undefined) patch.kind = kind === "flow" ? "flow" : "script";
+      if (description !== undefined) patch.description = description;
+      if (enabled !== undefined) patch.enabled = enabled;
+      if (inputSchema !== undefined) patch.inputSchema = inputSchema;
+      const target = updateWindmillTarget(resolved.workspaceId, req.params.targetId, patch);
+      if (!target) return res.status(404).json({ success: false, error: "Windmill target not found." });
+      return res.json({ success: true, target });
+    } catch (err: any) {
+      return res.status(400).json({ success: false, error: err?.message || "Failed to update Windmill target" });
+    }
+  });
+
+  // Platform-global targets (workspace_id NULL) — platform-admin only (K3).
+  app.get("/api/master-admin/windmill/targets", requirePlatformAdmin, (_req, res) => {
+    try {
+      return res.json({ success: true, targets: listPlatformWindmillTargets() });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list Windmill targets" });
+    }
+  });
+
+  app.post("/api/master-admin/windmill/targets", requirePlatformAdmin, (req, res) => {
+    try {
+      const { name, remotePath, kind, description, inputSchema, enabled, workspaceId } = req.body || {};
+      if (!name || typeof name !== "string" || !name.trim()) {
+        return res.status(400).json({ success: false, error: "name is required." });
+      }
+      if (!remotePath || !isValidRemotePath(remotePath)) {
+        return res.status(400).json({ success: false, error: "remotePath must be a bounded path of letters, digits, \"_\", \"-\", and \"/\" only." });
+      }
+      const resolvedKind: WindmillTargetKind = kind === "flow" ? "flow" : "script";
+      const actorUserId = (req as AuthedRequest).authUser!.user_id;
+      const target = createWindmillTarget({
+        workspaceId: workspaceId ? String(workspaceId) : null, name: name.trim(), remotePath, kind: resolvedKind,
+        description, inputSchema, enabled, createdByUserId: actorUserId,
+      });
+      return res.json({ success: true, target });
+    } catch (err: any) {
+      return res.status(400).json({ success: false, error: err?.message || "Failed to create Windmill target" });
+    }
+  });
+
+  // Real Windmill connection status — CONFIGURED never equals CONNECTED
+  // (non-negotiable rule 10); this makes a real authenticated call.
+  app.get("/api/master-admin/windmill/status", requirePlatformAdmin, async (_req, res) => {
+    try {
+      const result = await windmillClient.health();
+      return res.json({ success: true, health: result });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to check Windmill status" });
+    }
+  });
+
+  // Bounded, cross-workspace external-execution view — Master Admin only,
+  // same posture as /api/master-admin/audit (platform-wide by design).
+  app.get("/api/master-admin/external-executions", requirePlatformAdmin, (req, res) => {
+    try {
+      const limit = req.query.limit ? Number(req.query.limit) : undefined;
+      return res.json({ success: true, executions: listAllExternalExecutions(limit) });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list external executions" });
+    }
+  });
+
+  // ===========================================================================
+  // External executions — the real, local, workspace-scoped job ledger
+  // (Workstream C/I). Submission spends real external compute (like
+  // /api/skills/:skillId/execute) so it is admin-gated; read/refresh is
+  // member-gated (like the MCP probe route).
+  // ===========================================================================
+
+  app.get("/api/external-executions", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.query.workspaceId);
+      if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
+      const limit = req.query.limit ? Number(req.query.limit) : undefined;
+      return res.json({ success: true, executions: listWorkspaceExternalExecutions(resolved.workspaceId, limit) });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list external executions" });
+    }
+  });
+
+  app.get("/api/external-executions/:id", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.query.workspaceId);
+      if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
+      const execution = getWorkspaceExternalExecution(resolved.workspaceId, req.params.id);
+      if (!execution) return res.status(404).json({ success: false, error: "External execution not found." });
+      return res.json({ success: true, execution });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to get external execution" });
+    }
+  });
+
+  app.post("/api/external-executions", requireWorkspaceAdmin(fromBody), async (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
+      const { targetId, input, taskId, graphRunId, graphNodeId, skillId, idempotencyKey } = req.body || {};
+      if (!targetId || typeof targetId !== "string") {
+        return res.status(400).json({ success: false, error: "targetId is required." });
+      }
+      const actorUserId = (req as AuthedRequest).authUser!.user_id;
+      const result = await submitExternalExecution({
+        workspaceId: resolved.workspaceId, createdByUserId: actorUserId, targetId,
+        input: input && typeof input === "object" ? input : {},
+        taskId, graphRunId, graphNodeId, skillId, idempotencyKey,
+      });
+      return res.json({ success: result.execution.status !== "FAILED", ...result });
+    } catch (err: any) {
+      const code = err?.code === "TARGET_NOT_ALLOWED" ? 403 : err?.code === "INVALID_INPUT" || err?.code === "INPUT_TOO_LARGE" ? 400 : 500;
+      return res.status(code).json({ success: false, error: err?.message || "Failed to submit external execution" });
+    }
+  });
+
+  app.post("/api/external-executions/:id/refresh", requireWorkspaceMember(fromBody), async (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
+      let execution = await refreshExternalExecutionStatus(resolved.workspaceId, req.params.id);
+      // E1 — status sync happens on this real, on-demand request; if the
+      // refresh just observed a genuine SUCCEEDED remote job, ingestion
+      // (F-series) runs inline so the caller sees the fully resolved record.
+      if (execution.status === "SUCCEEDED" && !execution.result_ingested_at) {
+        const ingested = await ingestExternalExecutionResult(resolved.workspaceId, execution.id);
+        execution = ingested.execution;
+      }
+      return res.json({ success: true, execution });
+    } catch (err: any) {
+      const code = err?.code === "NOT_FOUND" ? 404 : 500;
+      return res.status(code).json({ success: false, error: err?.message || "Failed to refresh external execution" });
+    }
+  });
+
+  app.post("/api/external-executions/:id/cancel", requireWorkspaceAdmin(fromBody), async (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
+      const result = await cancelExternalExecution(resolved.workspaceId, req.params.id);
+      return res.json({ success: true, ...result });
+    } catch (err: any) {
+      const code = err?.code === "NOT_FOUND" ? 404 : 500;
+      return res.status(code).json({ success: false, error: err?.message || "Failed to cancel external execution" });
+    }
+  });
+
+  app.post("/api/external-executions/:id/retry", requireWorkspaceAdmin(fromBody), async (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
+      const actorUserId = (req as AuthedRequest).authUser!.user_id;
+      const result = await retryExternalExecution(resolved.workspaceId, actorUserId, req.params.id);
+      return res.json({ success: result.execution.status !== "FAILED", ...result });
+    } catch (err: any) {
+      const code = err?.code === "NOT_FOUND" ? 404 : err?.code === "NOT_RETRYABLE" || err?.code === "TARGET_NOT_ALLOWED" ? 400 : 500;
+      return res.status(code).json({ success: false, error: err?.message || "Failed to retry external execution" });
     }
   });
 

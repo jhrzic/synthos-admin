@@ -52,6 +52,14 @@ describe('Pass III API security: workspace-scoped real data routes require requi
     '/api/ton/status',
     '/api/ton/telemetry',
     '/api/ton/guardians',
+    // ADR-006 — Windmill / external execution (Pass VI).
+    '/api/windmill/targets',
+    '/api/windmill/targets/:targetId',
+    '/api/external-executions',
+    '/api/external-executions/:id',
+    '/api/external-executions/:id/refresh',
+    '/api/external-executions/:id/cancel',
+    '/api/external-executions/:id/retry',
   ];
 
   for (const route of workspaceScopedRoutes) {
@@ -66,6 +74,29 @@ describe('Pass V: skill execution requires the stricter requireWorkspaceAdmin, n
   it('/api/skills/:skillId/execute specifically requires requireWorkspaceAdmin (can spend real provider budget / call external MCP servers)', () => {
     const line = routeLine('/api/skills/:skillId/execute');
     expect(line).toContain('requireWorkspaceAdmin(');
+  });
+});
+
+describe('ADR-006: Windmill/external-execution write routes require the stricter requireWorkspaceAdmin, not just member', () => {
+  it('POST /api/external-executions (submission spends real external compute) requires requireWorkspaceAdmin', () => {
+    const match = serverContent.match(/app\.post\(\s*"\/api\/external-executions"[^\n]*/);
+    expect(match).not.toBeNull();
+    expect(match![0]).toContain('requireWorkspaceAdmin(');
+  });
+  it('POST /api/external-executions/:id/cancel requires requireWorkspaceAdmin', () => {
+    const match = serverContent.match(/app\.post\(\s*"\/api\/external-executions\/:id\/cancel"[^\n]*/);
+    expect(match).not.toBeNull();
+    expect(match![0]).toContain('requireWorkspaceAdmin(');
+  });
+  it('POST /api/external-executions/:id/retry requires requireWorkspaceAdmin', () => {
+    const match = serverContent.match(/app\.post\(\s*"\/api\/external-executions\/:id\/retry"[^\n]*/);
+    expect(match).not.toBeNull();
+    expect(match![0]).toContain('requireWorkspaceAdmin(');
+  });
+  it('POST /api/windmill/targets (registers a real invokable remote path) requires requireWorkspaceAdmin', () => {
+    const match = serverContent.match(/app\.post\(\s*"\/api\/windmill\/targets"[^\n]*/);
+    expect(match).not.toBeNull();
+    expect(match![0]).toContain('requireWorkspaceAdmin(');
   });
 });
 
@@ -91,6 +122,9 @@ describe('Pass III API security: platform-level routes require requirePlatformAd
     '/api/master-admin/audit',
     '/api/master-admin/runtime-status',
     '/api/master-admin/runtime-events',
+    '/api/master-admin/windmill/targets',
+    '/api/master-admin/windmill/status',
+    '/api/master-admin/external-executions',
     '/api/terminal/status',
     '/api/terminal/sessions',
     '/api/terminal/sessions/:id',

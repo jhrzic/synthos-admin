@@ -608,6 +608,75 @@ export function getDatabase(): any {
       CREATE INDEX IF NOT EXISTS idx_runtime_events_created ON runtime_events(created_at);
       CREATE INDEX IF NOT EXISTS idx_runtime_events_target ON runtime_events(target_type, target_id);
     `);
+
+    // ADR-006 — Windmill external execution control plane.
+    //
+    // windmill_targets is the K1 allowed-target registry: the only remote
+    // script/flow paths SynthOS is ever permitted to invoke. workspace_id
+    // NULL means platform-global (any workspace may use it); non-NULL means
+    // that one workspace only. There is no column for a caller-supplied
+    // arbitrary path anywhere else in this schema — every real submission
+    // must resolve through a row here (R3).
+    //
+    // external_executions is the canonical LOCAL truth for a remote job
+    // (non-negotiable rule: Windmill job state is never the only local
+    // truth). correlation_id is the idempotency key (Q1) — unique so a
+    // double-submit with the same key cannot insert twice. remote_job_id is
+    // nullable because a row can exist before submission succeeds (a
+    // SUBMISSION_FAILED row never got a real remote id). Ownership
+    // (workspace_id, created_by_user_id) is set once at INSERT time from the
+    // server-authoritative caller context and never trusts a remote payload
+    // field for it (non-negotiable rule 6/7).
+    dbInstance.exec(`
+      CREATE TABLE IF NOT EXISTS windmill_targets (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT,
+        name TEXT NOT NULL,
+        remote_path TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'script',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        description TEXT,
+        input_schema_json TEXT,
+        created_by_user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_windmill_targets_workspace ON windmill_targets(workspace_id);
+
+      CREATE TABLE IF NOT EXISTS external_executions (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        runtime TEXT NOT NULL DEFAULT 'windmill',
+        task_id TEXT,
+        graph_run_id TEXT,
+        graph_node_id TEXT,
+        skill_id TEXT,
+        target_id TEXT,
+        remote_path TEXT NOT NULL,
+        target_kind TEXT NOT NULL DEFAULT 'script',
+        remote_job_id TEXT,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        attempt_number INTEGER NOT NULL DEFAULT 1,
+        parent_execution_id TEXT,
+        correlation_id TEXT NOT NULL,
+        input_json TEXT,
+        submitted_at TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        last_checked_at TEXT,
+        error_code TEXT,
+        error_message_safe TEXT,
+        result_artifact_id TEXT,
+        result_receipt_id TEXT,
+        result_ingested_at TEXT,
+        created_by_user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_external_executions_workspace ON external_executions(workspace_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_external_executions_correlation ON external_executions(correlation_id);
+      CREATE INDEX IF NOT EXISTS idx_external_executions_remote_job ON external_executions(remote_job_id);
+    `);
   }
   return dbInstance;
 }

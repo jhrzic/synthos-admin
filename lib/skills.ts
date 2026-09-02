@@ -21,6 +21,8 @@ import crypto from 'node:crypto';
 import { getDatabase } from './persistence';
 import { classifyModelRequest } from './model-router';
 import { encryptCredential, credentialEncryptionConfigured } from './mcp-client';
+import { resolveWindmillTarget } from './windmill-targets';
+import { isWindmillConfigured } from './windmill-client';
 
 export type SkillCategory = 'system' | 'mcp' | 'custom' | 'tool' | 'integration';
 
@@ -29,7 +31,9 @@ export type SkillCategory = 'system' | 'mcp' | 'custom' | 'tool' | 'integration'
 // one unless explicitly set) is REGISTERED but never EXECUTABLE — this is
 // not inferred from `enabled`, `category`, or anything else; it is this
 // one explicit field. See classifySkillExecutability below.
-export type ExecutionTargetType = 'model' | 'deterministic' | 'mcp_tool' | 'hermes_runtime';
+// ADR-006 — 'windmill' added: execution_target_ref holds a windmill_targets
+// registry id (never a raw remote path — see lib/windmill-targets.ts K1).
+export type ExecutionTargetType = 'model' | 'deterministic' | 'mcp_tool' | 'hermes_runtime' | 'windmill';
 
 /**
  * E3 — the deterministic-skill whitelist. Deliberately tiny and explicit:
@@ -333,6 +337,19 @@ export function classifySkillExecutability(skill: SkillRecord): SkillExecutabili
         return { executable: false, reason: 'NO_TARGET', message: `"${skill.execution_target_ref}" is not a recognized deterministic action.` };
       }
       return { executable: true, reason: 'READY', message: `Runs the real internal action "${skill.execution_target_ref}".` };
+    }
+    case 'windmill': {
+      if (!isWindmillConfigured()) {
+        return { executable: false, reason: 'MISSING_RUNTIME', message: 'Windmill is not configured in this deployment (WINDMILL_BASE_URL/WINDMILL_TOKEN/WINDMILL_WORKSPACE).' };
+      }
+      if (!skill.execution_target_ref) {
+        return { executable: false, reason: 'NO_TARGET', message: 'No Windmill target is configured on this skill.' };
+      }
+      const target = resolveWindmillTarget(skill.workspace_id, skill.execution_target_ref);
+      if (!target) {
+        return { executable: false, reason: 'NO_TARGET', message: 'The configured Windmill target no longer exists, is disabled, or is not visible to this workspace.' };
+      }
+      return { executable: true, reason: 'READY', message: `Submits Windmill ${target.kind} "${target.remote_path}" — connectivity is verified live at execution time.` };
     }
     default:
       return { executable: false, reason: 'NO_TARGET', message: 'Unrecognized execution target type.' };

@@ -118,6 +118,8 @@ describe('5. conversational prompts remain on real generic chat — no broad key
       'intent = "ADMIN_TASK_QUERY"',
       'intent = "ADMIN_GRAPH_QUERY"',
       'intent = "ADMIN_RECEIPT_QUERY"',
+      'intent = "ADMIN_WINDMILL_STATUS_QUERY"',
+      'intent = "ADMIN_EXTERNAL_EXECUTIONS_QUERY"',
     ]));
   });
 });

@@ -234,3 +234,63 @@ describe('lib/backup: listBackups reflects real archives on disk', () => {
     expect(found?.size_bytes).toBe(summary.size_bytes);
   });
 });
+
+// ---------------------------------------------------------------------------
+// ADR-006 / Workstream V — WINDMILL_TOKEN must never appear in a backup
+// archive. Unlike MCP's per-skill encrypted credential (stored in SQLite,
+// see lib/mcp-client.ts's credential_ciphertext), Windmill's token lives in
+// process.env only and is never written to any table — this test proves
+// that by creating a real windmill_targets/external_executions row set,
+// setting a real-looking WINDMILL_TOKEN, and inspecting the ACTUAL archived
+// database bytes rather than trusting the design intent alone.
+// ---------------------------------------------------------------------------
+describe('lib/backup: WINDMILL_TOKEN is never present in a backup archive', () => {
+  const FAKE_TOKEN = 'wmill-secret-token-should-never-appear-in-any-backup-9f8e7d';
+
+  it('the archived database bytes never contain the configured Windmill token', async () => {
+    const originalToken = process.env.WINDMILL_TOKEN;
+    process.env.WINDMILL_TOKEN = FAKE_TOKEN;
+    try {
+      const { createWindmillTarget } = await import('../lib/windmill-targets');
+      const { submitExternalExecution } = await import('../lib/external-executions');
+      const target = createWindmillTarget({
+        workspaceId: 'ws-backup-token-test', name: 'token-leak-check', remotePath: 'f/x/y',
+        kind: 'script', createdByUserId: 'user-backup-test',
+      });
+      // A submission with no real Windmill server configured fails at the
+      // network step and is recorded FAILED — that's fine; the row still
+      // exists in the DB either way, which is all this test needs.
+      await submitExternalExecution({
+        workspaceId: 'ws-backup-token-test', createdByUserId: 'user-backup-test',
+        targetId: target.id, input: { note: 'token exclusion check' },
+      }).catch(() => { /* expected without a real Windmill instance */ });
+
+      const summary = await trackedCreateBackup();
+      const archivePath = path.join(BACKUP_ROOT, `${summary.backup_id}.tar.gz`);
+      const extractDir = path.join(os.tmpdir(), `synthos-backup-extract-${Date.now()}`);
+      fs.mkdirSync(extractDir, { recursive: true });
+      try {
+        await tar.extract({ file: archivePath, cwd: extractDir, sync: false } as any);
+        const extractedDbPath = path.join(extractDir, 'database.db');
+        expect(fs.existsSync(extractedDbPath)).toBe(true);
+        const dbBytes = fs.readFileSync(extractedDbPath);
+        expect(dbBytes.includes(FAKE_TOKEN)).toBe(false);
+
+        // Also confirm the token never lands in the Vault directory either.
+        const vaultDir = path.join(extractDir, 'vault');
+        if (fs.existsSync(vaultDir)) {
+          const walk = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true })
+            .flatMap((e) => e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]);
+          for (const filePath of walk(vaultDir)) {
+            expect(fs.readFileSync(filePath, 'utf8').includes(FAKE_TOKEN)).toBe(false);
+          }
+        }
+      } finally {
+        fs.rmSync(extractDir, { recursive: true, force: true });
+      }
+    } finally {
+      if (originalToken === undefined) delete process.env.WINDMILL_TOKEN;
+      else process.env.WINDMILL_TOKEN = originalToken;
+    }
+  });
+});

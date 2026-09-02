@@ -22,7 +22,9 @@ export type AdminEventType =
   | 'MEMBERSHIP_ROLE_CHANGED'
   | 'MEMBERSHIP_REMOVED'
   | 'WORKSPACE_CREATED'
-  | 'SETUP_TOKEN_ISSUED';
+  | 'SETUP_TOKEN_ISSUED'
+  | 'WINDMILL_TARGET_CREATED'
+  | 'WINDMILL_TARGET_UPDATED';
 
 export interface AdminAuditEventRecord {
   event_id: string;

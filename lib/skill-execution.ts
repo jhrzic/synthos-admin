@@ -26,6 +26,7 @@ import { searchWorkspaceMemory } from './memory-index';
 import { listWorkspaceVaultEntries } from './vault';
 import { recordRuntimeEvent } from './runtime-events';
 import { hermesAdapter } from '../src/services/hermesAdapter';
+import { submitAndAwaitExternalExecution } from './external-executions';
 
 export interface SkillExecutionResult {
   success: boolean;
@@ -41,7 +42,8 @@ const EXECUTE_TIMEOUT_MS = 15000;
 export async function executeSkill(
   workspaceId: string,
   skillId: string,
-  input: { prompt?: string; query?: string } = {}
+  input: { prompt?: string; query?: string; windmillInput?: Record<string, unknown> } = {},
+  actorUserId: string = 'unknown'
 ): Promise<SkillExecutionResult | null> {
   const skill = getWorkspaceSkill(workspaceId, skillId);
   if (!skill) return null;
@@ -72,6 +74,8 @@ export async function executeSkill(
         return await runModelAction(workspaceId, skillId, skill.execution_target_ref, input, startedAt);
       case 'mcp_tool':
         return await runMcpToolAction(workspaceId, skillId, skill.source_ref!, skill.execution_target_ref!, startedAt);
+      case 'windmill':
+        return await runWindmillAction(workspaceId, skillId, skill.execution_target_ref!, input.windmillInput || {}, actorUserId, startedAt);
       case 'hermes_runtime': {
         // Always honestly NOT_IMPLEMENTED — hermesAdapter.execute() is a
         // real stub, never a fake success (E5).
@@ -257,6 +261,53 @@ async function runMcpToolAction(
   recordRuntimeEvent({
     workspaceId, eventType: 'SKILL_EXECUTION', targetType: 'skill', targetId: skillId,
     status: 'SUCCESS', latencyMs: result.latencyMs, detail: { targetType: 'mcp_tool', tool: toolName },
+  });
+  return result;
+}
+
+/**
+ * ADR-006 / H — a Windmill-targeted skill submits a real external job and
+ * bounded-waits for it within this one request (E2 — no background poll).
+ * Unlike every other branch in this file, a successful Windmill skill
+ * execution DOES flow through the full task/Aegis/receipt pipeline (see
+ * lib/external-executions.ts ingestExternalExecutionResult) — the prior
+ * "skills never get a receipt" decision was about forcing a role-prompt
+ * agent spine onto deterministic/MCP calls that don't fit it; an external
+ * job that already produces a real artifact is exactly the shape that
+ * spine exists for.
+ */
+async function runWindmillAction(
+  workspaceId: string, skillId: string, targetId: string, windmillInput: Record<string, unknown>,
+  actorUserId: string, startedAt: number
+): Promise<SkillExecutionResult> {
+  const execution = await submitAndAwaitExternalExecution({
+    workspaceId, createdByUserId: actorUserId, targetId, input: windmillInput,
+    skillId, idempotencyKey: `skill:${skillId}:${Date.now()}`,
+  });
+
+  if (execution.status !== 'SUCCEEDED') {
+    const result: SkillExecutionResult = {
+      success: false, status: 'FAILED', targetType: 'windmill',
+      error: execution.error_message_safe || `Windmill execution ended in status "${execution.status}".`,
+      latencyMs: Date.now() - startedAt,
+    };
+    recordRuntimeEvent({
+      workspaceId, eventType: 'SKILL_EXECUTION', targetType: 'skill', targetId: skillId,
+      status: 'FAILED', latencyMs: result.latencyMs, detail: { targetType: 'windmill', executionId: execution.id, remoteStatus: execution.status },
+    });
+    return result;
+  }
+
+  const verified = !!execution.result_receipt_id;
+  const result: SkillExecutionResult = {
+    success: verified, status: verified ? 'SUCCESS' : 'FAILED', targetType: 'windmill',
+    output: { executionId: execution.id, taskId: execution.task_id, artifactId: execution.result_artifact_id, receiptId: execution.result_receipt_id, verified },
+    error: verified ? undefined : 'Windmill job succeeded but SynthOS verification (Aegis) did not pass — no receipt was issued.',
+    latencyMs: Date.now() - startedAt,
+  };
+  recordRuntimeEvent({
+    workspaceId, eventType: 'SKILL_EXECUTION', targetType: 'skill', targetId: skillId,
+    status: verified ? 'SUCCESS' : 'FAILED', latencyMs: result.latencyMs, detail: { targetType: 'windmill', executionId: execution.id, verified },
   });
   return result;
 }

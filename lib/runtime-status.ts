@@ -5,6 +5,7 @@ import { buildTonReadiness } from './ton-readiness';
 import { listBackups } from './backup';
 import { getDatabase } from './persistence';
 import { listRecentRuntimeEvents } from './runtime-events';
+import { health as windmillHealth, isWindmillConfigured } from './windmill-client';
 
 // ---------------------------------------------------------------------------
 // Pass V / Workstream G — one small, truthful runtime-status aggregator.
@@ -164,13 +165,38 @@ function mcpStatus(): RuntimeSystemReport {
   };
 }
 
-function windmillStatus(): RuntimeSystemReport {
+// ADR-006 — Windmill is the external execution *control plane* (a real,
+// authenticated REST connection this deployment may submit jobs through),
+// never a competing in-process scheduler. Nothing here starts a timer;
+// `windmillStatus` only ever reports the outcome of a real, on-demand
+// health() call it makes itself when this route is hit — same "no cron,
+// but this specific call is real" posture as hermesRuntimeStatus above.
+async function windmillStatus(): Promise<RuntimeSystemReport> {
+  if (!isWindmillConfigured()) {
+    return {
+      system: 'Windmill (External Execution Control Plane)',
+      status: 'NOT_CONFIGURED',
+      evidenceSource: 'configuration_only',
+      lastCheck: null,
+      detail: 'WINDMILL_BASE_URL / WINDMILL_TOKEN / WINDMILL_WORKSPACE are not all set. See docs/adr-006-windmill-external-execution-control-plane.md.',
+    };
+  }
+  const result = await windmillHealth();
+  const now = new Date().toISOString();
+  const statusMap: Record<string, RuntimeSystemStatus> = {
+    CONNECTED: 'HEALTHY',
+    FAILED: 'FAILED',
+    NOT_CONFIGURED: 'NOT_CONFIGURED',
+    INVALID_RESPONSE: 'FAILED',
+  };
   return {
-    system: 'Windmill (Scheduler/Orchestration)',
-    status: 'NOT_IMPLEMENTED',
-    evidenceSource: 'not_implemented',
-    lastCheck: null,
-    detail: 'Deliberately deferred — see docs/adr-001-hermes-adapter-governance.md and docs/IMPLEMENTATION-STATUS.md. No competing scheduler exists.',
+    system: 'Windmill (External Execution Control Plane)',
+    status: statusMap[result.status] ?? 'UNKNOWN',
+    evidenceSource: 'live_probe',
+    lastCheck: now,
+    detail: result.status === 'CONNECTED'
+      ? `Authenticated as "${result.identity}"${result.version ? ` (Windmill ${result.version})` : ''}.`
+      : (result.error || `Windmill health check returned ${result.status}.`),
   };
 }
 
@@ -184,7 +210,7 @@ export async function getRuntimeStatus(): Promise<RuntimeStatusReport> {
     backupStatus(),
     vaultStatus(),
     memoryIndexStatus(),
-    windmillStatus(),
+    await windmillStatus(),
   ];
   return { systems, generatedAt: new Date().toISOString() };
 }

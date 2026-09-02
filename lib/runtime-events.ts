@@ -16,16 +16,23 @@ export type RuntimeEventType =
   | 'SKILL_EXECUTION'
   | 'MCP_PROBE'
   | 'HERMES_HEALTH_CHECK'
-  | 'PROVIDER_CALL';
+  | 'PROVIDER_CALL'
+  | 'EXTERNAL_EXECUTION';
 
-export type RuntimeEventTargetType = 'skill' | 'mcp_server' | 'hermes_runtime' | 'provider';
+export type RuntimeEventTargetType = 'skill' | 'mcp_server' | 'hermes_runtime' | 'provider' | 'external_execution';
 
+// ADR-006 — RUNNING/SUBMITTED/CANCELLED added for the external-execution
+// lifecycle (Workstream M). Purely additive: every existing producer of
+// this type still only ever emits the original five values.
 export type RuntimeEventStatus =
   | 'SUCCESS'
   | 'FAILED'
   | 'NOT_CONFIGURED'
   | 'NOT_IMPLEMENTED'
-  | 'TIMEOUT';
+  | 'TIMEOUT'
+  | 'SUBMITTED'
+  | 'RUNNING'
+  | 'CANCELLED';
 
 export interface RuntimeEventRecord {
   event_id: string;

@@ -245,3 +245,115 @@ describe('executeSkill against an unknown skill returns null, never fabricates o
     expect(result).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// ADR-006 / Workstream H — 'windmill' as a discriminated skill execution
+// target. execution_target_ref holds a windmill_targets registry id, never
+// a raw remote path (K1). Real network calls against a local mock Windmill
+// server, real Aegis/receipt pipeline via lib/external-executions.ts.
+// ---------------------------------------------------------------------------
+describe('H1/H2: windmill-targeted skill executability and execution', () => {
+  it('MISSING_RUNTIME when Windmill is not configured, even with a valid target ref', async () => {
+    const originalBase = process.env.WINDMILL_BASE_URL;
+    const originalToken = process.env.WINDMILL_TOKEN;
+    const originalWs = process.env.WINDMILL_WORKSPACE;
+    delete process.env.WINDMILL_BASE_URL;
+    delete process.env.WINDMILL_TOKEN;
+    delete process.env.WINDMILL_WORKSPACE;
+    try {
+      const { createWindmillTarget } = await import('../lib/windmill-targets');
+      const target = createWindmillTarget({ workspaceId: WS, name: 'Unconfigured', remotePath: 'f/a/b', kind: 'script', createdByUserId: 'u' });
+      const skill = createSkill({ workspaceId: WS, name: 'Windmill Skill Unconfigured', enabled: true, executionTargetType: 'windmill', executionTargetRef: target.id });
+      const result = classifySkillExecutability(skill);
+      expect(result.executable).toBe(false);
+      expect(result.reason).toBe('MISSING_RUNTIME');
+    } finally {
+      if (originalBase !== undefined) process.env.WINDMILL_BASE_URL = originalBase;
+      if (originalToken !== undefined) process.env.WINDMILL_TOKEN = originalToken;
+      if (originalWs !== undefined) process.env.WINDMILL_WORKSPACE = originalWs;
+    }
+  });
+
+  describe('with a real local mock Windmill server', () => {
+    let server: http.Server;
+    const JOB_OK = '44444444-4444-4444-4444-444444444444';
+    const JOB_FAIL = '55555555-5555-5555-5555-555555555555';
+
+    const setup = async () => {
+      process.env.MCP_ALLOW_LOCAL_ENDPOINTS = 'true';
+      server = http.createServer((req, res) => {
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => {
+          const url = req.url || '';
+          if (req.method === 'GET' && url === '/api/version') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('v-test'); }
+          if (req.method === 'GET' && url === '/api/users/whoami') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ username: 'skill-test-runner' })); }
+          if (req.method === 'POST' && /\/jobs\/run\//.test(url)) {
+            const jobId = url.includes('fail-script') ? JOB_FAIL : JOB_OK;
+            res.writeHead(200, { 'Content-Type': 'text/plain' });
+            return res.end(jobId);
+          }
+          if (req.method === 'GET' && url.endsWith(`/jobs_u/get/${JOB_OK}`)) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ type: 'CompletedJob', running: false, success: true, canceled: false }));
+          }
+          if (req.method === 'GET' && url.endsWith(`/jobs_u/get/${JOB_FAIL}`)) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ type: 'CompletedJob', running: false, success: false, canceled: false }));
+          }
+          if (req.method === 'GET' && url.endsWith(`/jobs_u/get_completed_job_result/${JOB_OK}`)) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ summary: 'real synthetic skill output' }));
+          }
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'not found' }));
+        });
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      process.env.WINDMILL_BASE_URL = `http://127.0.0.1:${port}`;
+      process.env.WINDMILL_TOKEN = 'skill-test-token';
+      process.env.WINDMILL_WORKSPACE = 'skill-test-ws';
+    };
+    const teardown = async () => {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    };
+
+    it('a successful Windmill skill execution goes through the real Aegis/receipt pipeline and reports SUCCESS', async () => {
+      await setup();
+      try {
+        const { createWindmillTarget } = await import('../lib/windmill-targets');
+        const target = createWindmillTarget({ workspaceId: WS, name: 'OK script', remotePath: 'f/ok-script', kind: 'script', createdByUserId: 'u' });
+        const skill = createSkill({ workspaceId: WS, name: 'Windmill Skill OK', enabled: true, executionTargetType: 'windmill', executionTargetRef: target.id });
+
+        const executability = classifySkillExecutability(skill);
+        expect(executability.executable).toBe(true);
+        expect(executability.reason).toBe('READY');
+
+        const result = await executeSkill(WS, skill.skill_id, { windmillInput: {} }, 'skill-test-actor');
+        expect(result?.status).toBe('SUCCESS');
+        expect(result?.success).toBe(true);
+        expect((result?.output as any)?.verified).toBe(true);
+        expect((result?.output as any)?.receiptId).toBeTruthy();
+      } finally {
+        await teardown();
+      }
+    }, 15000);
+
+    it('a failed remote job reports FAILED, never a fabricated SUCCESS', async () => {
+      await setup();
+      try {
+        const { createWindmillTarget } = await import('../lib/windmill-targets');
+        const target = createWindmillTarget({ workspaceId: WS, name: 'Fail script', remotePath: 'f/fail-script', kind: 'script', createdByUserId: 'u' });
+        const skill = createSkill({ workspaceId: WS, name: 'Windmill Skill Fail', enabled: true, executionTargetType: 'windmill', executionTargetRef: target.id });
+
+        const result = await executeSkill(WS, skill.skill_id, { windmillInput: {} }, 'skill-test-actor');
+        expect(result?.status).toBe('FAILED');
+        expect(result?.success).toBe(false);
+      } finally {
+        await teardown();
+      }
+    }, 15000);
+  });
+});

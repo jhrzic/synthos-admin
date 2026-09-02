@@ -74,10 +74,19 @@ describe('G1/G2/G3: runtime status aggregator uses the real vocabulary and never
     }
   });
 
-  it('Windmill is always NOT_IMPLEMENTED — deliberately deferred, never claimed otherwise', async () => {
-    const report = await getRuntimeStatus();
-    const windmill = report.systems.find((s) => s.system.includes('Windmill'));
-    expect(windmill?.status).toBe('NOT_IMPLEMENTED');
+  it('Windmill without WINDMILL_BASE_URL/TOKEN/WORKSPACE reports NOT_CONFIGURED, never HEALTHY (ADR-006 — CONFIGURED never equals CONNECTED)', async () => {
+    const keys = ['WINDMILL_BASE_URL', 'WINDMILL_TOKEN', 'WINDMILL_WORKSPACE'] as const;
+    const originals = keys.map((k) => process.env[k]);
+    keys.forEach((k) => delete process.env[k]);
+    try {
+      const report = await getRuntimeStatus();
+      const windmill = report.systems.find((s) => s.system.includes('Windmill'));
+      expect(windmill?.status).toBe('NOT_CONFIGURED');
+      expect(windmill?.evidenceSource).toBe('configuration_only');
+      expect(windmill?.lastCheck).toBeNull();
+    } finally {
+      keys.forEach((k, i) => { if (originals[i] !== undefined) process.env[k] = originals[i] as string; });
+    }
   });
 
   it('MCP connectivity is NOT_IMPLEMENTED when no probe has ever run, never a fabricated HEALTHY', async () => {
