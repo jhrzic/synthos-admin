@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { 
   ActiveTab, AIModelInfo, ObsidianNote, ObsidianVault, 
   BotTask, JarvisSettings, AgentInfo, KanbanTask, ModelRouterRule, AgentRole,
@@ -26,11 +26,17 @@ import { ObsidianView } from './components/ObsidianView';
 import { BotModeView } from './components/BotModeView';
 import { JarvisView } from './components/JarvisView';
 import { ModelDashboardView } from './components/ModelDashboardView';
-import { SettingsView } from './components/SettingsView';
+// Pass VIII / Workstream W — lazy-loaded: each is only ever rendered when
+// its own tab is active (see the `{activeTab === '...' && <X/>}` pattern
+// below), so deferring its download until then is a safe, standard code-
+// split with no behavior change — these are consistently the heaviest
+// view files in src/components (>1000 lines each), the real driver of the
+// >500KB initial-chunk warning.
+const SettingsView = lazy(() => import('./components/SettingsView').then((m) => ({ default: m.SettingsView })));
 import { CommandPalette } from './components/CommandPalette';
 import { JarvisOverlayHUD } from './components/JarvisOverlayHUD';
 import { GlobalVoiceOverlay } from './components/GlobalVoiceOverlay';
-import { KanbanView } from './components/KanbanView';
+const KanbanView = lazy(() => import('./components/KanbanView').then((m) => ({ default: m.KanbanView })));
 import { ModelRouterView } from './components/ModelRouterView';
 import { AgentView } from './components/AgentView';
 import { OverviewOfficeView } from './components/OverviewOfficeView';
@@ -39,7 +45,7 @@ import { ContentLibraryView } from './components/ContentLibraryView';
 import { ScheduleCronView } from './components/ScheduleCronView';
 import { AgentDrawer } from './components/AgentDrawer';
 import { AgentFleetView } from './components/AgentFleetView';
-import { StartupIdeaGeneratorView } from './components/StartupIdeaGeneratorView';
+const StartupIdeaGeneratorView = lazy(() => import('./components/StartupIdeaGeneratorView').then((m) => ({ default: m.StartupIdeaGeneratorView })));
 import { HermesOracleView } from './components/HermesOracleView';
 import { AutoContentNewsView } from './components/AutoContentNewsView';
 import { StudioLeadGenView } from './components/StudioLeadGenView';
@@ -59,7 +65,7 @@ import { ReceiptsView } from './components/ReceiptsView';
 import { GuardianAegisControlView } from './components/GuardianAegisControlView';
 import { WorkspacesView } from './components/WorkspacesView';
 import { KanbanDependencyDAG } from './components/KanbanDependencyDAG';
-import { GraphBuilderView } from './components/GraphBuilderView';
+const GraphBuilderView = lazy(() => import('./components/GraphBuilderView').then((m) => ({ default: m.GraphBuilderView })));
 import { GraphRunsView } from './components/GraphRunsView';
 import { GuideWalkthroughView } from './components/GuideWalkthroughView';
 import { synthosControl } from './services/synthosControlService';
@@ -73,7 +79,7 @@ import { FirstRunTour } from './components/FirstRunTour';
 import { RightActivityPane } from './components/RightActivityPane';
 import { RunDetailModal } from './components/RunDetailModal';
 import { JulianGoldieAuditRunner } from './components/JulianGoldieAuditRunner';
-import { MasterAdminView } from './components/MasterAdminView';
+const MasterAdminView = lazy(() => import('./components/MasterAdminView').then((m) => ({ default: m.MasterAdminView })));
 import { GitMerge } from 'lucide-react';
 
 interface AppProps {
@@ -1383,6 +1389,17 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           )}
 
           <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 overflow-y-auto overflow-x-hidden">
+          {/* Pass VIII / Workstream W — one Suspense boundary around the
+              whole tab-content area. Only ever one {activeTab === 'x' &&
+              <X/>} block renders at a time, so this is a standard, safe
+              route-level code-split: a lazy view (KanbanView,
+              GraphBuilderView, MasterAdminView, SettingsView,
+              StartupIdeaGeneratorView — see their lazy() imports above)
+              shows this fallback for the brief moment its chunk downloads;
+              every already-eager view underneath is completely unaffected
+              (Suspense only ever engages when something below it actually
+              suspends). */}
+          <Suspense fallback={<div className="flex items-center justify-center h-full w-full text-[#9C97B4] text-sm font-mono">Loading…</div>}>
           {/* Intake & Triage Engine (Voice, Directives, Webhooks) */}
           {activeTab === 'intake-triage' && (
             <IntakeTriageView
@@ -2086,6 +2103,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               onUpdateSettings={handleUpdateJarvisSettings}
             />
           )}
+          </Suspense>
           </main>
         </div>
       </div>

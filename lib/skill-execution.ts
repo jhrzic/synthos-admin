@@ -21,7 +21,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { getWorkspaceSkill, classifySkillExecutability, getRawCredentialCiphertext, DeterministicAction } from './skills';
 import { classifyModelRequest } from './model-router';
-import { decryptCredential, probeMcpServer } from './mcp-client';
+import { decryptCredential, probeMcpServer, readBoundedText } from './mcp-client';
 import { searchWorkspaceMemory } from './memory-index';
 import { listWorkspaceVaultEntries } from './vault';
 import { recordRuntimeEvent } from './runtime-events';
@@ -238,7 +238,9 @@ async function runMcpToolAction(
       body: JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/call', params: { name: toolName, arguments: {} } }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    body = await res.json();
+    // P — same response-size bound as every other MCP boundary call (see
+    // lib/mcp-client.ts's readBoundedText).
+    body = JSON.parse(await readBoundedText(res));
   } finally {
     clearTimeout(timer);
   }

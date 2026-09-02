@@ -23,7 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import * as tar from 'tar';
-import { getDatabasePath } from './persistence';
+import { getDatabasePath, getDatabase } from './persistence';
 import { VAULT_ROOT } from './vault';
 
 export const BACKUP_ROOT = path.join(process.cwd(), 'backups');
@@ -134,6 +134,17 @@ export async function createBackup(): Promise<BackupSummary> {
     const databaseIncluded = fs.existsSync(dbPath);
     let databaseChecksum: { sha256: string; size_bytes: number } | null = null;
     if (databaseIncluded) {
+      // Pass VIII / Workstream Q/T — in WAL mode (lib/persistence.ts), a
+      // recent write can still be sitting only in the `-wal` sidecar file,
+      // not yet folded into the main `.db` file. A plain fs.copyFileSync of
+      // just the main file can silently miss it — a real bug this pass's
+      // backup/restore drill (test/backup-restore-drill.test.ts) caught.
+      // TRUNCATE checkpoints everything into the main file AND truncates
+      // the WAL back to empty, so the copy below is always complete and
+      // self-contained (no separate `-wal`/`-shm` file needed in the
+      // archive). Safe to call on the live, in-use database handle — this
+      // is a normal, supported SQLite operation, not a schema change.
+      getDatabase().exec('PRAGMA wal_checkpoint(TRUNCATE);');
       fs.copyFileSync(dbPath, path.join(stagingDir, 'database.db'));
       databaseChecksum = sha256File(dbPath);
     }
@@ -374,9 +385,26 @@ export function stageRestore(backupId: string, confirmed: boolean): StagedRestor
     return { error: 'Backup archive failed validation and will not be staged for restore.', validation };
   }
 
-  fs.rmSync(STAGED_RESTORE_ROOT, { recursive: true, force: true });
-  ensureDir(STAGED_RESTORE_ROOT);
-  tar.extract({ file: backupFilePath(backupId)!, cwd: STAGED_RESTORE_ROOT, sync: true, strict: true, preservePaths: false } as any);
+  // Pass VIII / Workstream R — extract into a private, uniquely-named
+  // directory first, then publish it to the well-known STAGED_RESTORE_ROOT
+  // path via two atomic renames (never a remove-then-slowly-rebuild
+  // window). Two concurrent stageRestore() calls previously raced directly
+  // on STAGED_RESTORE_ROOT — one's `rmSync` could delete the other's
+  // mid-extraction directory, or a reader could observe a torn, partially-
+  // extracted archive. Now: each call's own tar.extract runs in full
+  // isolation, and only the atomic rename below is ever visible at the
+  // public path — the last call to finish deterministically wins, wholly,
+  // never a mix of two extractions.
+  const privateStagingDir = path.join(BACKUP_ROOT, `.staging-restore-${crypto.randomBytes(6).toString('hex')}`);
+  ensureDir(privateStagingDir);
+  tar.extract({ file: backupFilePath(backupId)!, cwd: privateStagingDir, sync: true, strict: true, preservePaths: false } as any);
+
+  const trashDir = `${STAGED_RESTORE_ROOT}.trash-${crypto.randomBytes(4).toString('hex')}`;
+  if (fs.existsSync(STAGED_RESTORE_ROOT)) {
+    fs.renameSync(STAGED_RESTORE_ROOT, trashDir); // atomic — STAGED_RESTORE_ROOT is briefly absent, never partial
+  }
+  fs.renameSync(privateStagingDir, STAGED_RESTORE_ROOT); // atomic publish
+  fs.rmSync(trashDir, { recursive: true, force: true }); // best-effort cleanup of the old copy, already unreferenced
 
   const dbPath = getDatabasePath();
   const plan: RestorePlan = {

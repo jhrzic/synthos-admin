@@ -63,6 +63,7 @@ export const ENV_VAR_SPECS: EnvVarSpec[] = [
 
   // --- Platform / hosting ---
   { variable: 'PORT', subsystem: 'Server Host', requiredFor: 'HTTP listen port (defaults to 3000)', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: (v) => Number.isInteger(Number(v)) && Number(v) > 0 && Number(v) < 65536 },
+  { variable: 'TRUST_PROXY_HOPS', subsystem: 'Server Host', requiredFor: 'Correct client IP resolution (rate limiting) behind exactly N reverse proxies — unset means trust none, Express default', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: (v) => Number.isInteger(Number(v)) && Number(v) >= 0 },
   { variable: 'SYNTHOS_DB_PATH', subsystem: 'Database', requiredFor: 'SQLite file location (defaults to ./data/synthos-admin.db)', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
   { variable: 'SYNTHOS_SIGNING_KEY_DIR', subsystem: 'Receipt Signing', requiredFor: 'Ed25519 keypair storage location (defaults to ./data/keys, self-generates on first use)', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
   { variable: 'SYNTHOS_SIGNING_PRIVATE_KEY_PEM', subsystem: 'Receipt Signing', requiredFor: 'Injecting a pre-provisioned signing key (e.g. from a secret manager) instead of self-generating', requirement: 'OPTIONAL', secrecy: 'SECRET' },

@@ -47,6 +47,14 @@ ENV SYNTHOS_DB_PATH=/app/data/synthos-admin.db
 ENV SYNTHOS_SIGNING_KEY_DIR=/app/data/keys
 RUN mkdir -p /app/data /app/vault /app/backups
 
+# Pass VIII / ADR-007 — run as the non-root `node` user the official
+# node:22-slim image already provides (uid 1000), not root. Ownership of
+# everything under /app (including the three data directories just
+# created) must be granted explicitly first, or the process can't write to
+# its own volumes once it drops root.
+RUN chown -R node:node /app
+USER node
+
 # Everything durable lives under these three paths — mount all three or
 # every restart is a fresh, empty deployment. See docs/OPERATOR-RUNBOOK.md.
 VOLUME ["/app/data", "/app/vault", "/app/backups"]

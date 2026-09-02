@@ -1,7 +1,8 @@
 # SynthOS Admin — Production Readiness Checklist
 
-Pre-launch checklist, written after Pass VII's real environment/runtime audit. Checked items are
-verified by a real test, a real local run, or direct source inspection performed in this pass — not
+Pre-launch checklist, updated through Pass VIII's launch-hardening/security-closeout pass (see
+`docs/adr-007-launch-security-boundaries.md`), on top of Pass VII's environment/runtime audit.
+Checked items are verified by a real test, a real local run, or direct source inspection — not
 assumed. Unchecked items are named honestly, with what's blocking them.
 
 Legend: `[x]` verified this pass · `[ ]` not yet done · `BLOCKED` needs something outside this
@@ -30,21 +31,40 @@ verified.
       the backup archive — proven by a real test (`test/backup.test.ts`'s token-exclusion test
       extracts the actual archive bytes and asserts the token string is absent, not just "should
       be").
-- [ ] **`/api/terminal/exec` is a real shell-execution surface**, gated to `requirePlatformAdmin`
-      and a "Guardian" policy filter (`checkGuardianRules`), but it is a genuine, large blast-radius
-      feature — a compromised platform-admin session means real command execution on the host.
-      This is presumably an intentional operator/dev tool, not an oversight, but it needs an
-      explicit decision before a production launch: keep it (and treat platform-admin credential
-      security accordingly), or feature-flag it off outside trusted/local deployments. **Not fixed
-      in this pass — flagged for owner decision.**
-- [ ] Rate limiting: none exists anywhere in this codebase (verified — no rate-limit middleware in
-      `server.ts`, no dependency on any rate-limiting package). Login, setup-token validation, and
-      every paid-provider-calling route are all unlimited today. Add rate limiting (at minimum on
-      `/api/auth/login` and `/api/auth/setup-token/:token/complete`) before any internet-facing
-      launch.
-- BLOCKED: TLS/HTTPS termination — this application does not terminate TLS itself (no HTTPS server,
-  no certificate handling). A production deployment needs a reverse proxy/load balancer in front of
-  it; the `Secure` cookie flag assumes one exists. Out of this repo's scope to verify further.
+- [x] **`/api/terminal/exec` is now DEV_ONLY** (Pass VIII / ADR-007). Every `/api/terminal/*` route
+      sits behind a real `NODE_ENV === "production"` gate returning `403` before
+      `requirePlatformAdmin` or any handler logic runs — proven live against a real production
+      build with a real platform-admin session (`403 DEV_ONLY_DISABLED`). This app's own configured
+      secrets are also stripped from the child process environment as defense in depth. The
+      underlying denylist (`checkGuardianRules`) is unchanged and remains bypassable in principle —
+      it no longer matters in production since the route is unreachable there.
+- [x] **Rate limiting is real** (Pass VIII, `lib/rate-limit.ts`) — a bounded, in-memory, tiered
+      limiter. `AUTH_SENSITIVE` (login, setup, setup-token validate/complete): 10 attempts / 15 min
+      by IP. `EXPENSIVE_EXECUTION` (`/api/generate`, graph execute, skill execute, MCP probe,
+      Windmill submit): 20/min by user. `PRIVILEGED_ADMIN` (terminal exec, admin user creation):
+      60/min. Proven live: 12 rapid login attempts against a real running instance returned
+      `401 ×10` then `429 ×2`. **`SINGLE_INSTANCE_LIMITER`** — stated honestly, not silently
+      claimed as distributed: this is process-local in-memory state; a horizontally-scaled
+      deployment gets `replica_count ×` the stated limit per replica. Not every route carries a
+      limit yet — see ADR-007's Known limitations.
+- [x] **Security headers added** (Pass VIII): `X-Content-Type-Options: nosniff`, `X-Frame-Options:
+      DENY`, `Referrer-Policy`, a scoped `Permissions-Policy`, and a `Content-Security-Policy` sized
+      to this app's actual external dependencies (Google Fonts, the optional Fish Audio WebSocket) —
+      `script-src 'self'` only, no `unsafe-inline`/`unsafe-eval`, no wildcard `connect-src`. HSTS
+      only when `NODE_ENV=production`. Verified live: login, Overview, Kanban, Master Admin, and
+      Graph Builder all render with zero console errors under this CSP in a real Chrome session.
+- [x] **`TRUST_PROXY_HOPS`** (Pass VIII): unset by default (Express trusts nothing — `req.ip` is the
+      raw socket address). Set to the real hop count behind a reverse proxy; never blindly
+      `trust proxy: true`, which would let any client spoof `X-Forwarded-For` and defeat IP-based
+      rate limiting.
+- [x] **Reverse proxy example added**: `docs/deploy/Caddyfile.example` — real TLS termination, a
+      body-size limit matching this app's own 10MB JSON limit, real timeouts, a `/health`
+      passthrough, no hardcoded domain. This app deliberately implements no HTTP→HTTPS redirect of
+      its own — the proxy's job, and doing it app-side risks a redirect loop behind a proxy that
+      already terminated TLS.
+- BLOCKED: actual TLS/HTTPS termination and a real domain — this application does not terminate TLS
+  itself; a production deployment needs the reverse proxy above (or equivalent) genuinely running in
+  front of it. Out of this repo's scope to provision.
 
 ## Credentials
 
@@ -89,12 +109,21 @@ verified.
       says it's fine."
 - [x] Restore is staged, never a live in-place swap (this process holds an open SQLite handle for
       its whole lifetime) — proven by test and by design.
-- [x] Restore drill: covered by the existing automated test suite (`test/backup.test.ts`) —
-      create → validate → stage → verify staged files exist → confirm the *live* DB is untouched
-      until a manual restart applies the staged copy. Not re-run as a separate manual drill against
-      a throwaway instance in this pass (the automated coverage already exercises the identical
-      code path with real files); do that manual drill once before the first real production
-      restore if you want additional confidence.
+- [x] **Full content-level restore drill** (Pass VIII, `test/backup-restore-drill.test.ts`): creates
+      a real user + real Vault artifact, backs up, independently re-validates checksums, stages a
+      restore, then opens the STAGED copy with its own separate `DatabaseSync` connection (never the
+      live handle) and queries it — proving the restored bytes really contain that exact user row
+      and artifact content, not just that a file exists. This drill caught two real bugs the same
+      pass introduced and fixed (see below) before they could have reached production.
+- [x] **WAL-mode backup correctness bug found and fixed** (Pass VIII): adding `PRAGMA journal_mode =
+      WAL` (a real concurrency improvement) broke the prior plain `fs.copyFileSync` backup — recent
+      writes can sit only in the `-wal` sidecar file, invisible to a raw copy of the main `.db`
+      file. The restore drill caught this immediately (`no such table: users` in the restored copy).
+      Fixed with `PRAGMA wal_checkpoint(TRUNCATE)` before every backup copy.
+- [x] **Concurrent-restore race found and fixed** (Pass VIII): `stageRestore()` used to `rm` then
+      rebuild the shared staging directory in place — two concurrent restore calls could corrupt
+      each other's extraction. Now each call extracts privately and publishes via two atomic
+      renames; the last call to finish wins wholly, never a torn mix.
 - [ ] No automated backup schedule exists, and none should be added inside this application (see
       `CLAUDE.md`'s no-competing-scheduler rule) — this is an operator responsibility (cron/systemd
       timer/orchestrator job), documented in `docs/OPERATOR-RUNBOOK.md` §13.
@@ -110,17 +139,22 @@ verified.
 ## Hermes
 
 - [ ] **BLOCKED — genuine open question, not just a missing credential.** `HERMES_ADAPTER_BASE_URL`
-      is unset, so `HERMES_RUNTIME` is honestly `NOT_CONFIGURED`. This pass searched the local
-      machine for a real Hermes installation per the task's own instruction, and found one: a
-      running "Hermes Agent" v0.20.5 CLI/desktop app (gateway process, `~/.hermes/` config
-      directory). **This is very likely not the same "Hermes" `docs/adr-001-hermes-adapter-governance.md`
-      describes integrating with** — it presents as a personal, general-purpose AI agent tool
-      (kanban board, cron jobs, "pets," per-user memories) with no observed documented HTTP contract,
-      communicating over a private Unix socket rather than a REST API. Building a live adapter
-      bridge to it would mean guessing at an undocumented protocol, which the task that produced
-      this checklist explicitly prohibited ("do not invent paths"). **Before this can move past
-      `NOT_CONFIGURED`: confirm with the project owner whether this locally-installed tool is
-      actually the intended integration target, and if so, get its real documented API surface.**
+      is unset, so `HERMES_RUNTIME` is honestly `NOT_CONFIGURED`. Pass VII searched the local
+      machine for a real Hermes installation and found one: a running "Hermes Agent" v0.20.5
+      CLI/desktop app (gateway process, `~/.hermes/` config directory). **This is very likely not
+      the same "Hermes" `docs/adr-001-hermes-adapter-governance.md` describes integrating with** —
+      it presents as a personal, general-purpose AI agent tool (kanban board, cron jobs, "pets,"
+      per-user memories) with no observed documented HTTP contract, communicating over a private
+      Unix socket rather than a REST API.
+- [x] **Pass VIII corroboration**: a real browser walkthrough of Master Admin's own "Providers &
+      Models" and "Hermes Admin" panels shows this codebase's UI *itself* labels the intended
+      integration **"Nous Hermes 3 AgentOS Adapter (ADR-001)"** and lists `nousresearch/hermes-3-*`
+      as the associated model family — a specific, real reference to Nous Research's Hermes model
+      line, not a general-purpose personal CLI tool. This corroborates, from the app's own source of
+      truth rather than inference alone, that the locally-discovered "Hermes Agent" is a false
+      friend. **Before this can move past `NOT_CONFIGURED`: confirm with the project owner what the
+      real Nous Hermes 3 AgentOS integration target is, and get its documented API surface** —
+      building an adapter bridge to an undocumented protocol was explicitly out of scope this pass.
 - [x] `health()` is real (genuine network call, real failure states) — unreachable to verify
       further without a real base URL.
 - [x] `execute()`/`events()` remain honest `NOT_IMPLEMENTED` regardless of configuration — confirmed
@@ -142,6 +176,12 @@ verified.
 - [x] Real Streamable HTTP JSON-RPC client, real SSRF guard (proven blocking a loopback address by
       default, proven allowing it only with the explicit `MCP_ALLOW_LOCAL_ENDPOINTS=true` escape
       hatch).
+- [x] **Response size bound added** (Pass VIII): every MCP JSON-RPC call (probe and `tools/call`)
+      is now bounded at 1MB — checked against `Content-Length` when present, and via a manual
+      stream-read-with-early-abort when absent (chunked encoding) — proven by test against both a
+      declared-oversized response and an actual oversized stream. Previously unbounded: a
+      misbehaving MCP server could have forced this app to buffer an arbitrarily large response into
+      memory before any validation.
 - [ ] Zero MCP servers configured in this environment (fresh workspace, no skills seeded — correct
       per `CLAUDE.md`'s "seed nothing but workspace 1" rule). Live validation needs at least one
       real MCP server configured by an operator.
@@ -161,7 +201,36 @@ verified.
 ## Domain / TLS
 
 - BLOCKED: no domain or TLS termination is configured or in scope for this repo — see the Security
-  section's TLS note.
+  section's TLS note. A real reverse-proxy example now exists (`docs/deploy/Caddyfile.example`) to
+  make standing one up fast once a domain is chosen.
+
+## Production browser smoke (Pass VIII, `PRODUCTION_BROWSER_SMOKE: PASS` with one major UI finding)
+
+A real Chrome session against a real `NODE_ENV=production node dist/server.cjs` instance: login,
+Overview, Master Admin (Overview & Scorecard, Setup Walkthrough, Providers & Models, Hermes Admin
+tabs), Kanban, Graph Builder. Zero JavaScript console errors on any screen. The three newly
+lazy-loaded views (Kanban, Master Admin, Graph Builder — see Performance below) all rendered
+correctly through their `Suspense` boundary with no visible flash-of-broken-content or hydration
+issue.
+
+**Major finding, not cosmetic:** the application's **default landing screen** ("Overview") and its
+sibling OPERATIONS-section screens (Kanban, Active Runs, Agent Wireframe) show **entirely fabricated
+static demo data** inherited from the pre-SynthOS Mission Control UI this project forked — invented
+agent counts (`ACTIVE 7 agents`), invented `LIVE`/`PARTIAL` status badges for products this codebase
+does not integrate with (Cursor, Antigravity, OpenClaw — not present anywhere in `lib/model-router.ts`
+or any real provider list), an invented `22% Complete` pipeline progress bar, fabricated Kanban tasks.
+This is exactly the class of finding this checklist's own truth-sweep instruction was looking for
+(`CONNECTED`/`LIVE`/`ACTIVE` claims without backing evidence) — found by actually looking, not
+assumed clean because other passes' work was real.
+
+The **real, tested, live-data-driven surface** — everything else in this document — is reached via
+the sidebar's "MASTER ADMIN" section, not the default view. See `docs/DEMO-PROFILE.md` for the
+practical implication (demo from Master Admin, not the default landing screen) and the final report's
+`RECOMMENDED_NEXT_TASK` for why fixing this is the single highest-priority remaining item.
+
+Not done this pass, given the scope of a proper fix (rewiring or replacing an entire legacy
+dashboard is a materially different task than hardening what's already real): actually wiring
+Overview to real data, relabeling it as a demo, or removing it.
 
 ## Monitoring
 
@@ -174,22 +243,48 @@ verified.
 
 ## RC acceptance
 
-- [x] `test/rc-acceptance.test.ts` (added this pass) exercises the deterministic, credential-free
-      portion of the full pipeline end-to-end against real SQLite/Vault/Aegis/receipt/KIL/memory
-      code: authenticated admin → workspace → task execution... → Aegis → receipt → Vault → Memory
-      → KIL, plus Windmill's equivalent chain via a local mock server, backup creation/validation,
-      and Jarvis admin queries. It does **not** exercise a real Gemini call, a real Hermes runtime,
-      or a real external MCP server — none are configured in this environment, and the test suite
-      correctly treats their absence as the honest, expected state rather than skipping silently.
-      See the test file's own header for exactly what it does and does not prove.
+- [x] `test/rc-acceptance.test.ts` (Pass VII, expanded Pass VIII) exercises the deterministic,
+      credential-free portion of the full pipeline end-to-end against real SQLite/Vault/Aegis/
+      receipt/KIL/Jarvis code: platform-admin bootstrap → second-user onboarding via a real setup
+      token → workspace membership → a real deterministic skill execution → a real Windmill-backed
+      skill execution through the full pipeline (submit → real remote job via a local mock server →
+      artifact → Aegis → a real Ed25519 receipt → independent re-verification → a real KIL
+      observation with real confidence scoring → memory-index full-text search) → a real Jarvis
+      session reflecting the real receipt count → a real backup afterward, independently
+      re-validated. Rate limiting and the content-level restore drill have their own dedicated, more
+      thorough test files (`test/rate-limit.test.ts`, `test/backup-restore-drill.test.ts`);
+      restart/session persistence was proven live against a running production build rather than in
+      this suite. It does **not** exercise a real Gemini call, a real Hermes runtime, or a real
+      external MCP server — none are configured in this environment, and the test suite asserts
+      their absence explicitly rather than skipping silently. See the test file's own header for
+      exactly what it does and does not prove.
+
+## Performance (Pass VIII, `IMPROVED`, not `RESOLVED`)
+
+The main JS chunk was 1,886.52 kB raw / 483.35 kB gzip. Five heaviest, non-default-view components
+(`MasterAdminView`, `GraphBuilderView`, `KanbanView`, `StartupIdeaGeneratorView`, `SettingsView` —
+consistently the largest files in `src/components/`, none of them the default `overview` tab) are
+now `React.lazy()`-loaded behind one `Suspense` boundary wrapping the whole tab-content area (safe:
+only one `{activeTab === 'x' && <X/>}` block is ever mounted at a time). Main chunk is now
+1,480.91 kB raw / 387.36 kB gzip (≈21.5%/19.9% reduction), with the five views as separate chunks
+(39–109 kB raw each) downloaded only when their tab is opened. **Verified live**, not just measured
+by build output: all three of Kanban/Master Admin/Graph Builder rendered correctly with zero console
+errors in a real Chrome session against the production build. The `>500KB chunk` build warning still
+fires — the main chunk is still well over that threshold — a full fix would mean vendor-splitting
+large libraries (d3, recharts, motion) via `manualChunks`, a larger change than this pass's "no broad
+rewrite" instruction allowed.
 
 ## Known deployment gaps (worth fixing before GA, not blocking beta)
 
-- `PORT` is now configurable (this pass); no `engines` field pins a minimum Node version yet.
+- `PORT` is now configurable (Pass VII); no `engines` field pins a minimum Node version yet.
 - Build tooling (`vite`, `esbuild`, `typescript`, `tsx`, `@vitejs/plugin-react`, `tailwindcss`,
   `autoprefixer`, `@tailwindcss/vite`) lives in `dependencies`, not `devDependencies` — harmless
   functionally, but means a production install can't trim them via `--omit=dev`.
 - No graceful-shutdown handler (`server.close()` on `SIGTERM`) — an in-flight request can be cut off
   on stop/restart.
-- `Dockerfile`/`docker-compose.yml` added this pass but **UNVERIFIED** — Docker is not installed in
-  this session's environment, so `docker build` was never actually run. Verify before relying on it.
+- `Dockerfile`/`docker-compose.yml` (Pass VII, hardened Pass VIII — now runs as non-root `node`
+  user) but **UNVERIFIED at runtime** — Docker is not installed in this session's environment, so
+  `docker build` was never actually run. Verify before relying on it.
+- Rate limiting (Pass VIII) covers four named risk tiers, not every route — see ADR-007.
+- The default "Overview" landing screen shows fabricated demo data — see the Production browser
+  smoke section above and `docs/DEMO-PROFILE.md`. The single highest-priority remaining item.

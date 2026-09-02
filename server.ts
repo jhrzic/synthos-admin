@@ -58,6 +58,7 @@ import { probeMcpServer, decryptCredential } from "./lib/mcp-client";
 import { recordRuntimeEvent, listRecentRuntimeEvents } from "./lib/runtime-events";
 import { getRuntimeStatus } from "./lib/runtime-status";
 import { buildEnvReadinessReport, buildStartupSummary } from "./lib/env-readiness";
+import { rateLimit, byIp, byUserOrIp } from "./lib/rate-limit";
 import * as windmillClient from "./lib/windmill-client";
 import {
   listVisibleWindmillTargets, listPlatformWindmillTargets, resolveWindmillTarget,
@@ -215,6 +216,55 @@ async function startServer() {
   const envPort = Number(process.env.PORT);
   const PORT = Number.isInteger(envPort) && envPort > 0 && envPort < 65536 ? envPort : 3000;
 
+  // Pass VIII / Workstream C1 — trust proxy is OFF by default (Express's
+  // own default: req.ip is the raw socket address, X-Forwarded-* headers
+  // are ignored). Blindly setting `trust proxy: true` would let ANY client
+  // spoof its own X-Forwarded-For and defeat IP-based rate limiting
+  // (lib/rate-limit.ts). TRUST_PROXY_HOPS lets an operator who has put
+  // exactly N reverse proxies in front of this app (see
+  // docs/deploy/Caddyfile.example / nginx.conf.example) tell Express to
+  // trust exactly that many hops — the standard, safe Express pattern —
+  // never an unconditional trust-everything setting.
+  const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS);
+  if (Number.isInteger(trustProxyHops) && trustProxyHops > 0) {
+    app.set("trust proxy", trustProxyHops);
+  }
+
+  // C5 — minimal, real security headers. No new dependency (a header-
+  // setting middleware this size doesn't need one). CSP is sized to this
+  // app's ACTUAL external dependencies (verified in this pass): Google
+  // Fonts (style/font) and the optional Fish Audio TTS WebSocket — never a
+  // wildcard, and script-src stays 'self'-only with no
+  // unsafe-inline/unsafe-eval. HSTS is only ever sent when this process
+  // itself believes it's in production — it does not by itself prove the
+  // request arrived over real TLS (that's the reverse proxy's job, see
+  // docs/deploy/), but sending it needlessly in local dev would be wrong.
+  app.use((req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Permissions-Policy", "camera=(self), microphone=(self), geolocation=()");
+    res.setHeader(
+      "Content-Security-Policy",
+      [
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "font-src 'self' https://fonts.gstatic.com",
+        "img-src 'self' data: https:",
+        "connect-src 'self' wss://api.fish.audio",
+        "frame-ancestors 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        "object-src 'none'",
+      ].join("; ")
+    );
+    if (process.env.NODE_ENV === "production") {
+      res.setHeader("Strict-Transport-Security", "max-age=63072000; includeSubDomains");
+    }
+    next();
+  });
+
   // Random per-process secret proving a request to /api/execute-agent-task
   // genuinely originated from this server's own /api/graphs/execute node
   // loop (a same-process HTTP self-call, not a network hop an external
@@ -277,7 +327,7 @@ async function startServer() {
   // so this is race-free without a separate transaction wrapper). The
   // first user becomes platform_admin and is auto-granted admin membership
   // on the default workspace so the app is immediately usable.
-  app.post("/api/auth/setup", (req, res) => {
+  app.post("/api/auth/setup", rateLimit("AUTH_SENSITIVE", byIp, "auth-setup"), (req, res) => {
     try {
       if (anyUserExists()) {
         return res.status(403).json({ success: false, error: "Setup has already been completed." });
@@ -313,7 +363,7 @@ async function startServer() {
   // Public. Generic failure message for every wrong-guess case (unknown
   // email, wrong password, disabled account) — never lets a login attempt
   // enumerate real accounts.
-  app.post("/api/auth/login", (req, res) => {
+  app.post("/api/auth/login", rateLimit("AUTH_SENSITIVE", byIp, "auth-login"), (req, res) => {
     try {
       const { email, password } = req.body || {};
       if (!email || !password) {
@@ -360,7 +410,7 @@ async function startServer() {
   // H1: no workspace concept on this route at all — the minimal correct
   // fix is authentication only (anonymous callers must never trigger a
   // paid provider call), not an invented workspace/billing role.
-  app.post(["/api/generate"], requireAuth, async (req, res) => {
+  app.post(["/api/generate"], requireAuth, rateLimit("EXPENSIVE_EXECUTION", byUserOrIp, "generate"), async (req, res) => {
     try {
       const { model = "gemini-3.7-flash", prompt = "", systemInstruction, temperature = 0.7 } = req.body || {};
       const apiKey = process.env.GEMINI_API_KEY;
@@ -2190,7 +2240,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.post("/api/graphs/execute", requireWorkspaceMember(fromBody), async (req, res) => {
+  app.post("/api/graphs/execute", requireWorkspaceMember(fromBody), rateLimit("EXPENSIVE_EXECUTION", byUserOrIp, "graphs-execute"), async (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.body?.workspaceId);
       if ("error" in resolved) {
@@ -3070,6 +3120,47 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // ==========================================
   // REAL HERMES TERMINAL EXECUTION ENGINE
   // ==========================================
+  //
+  // Pass VIII / Workstream B — B1 finding: /api/terminal/exec is a genuine,
+  // unrestricted `child_process.exec()` shell surface. Its only defense
+  // beyond requirePlatformAdmin is a regex DENYLIST (checkGuardianRules) —
+  // a fundamentally bypassable pattern (e.g. any destructive one-liner not
+  // matching one of those specific shapes sails through as "SAFE"), and
+  // `approvedByHuman` is a client-supplied boolean the same caller can just
+  // set to true, not a real independent approval step.
+  //
+  // CURRENT_PURPOSE: an operator/dev terminal panel (HermesTerminalView.tsx
+  // in Master Admin) — a local convenience for the solo founder, not a
+  // dependency of any core product path.
+  // CURRENT_CALLERS: HermesTerminalView.tsx only. No server-side route
+  // (graph execution, skill execution, Windmill, MCP, task pipeline) calls
+  // any /api/terminal/* route internally — verified by grep.
+  // CURRENT_REQUIRED_FOR_CORE: NO.
+  // CURRENT_SECURITY_RISK: CRITICAL if reachable in production — full host
+  // command execution (including the app's own secret env vars, passed
+  // through wholesale to the child process) behind a denylist that does
+  // not meaningfully restrict a determined caller.
+  //
+  // B2/B3 decision: DEV_ONLY. Nothing in the real product depends on this
+  // route, so the safest option that doesn't remove a tool the owner
+  // actively uses locally is to make it structurally unreachable outside
+  // local development — gated on the SAME NODE_ENV convention this
+  // codebase already treats as authoritative for prod-vs-dev (cookie
+  // Secure flag, Vite dev-middleware selection), not a second flag someone
+  // could forget to set. In production this entire route group now
+  // returns a real 403, before requirePlatformAdmin or any handler logic
+  // runs — the route is not just hidden by the UI, per B3's explicit
+  // instruction not to rely on that.
+  app.use("/api/terminal", (req, res, next) => {
+    if (process.env.NODE_ENV === "production") {
+      return res.status(403).json({
+        success: false,
+        error: "Terminal execution is a development-only feature and is disabled in production.",
+        status: "DEV_ONLY_DISABLED",
+      });
+    }
+    next();
+  });
 
   // Terminal Backend Status & Health Check
   app.get("/api/terminal/status", requirePlatformAdmin, (req, res) => {
@@ -3154,7 +3245,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   });
 
   // Real Shell Execution Endpoint
-  app.post("/api/terminal/exec", requirePlatformAdmin, (req, res) => {
+  app.post("/api/terminal/exec", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "terminal-exec"), (req, res) => {
     try {
       const {
         command = "",
@@ -3290,8 +3381,21 @@ sourceHash: ${packageMetadataResult.sourceHash}
 
       // Step 4: Real Process Execution via child_process.exec
       const startTime = Date.now();
+      // B5 — this route is dev-only now (see the /api/terminal gate above),
+      // so a normal dev PATH/HOME/npm-config environment is legitimately
+      // useful here and is preserved. This app's OWN configured secrets are
+      // stripped regardless — a shell command run from this panel has no
+      // real need for GEMINI_API_KEY/WINDMILL_TOKEN/etc., and "no secret
+      // env pass-through unless required" applies even in dev.
+      const SECRET_ENV_KEYS = [
+        "GEMINI_API_KEY", "OPENROUTER_API_KEY", "HERMES_ADAPTER_TOKEN",
+        "WINDMILL_TOKEN", "MCP_CREDENTIAL_ENCRYPTION_KEY", "FISH_AUDIO_API_KEY",
+        "TONCENTER_API_KEY", "TONAPI_API_KEY", "SYNTHOS_SIGNING_PRIVATE_KEY_PEM",
+      ];
+      const sanitizedProcessEnv = { ...process.env };
+      for (const key of SECRET_ENV_KEYS) delete sanitizedProcessEnv[key];
       const executionEnv = {
-        ...process.env,
+        ...sanitizedProcessEnv,
         ...session.env,
         HERMES_CWD: activeCwd,
         HERMES_TASK_ID: taskId || "",
@@ -3824,7 +3928,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // gate it more granularly (E4's "respect existing... approval controls" —
   // there is no existing skill-execution approval control to plug into, so
   // this is the deliberate, documented interim posture: admin-only).
-  app.post("/api/skills/:skillId/execute", requireWorkspaceAdmin(fromBody), async (req, res) => {
+  app.post("/api/skills/:skillId/execute", requireWorkspaceAdmin(fromBody), rateLimit("EXPENSIVE_EXECUTION", byUserOrIp, "skills-execute"), async (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.body?.workspaceId);
       if ("error" in resolved) {
@@ -3847,7 +3951,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // behavior for any skill — see test/mcp-registry.test.ts). Only
   // meaningful for category==='mcp' skills, but works for any skill with a
   // source_ref that looks like an http(s) endpoint.
-  app.post("/api/skills/:skillId/mcp/probe", requireWorkspaceMember(fromBody), async (req, res) => {
+  app.post("/api/skills/:skillId/mcp/probe", requireWorkspaceMember(fromBody), rateLimit("EXPENSIVE_EXECUTION", byUserOrIp, "skills-mcp-probe"), async (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.body?.workspaceId);
       if ("error" in resolved) {
@@ -4038,7 +4142,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.post("/api/external-executions", requireWorkspaceAdmin(fromBody), async (req, res) => {
+  app.post("/api/external-executions", requireWorkspaceAdmin(fromBody), rateLimit("EXPENSIVE_EXECUTION", byUserOrIp, "external-executions-submit"), async (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.body?.workspaceId);
       if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
@@ -5158,7 +5262,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // D2 — real admin-created account, no email sent (no mail infrastructure
   // exists). Returns a one-time setup link the admin copies and delivers
   // out of band — this is the ONLY moment the raw token is ever returned.
-  app.post("/api/master-admin/users", requirePlatformAdmin, (req, res) => {
+  app.post("/api/master-admin/users", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "admin-user-create"), (req, res) => {
     try {
       const { email, displayName, platformRole } = req.body || {};
       if (!email || typeof email !== "string" || !email.includes("@")) {
@@ -5264,7 +5368,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
 
   // D3/D4 — public (the invited user has no session yet). Validates a real
   // one-time setup token without requiring auth.
-  app.get("/api/auth/setup-token/:token", (req, res) => {
+  app.get("/api/auth/setup-token/:token", rateLimit("AUTH_SENSITIVE", byIp, "auth-setup-token-validate"), (req, res) => {
     try {
       const user = resolveSetupToken(req.params.token);
       if (!user) {
@@ -5276,7 +5380,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.post("/api/auth/setup-token/:token/complete", (req, res) => {
+  app.post("/api/auth/setup-token/:token/complete", rateLimit("AUTH_SENSITIVE", byIp, "auth-setup-token-complete"), (req, res) => {
     try {
       const { password } = req.body || {};
       if (!password || typeof password !== "string" || password.length < 10) {
@@ -5335,12 +5439,27 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
+  // Workstream S — a restore is the single most consequential admin action
+  // this app can take (it stages a wholesale data swap for the next
+  // restart), so it gets a real audit event regardless of outcome —
+  // recorded for a rejected/invalid attempt too, not just a successful
+  // stage, since "someone tried to restore backup X" is itself evidence
+  // worth keeping.
   app.post("/api/backup/:backupId/restore", requirePlatformAdmin, (req, res) => {
     try {
       const result = stageRestore(req.params.backupId, req.body?.confirmed === true);
+      const actorUserId = (req as AuthedRequest).authUser!.user_id;
       if ("error" in result) {
+        recordAdminAuditEvent({
+          actorUserId, eventType: "BACKUP_RESTORE_STAGED", targetType: "backup", targetId: req.params.backupId,
+          detail: { outcome: "REJECTED", error: result.error },
+        });
         return res.status(400).json({ success: false, ...result });
       }
+      recordAdminAuditEvent({
+        actorUserId, eventType: "BACKUP_RESTORE_STAGED", targetType: "backup", targetId: req.params.backupId,
+        detail: { outcome: "STAGED", stagedAt: result.stagedAt },
+      });
       return res.json({ success: true, ...result });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to stage restore" });

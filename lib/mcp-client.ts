@@ -121,6 +121,41 @@ interface JsonRpcResponse {
   error?: { code: number; message: string };
 }
 
+// Pass VIII / Workstream P — an MCP server is admin-configured, not
+// arbitrary user-submitted input, but its response is still a network
+// payload from a process outside this app's control. Without a bound, a
+// misbehaving/compromised server could hand back an unbounded response
+// body that this function would buffer entirely into memory before ever
+// checking it's well-formed JSON-RPC. 1MB is generous for a real
+// tools/list or resources/list payload.
+export const MAX_MCP_RESPONSE_BYTES = 1 * 1024 * 1024;
+
+export async function readBoundedText(res: Response, maxBytes: number = MAX_MCP_RESPONSE_BYTES): Promise<string> {
+  const contentLength = res.headers.get('content-length');
+  if (contentLength && Number(contentLength) > maxBytes) {
+    throw new Error(`Response exceeds the ${maxBytes}-byte bound (Content-Length: ${contentLength}).`);
+  }
+  if (!res.body) return await res.text();
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new Error(`Response exceeds the ${maxBytes}-byte bound.`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString('utf8');
+}
+
 async function jsonRpcCall(
   endpoint: string,
   method: string,
@@ -152,7 +187,8 @@ async function jsonRpcCall(
     if (!contentType.includes('application/json')) {
       throw new Error(`Unexpected content-type "${contentType}" — not a JSON-RPC response.`);
     }
-    const body = (await res.json()) as JsonRpcResponse;
+    const text = await readBoundedText(res, MAX_MCP_RESPONSE_BYTES);
+    const body = JSON.parse(text) as JsonRpcResponse;
     if (!body || body.jsonrpc !== '2.0') {
       throw new Error('Response is not a valid JSON-RPC 2.0 envelope.');
     }

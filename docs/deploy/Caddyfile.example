@@ -1,0 +1,58 @@
+# SynthOS Admin — example Caddy reverse proxy config.
+#
+# Pass VIII / Workstream C4. Caddy chosen over nginx for this project: it
+# terminates TLS automatically (real Let's Encrypt certs, real renewal) with
+# no separate certbot setup, and its config is short enough to review in
+# one sitting — a better fit for a solo-founder deployment than nginx's
+# larger surface. No real domain is hardcoded — replace the placeholder.
+#
+# This file assumes SynthOS Admin is running as a single instance directly
+# behind this one Caddy hop, so `TRUST_PROXY_HOPS=1` is what the app should
+# be started with (see docs/OPERATOR-RUNBOOK.md).
+#
+# Usage: copy to /etc/caddy/Caddyfile (or wherever your Caddy install reads
+# from), replace admin.your-domain.example, then `caddy reload` or restart.
+
+admin.your-domain.example {
+	# TLS termination is automatic — Caddy requests/renews a real cert for
+	# this domain the first time it starts serving it. Nothing else to
+	# configure for basic HTTPS.
+
+	# Real request body limit, matching this app's own express.json/
+	# urlencoded limit (10mb) — no reason to let a larger request through
+	# the proxy only for the app to reject it, and a mismatched larger
+	# proxy limit is a memory-exhaustion surface of its own (see
+	# docs/PRODUCTION-READINESS.md's Workstream P notes).
+	request_body {
+		max_size 10MB
+	}
+
+	# Generous but bounded — this app has no long-lived streaming
+	# endpoints in production (the one SSE-based terminal stream route is
+	# dev-only and 403s in production regardless — see ADR-007).
+	timeouts {
+		read_body   30s
+		read_header 10s
+		write       60s
+		idle        120s
+	}
+
+	# Real liveness probe passthrough — Caddy's own health check can hit
+	# this without needing a session.
+	handle /health {
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	reverse_proxy 127.0.0.1:3000 {
+		# Caddy sets X-Forwarded-For/-Proto/-Host correctly by default —
+		# nothing extra needed here as long as the app is started with
+		# TRUST_PROXY_HOPS=1 to trust exactly this one hop.
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	encode gzip zstd
+
+	log {
+		output file /var/log/caddy/synthos-admin-access.log
+	}
+}

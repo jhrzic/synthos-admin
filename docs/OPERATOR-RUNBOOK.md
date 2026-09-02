@@ -207,6 +207,8 @@ setup tokens, API keys, and raw MCP/Windmill credentials are never logged anywhe
 | Windmill submission always fails `TARGET_NOT_ALLOWED` | No registry target exists for that workspace, or it's disabled | `GET /api/windmill/targets`, register one if empty |
 | Windmill status stuck `NOT_CONFIGURED` | One of `WINDMILL_BASE_URL`/`TOKEN`/`WORKSPACE` unset | Startup log or `/api/ready` names which |
 | A skill won't execute despite being enabled | Registered ≠ executable — no execution target configured, or the target's provider/runtime is unavailable | `GET /api/skills/:id/executability` explains the real reason |
+| Login/setup suddenly returns `429 Too Many Requests` | Rate limiting (§19) — 10 attempts per 15 minutes per IP on auth routes | Real protection working as intended; wait for the window, or check `Retry-After` in the response |
+| `/api/terminal/*` returns `403 DEV_ONLY_DISABLED` | You're running with `NODE_ENV=production` — this is deliberate (§19), not a bug | Run locally with `npm run dev` if you need the terminal panel |
 
 ## 17. Safe restart procedure
 
@@ -220,3 +222,39 @@ setup tokens, API keys, and raw MCP/Windmill credentials are never logged anywhe
 There is no separate migration step — schema changes are applied automatically via `CREATE TABLE IF
 NOT EXISTS` / guarded `ALTER TABLE` checks the first time `getDatabase()` runs after start (see
 `lib/persistence.ts`), so a normal restart is also how a schema update gets applied.
+
+## 18. Deploying behind a reverse proxy (TLS)
+
+This application does not terminate TLS itself. Put a real reverse proxy in front of it — an
+example Caddy config is at `docs/deploy/Caddyfile.example` (real TLS termination, a body-size limit
+matching this app's own 10MB JSON limit, real timeouts, a `/health` passthrough; no domain
+hardcoded, fill in your own).
+
+Start this app with `TRUST_PROXY_HOPS=1` when it sits behind exactly one such proxy — this tells
+Express to trust that one hop's `X-Forwarded-*` headers (needed for correct client-IP resolution in
+rate limiting, see §19). **Never** set this to an arbitrary large number or leave it unset while
+also trusting `X-Forwarded-For` some other way — an untrusted hop count lets any client spoof its
+own IP and defeat rate limiting entirely. The session cookie's `Secure` flag does not depend on this
+setting — it's gated on `NODE_ENV=production` directly, which you should already have set (§4).
+
+This app implements no HTTP→HTTPS redirect of its own — that's the proxy's job (Caddy does it
+automatically). Do not add one app-side; behind a proxy that has already terminated TLS, an
+app-side redirect risks a loop.
+
+## 19. Rate limiting and the dev-only terminal
+
+**Rate limiting** (`lib/rate-limit.ts`) is real but process-local (`SINGLE_INSTANCE_LIMITER`) — if
+you ever run more than one instance of this app behind a load balancer, each instance enforces its
+own independent limit; there is no shared/distributed limiter in this stack. Four tiers: login/setup
+(10 per 15 min per IP), expensive execution — `/api/generate`, graph execute, skill execute, MCP
+probe, Windmill submit (20 per min per user), privileged admin actions — terminal exec, user
+creation (60 per min), general API (defined, not yet applied everywhere). A `429` response includes
+`Retry-After`.
+
+**`/api/terminal/*`** (the Hermes Terminal panel in Master Admin) is a real, unrestricted shell-exec
+surface — genuinely useful for local development, genuinely dangerous in production. It is
+structurally disabled whenever `NODE_ENV=production`, regardless of session or role — not just
+hidden by the UI. There is no environment variable to re-enable it in production; if you need this
+capability in a deployed environment, that is a deliberate architecture change, not a config flag,
+and should go through the same review this restriction did (see
+`docs/adr-007-launch-security-boundaries.md`).

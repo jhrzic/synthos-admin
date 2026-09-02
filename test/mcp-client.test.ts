@@ -189,3 +189,49 @@ describe('F2: credential encryption at rest', () => {
     expect(() => decryptCredential(ciphertext)).toThrow();
   });
 });
+
+describe('Pass VIII / Workstream P: MCP responses are size-bounded, never buffered unboundedly', () => {
+  it('a server declaring an oversized Content-Length is rejected before its body is read', async () => {
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(5 * 1024 * 1024) });
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+    process.env.MCP_ALLOW_LOCAL_ENDPOINTS = 'true';
+    try {
+      const result = await probeMcpServer(`http://127.0.0.1:${port}/mcp`);
+      expect(result.status).toBe('FAILED');
+      expect(result.error).toMatch(/bound/i);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('a server streaming more than the bound (no Content-Length, chunked) is cut off, never buffered unboundedly', async () => {
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      // Stream well past MAX_MCP_RESPONSE_BYTES (1MB) in chunks — no
+      // Content-Length header, forcing the reader-loop path.
+      const chunk = 'x'.repeat(64 * 1024);
+      let sent = 0;
+      const interval = setInterval(() => {
+        if (sent > 2 * 1024 * 1024 || res.writableEnded) { clearInterval(interval); return; }
+        res.write(chunk);
+        sent += chunk.length;
+      }, 1);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+    process.env.MCP_ALLOW_LOCAL_ENDPOINTS = 'true';
+    try {
+      const result = await probeMcpServer(`http://127.0.0.1:${port}/mcp`);
+      expect(result.status).toBe('FAILED');
+      expect(result.error).toMatch(/bound/i);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});

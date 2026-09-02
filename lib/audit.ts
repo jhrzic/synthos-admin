@@ -24,7 +24,8 @@ export type AdminEventType =
   | 'WORKSPACE_CREATED'
   | 'SETUP_TOKEN_ISSUED'
   | 'WINDMILL_TARGET_CREATED'
-  | 'WINDMILL_TARGET_UPDATED';
+  | 'WINDMILL_TARGET_UPDATED'
+  | 'BACKUP_RESTORE_STAGED';
 
 export interface AdminAuditEventRecord {
   event_id: string;

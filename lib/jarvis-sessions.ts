@@ -77,8 +77,16 @@ function statsFor(session: SessionRow): JarvisSessionWithStats {
   const row = db.prepare(`
     SELECT COUNT(*) AS total FROM jarvis_messages WHERE session_id = ? AND workspace_id = ?
   `).get(session.session_id, session.workspace_id) as { total: number };
+  // Pass VIII / Workstream R — created_at is a millisecond-resolution
+  // ISO string; two messages appended in quick succession (the common case
+  // — a user message immediately followed by a reply) can legitimately
+  // share the same value, and ORDER BY on a tied column has no guaranteed
+  // secondary order in SQLite. `rowid` is the table's real, implicit,
+  // strictly-monotonic-per-insert column (this table has no INTEGER
+  // PRIMARY KEY aliasing it away) — a correct, free tiebreaker for "most
+  // recently inserted," not a fabricated ordering guess.
   const last = db.prepare(`
-    SELECT content FROM jarvis_messages WHERE session_id = ? AND workspace_id = ? ORDER BY created_at DESC LIMIT 1
+    SELECT content FROM jarvis_messages WHERE session_id = ? AND workspace_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1
   `).get(session.session_id, session.workspace_id) as { content: string } | undefined;
 
   return {
@@ -148,12 +156,14 @@ export function appendJarvisMessage(params: {
   messageType?: JarvisMessageType;
   provider?: string | null;
   model?: string | null;
+  /** Test-only override — production call sites never pass this (see the same pattern in lib/persistence.ts's recordArtifact/recordActivityEvent). */
+  createdAt?: string;
 }): JarvisMessageRecord | null {
   const session = getOwnedJarvisSession(params.workspaceId, params.userId, params.sessionId);
   if (!session) return null;
 
   const db = getDatabase();
-  const now = new Date().toISOString();
+  const now = params.createdAt || new Date().toISOString();
   const messageId = `jmsg-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
 
   db.prepare(`

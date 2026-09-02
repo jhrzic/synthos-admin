@@ -134,6 +134,30 @@ export function getDatabase(): any {
 
     dbInstance = new DatabaseSync(dbPath);
 
+    // Pass VIII / Workstream Q — real production-safety PRAGMAs, applied
+    // once per process on first open, before any table exists.
+    //   WAL: readers no longer block writers (and vice versa) — the
+    //     default rollback-journal mode locks the whole file for the
+    //     duration of a write, which is a real contention risk once more
+    //     than one request is touching the DB concurrently (this app is
+    //     single-process, but Node's event loop still interleaves many
+    //     in-flight requests' DB calls).
+    //   busy_timeout: a writer that finds the DB briefly locked retries for
+    //     up to 5s instead of throwing SQLITE_BUSY immediately.
+    //   synchronous = NORMAL: the standard safe pairing with WAL (still
+    //     durable against an application crash; only a full OS-level power
+    //     loss during the narrow WAL-checkpoint window is a residual risk,
+    //     an already-accepted tradeoff for every WAL-mode SQLite deployment).
+    //   foreign_keys = ON: this schema uses few hard FK constraints today,
+    //     but turning enforcement on is free and correct — any that do
+    //     exist should actually be enforced, not silently inert.
+    dbInstance.exec(`
+      PRAGMA journal_mode = WAL;
+      PRAGMA busy_timeout = 5000;
+      PRAGMA synchronous = NORMAL;
+      PRAGMA foreign_keys = ON;
+    `);
+
     // Initialize required SQLite schema
     dbInstance.exec(`
       CREATE TABLE IF NOT EXISTS tasks (
@@ -1830,8 +1854,12 @@ export function kilAgentAttempts(workspaceId: string, agentId: string): number {
  */
 export function latestKilObservationForTask(workspaceId: string, taskId: string): KilObservationRecord | null {
   const db = getDatabase();
+  // Pass VIII / Workstream R — `rowid` tiebreaker: same reasoning as
+  // lib/jarvis-sessions.ts's statsFor(). A task can genuinely gate twice in
+  // the same millisecond (a fast retry); ORDER BY on the tied created_at
+  // column alone has no guaranteed winner.
   const row = db.prepare(
-    `SELECT * FROM kil_observations WHERE workspace_id = ? AND task_id = ? ORDER BY created_at DESC LIMIT 1`
+    `SELECT * FROM kil_observations WHERE workspace_id = ? AND task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`
   ).get(workspaceId, taskId);
   return (row as KilObservationRecord) || null;
 }
