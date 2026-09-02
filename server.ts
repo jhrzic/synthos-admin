@@ -52,9 +52,12 @@ import { tonGuardianViews, installTonGuardians } from "./lib/ton-guardians";
 import { listWorkspaceVaultEntries, getWorkspaceVaultEntry, previewWorkspaceVaultEntry } from "./lib/vault";
 import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory } from "./lib/memory-index";
 import { estimateGraphExecution, selectLiveExecutionNodes } from "./lib/graph-execution";
-import { listWorkspaceSkills, getWorkspaceSkill, createSkill, updateSkill, testSkill, discoverRepoSkillFiles } from "./lib/skills";
-import { createJarvisSession, listWorkspaceJarvisSessions, getWorkspaceJarvisSession, listSessionMessages, appendJarvisMessage } from "./lib/jarvis-sessions";
+import { listWorkspaceSkills, getWorkspaceSkill, createSkill, updateSkill, testSkill, discoverRepoSkillFiles, isValidMcpEndpointRef } from "./lib/skills";
+import { createJarvisSession, listUserJarvisSessions, getOwnedJarvisSession, listSessionMessages, appendJarvisMessage } from "./lib/jarvis-sessions";
 import { createBackup, listBackups, readManifestFromArchive, validateBackupArchive, stageRestore } from "./lib/backup";
+import { anyUserExists, createUser, login, resolveSessionUser, revokeSessionByToken, parseCookies, SESSION_COOKIE_NAME, listUsers, setUserStatus } from "./lib/auth";
+import { ensureWorkspace, listWorkspaces, createWorkspace, grantMembership, listUserMemberships, listWorkspaceMembers, countWorkspaceMembers, hasWorkspaceAccess } from "./lib/workspaces";
+import { requireAuth, requireWorkspaceMember, requireWorkspaceAdmin, requirePlatformAdmin, requireSameOrigin, getRequestUser, fromBody, fromQuery, fromBodyOrQuery, AuthedRequest } from "./lib/authorization";
 
 dotenv.config();
 
@@ -179,11 +182,152 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  // Random per-process secret proving a request to /api/execute-agent-task
+  // genuinely originated from this server's own /api/graphs/execute node
+  // loop (a same-process HTTP self-call, not a network hop an external
+  // caller could observe). Generated fresh at startup, never persisted,
+  // never returned in any API response — an external client has no way to
+  // obtain or guess it. This exists ONLY so that route can require real
+  // session authentication for direct external callers without breaking
+  // the internal dispatch loop; it grants no other authority.
+  const INTERNAL_SERVICE_TOKEN = crypto.randomBytes(32).toString("hex");
+
   app.use(express.json({ limit: "10mb" }));
   app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
+  // CSRF defense-in-depth (Pass III / E5) — applies to every state-changing
+  // request site-wide, ahead of any route. SameSite=Lax on the session
+  // cookie (set below) is the primary defense; this Origin check is a
+  // second, independent layer.
+  app.use((req, res, next) => {
+    if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) {
+      return requireSameOrigin(req, res, next);
+    }
+    next();
+  });
+
+  const isProdEnv = process.env.NODE_ENV === "production";
+  const SESSION_COOKIE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 14; // 14 days, matches lib/auth.ts SESSION_TTL_MS
+
+  function setSessionCookie(res: express.Response, rawToken: string) {
+    res.cookie(SESSION_COOKIE_NAME, rawToken, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: isProdEnv,
+      maxAge: SESSION_COOKIE_MAX_AGE_MS,
+      path: "/",
+    });
+  }
+
+  function clearSessionCookie(res: express.Response) {
+    res.clearCookie(SESSION_COOKIE_NAME, { httpOnly: true, sameSite: "lax", secure: isProdEnv, path: "/" });
+  }
+
+  // ==========================================
+  // IDENTITY & AUTHORIZATION (Pass III)
+  // ==========================================
+
+  // Public: tells the client whether the one-time bootstrap flow is still
+  // available. Named explicitly in the public allowlist (E2) — leaks
+  // nothing beyond a boolean.
+  app.get("/api/auth/setup-required", (_req, res) => {
+    try {
+      return res.json({ success: true, setupRequired: !anyUserExists() });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to check setup state" });
+    }
+  });
+
+  // Public, but self-disabling: only creates a user when NO user exists yet
+  // (checked and inserted within one synchronous call — node:sqlite's
+  // DatabaseSync has no interleaving window within a single Node process,
+  // so this is race-free without a separate transaction wrapper). The
+  // first user becomes platform_admin and is auto-granted admin membership
+  // on the default workspace so the app is immediately usable.
+  app.post("/api/auth/setup", (req, res) => {
+    try {
+      if (anyUserExists()) {
+        return res.status(403).json({ success: false, error: "Setup has already been completed." });
+      }
+      const { email, password, displayName } = req.body || {};
+      if (!email || typeof email !== "string" || !email.includes("@")) {
+        return res.status(400).json({ success: false, error: "A valid email is required." });
+      }
+      if (!password || typeof password !== "string" || password.length < 10) {
+        return res.status(400).json({ success: false, error: "Password must be at least 10 characters." });
+      }
+      if (!displayName || typeof displayName !== "string" || !displayName.trim()) {
+        return res.status(400).json({ success: false, error: "Display name is required." });
+      }
+
+      const user = createUser({ email, password, displayName: displayName.trim(), platformRole: "platform_admin" });
+      ensureWorkspace(DEFAULT_WORKSPACE_ID, "Primary Workspace");
+      grantMembership(user.user_id, DEFAULT_WORKSPACE_ID, "admin");
+
+      const result = login(email, password);
+      if (!result) {
+        // Should be unreachable (we just created and verified the account),
+        // but never silently claim success without a real session.
+        return res.status(500).json({ success: false, error: "Account created but session could not be established." });
+      }
+      setSessionCookie(res, result.rawToken);
+      return res.json({ success: true, user: result.user, workspaces: listUserMemberships(user.user_id) });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Setup failed" });
+    }
+  });
+
+  // Public. Generic failure message for every wrong-guess case (unknown
+  // email, wrong password, disabled account) — never lets a login attempt
+  // enumerate real accounts.
+  app.post("/api/auth/login", (req, res) => {
+    try {
+      const { email, password } = req.body || {};
+      if (!email || !password) {
+        return res.status(400).json({ success: false, error: "Email and password are required." });
+      }
+      const result = login(email, password);
+      if (!result) {
+        return res.status(401).json({ success: false, error: "Invalid email or password." });
+      }
+      setSessionCookie(res, result.rawToken);
+      return res.json({ success: true, user: result.user, workspaces: listUserMemberships(result.user.user_id) });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Login failed" });
+    }
+  });
+
+  app.post("/api/auth/logout", (req, res) => {
+    try {
+      const cookies = parseCookies(req.headers.cookie);
+      revokeSessionByToken(cookies[SESSION_COOKIE_NAME]);
+      clearSessionCookie(res);
+      return res.json({ success: true });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Logout failed" });
+    }
+  });
+
+  // Never returns password_hash/password_salt/session token — only safe
+  // identity metadata and the caller's own real, server-verified
+  // workspace memberships.
+  app.get("/api/auth/me", (req, res) => {
+    try {
+      const user = getRequestUser(req);
+      if (!user) {
+        return res.json({ success: true, authenticated: false });
+      }
+      return res.json({ success: true, authenticated: true, user, workspaces: listUserMemberships(user.user_id) });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to resolve identity" });
+    }
+  });
+
   // API Routes
-  app.post(["/api/generate"], async (req, res) => {
+  // H1: no workspace concept on this route at all — the minimal correct
+  // fix is authentication only (anonymous callers must never trigger a
+  // paid provider call), not an invented workspace/billing role.
+  app.post(["/api/generate"], requireAuth, async (req, res) => {
     try {
       const { model = "gemini-3.7-flash", prompt = "", systemInstruction, temperature = 0.7 } = req.body || {};
       const apiKey = process.env.GEMINI_API_KEY;
@@ -316,7 +460,7 @@ async function startServer() {
   });
 
   // Julian Goldie 4-Day YouTube Intelligence Audit API Endpoint
-  app.post("/api/youtube/julian-goldie-audit", async (req, res) => {
+  app.post("/api/youtube/julian-goldie-audit", requireAuth, async (req, res) => {
     try {
       const apiKey = process.env.GEMINI_API_KEY;
       const today = new Date();
@@ -812,7 +956,7 @@ ${finalMatrix.map((m: any) => `- **${m.idea}**: ${m.whatItDoes} (Priority: \`${m
   });
 
   // GENERAL YOUTUBE VIDEO INTELLIGENCE INGESTION
-  app.post("/api/youtube/ingest", async (req, res) => {
+  app.post("/api/youtube/ingest", requireAuth, async (req, res) => {
     try {
       const { url = "", model = "gemini-3.6-flash" } = req.body || {};
       const trimmedUrl = url.trim();
@@ -907,7 +1051,7 @@ Analyze this video topic for technical intelligence, agent workflow implications
   });
 
   // ORCHESTRATOR DECOMPOSITION ENGINE
-  app.post("/api/orchestrator/decompose", async (req, res) => {
+  app.post("/api/orchestrator/decompose", requireAuth, async (req, res) => {
     try {
       const { rawInput = "", inputType = "text", url = "", files = [] } = req.body || {};
       const trimmed = (rawInput || url || "General Task Directive").trim();
@@ -1215,16 +1359,25 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
   });
 
   // REAL LIVE AGENT TASK EXECUTION ENGINE
-  app.post("/api/execute-agent-task", async (req, res) => {
+  // Authorization: either a real authenticated workspace member (direct
+  // external call), or the internal service token proving this call came
+  // from this process's own /api/graphs/execute dispatch loop, whose
+  // outer request was already authorized. Never both silently — an
+  // external caller cannot forge the internal token (see its definition
+  // above), and its presence never substitutes for auth on any other route.
+  app.post("/api/execute-agent-task", (req, res, next) => {
+    if (req.headers["x-internal-service-token"] === INTERNAL_SERVICE_TOKEN) return next();
+    return requireWorkspaceMember(fromBody)(req, res, next);
+  }, async (req, res) => {
     try {
-      const { 
-        taskId = `task-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`, 
-        taskTitle = "", 
-        description = "", 
-        assignedAgent = "scout", 
-        assignedModel = "gemini-3.6-flash", 
-        inputs = "", 
-        dependencies = [], 
+      const {
+        taskId = `task-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        taskTitle = "",
+        description = "",
+        assignedAgent = "scout",
+        assignedModel = "gemini-3.6-flash",
+        inputs = "",
+        dependencies = [],
         sourceUrl = "",
         workspaceId = "ws-synthos-primary"
       } = req.body || {};
@@ -1877,7 +2030,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // GRAPH BUILDER & GRAPH RUNTIME ENDPOINTS
   // ==========================================
 
-  app.get("/api/graphs", (req, res) => {
+  app.get("/api/graphs", requireWorkspaceMember(fromQuery), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.query.workspaceId);
       if ("error" in resolved) {
@@ -1897,7 +2050,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.post("/api/graphs", (req, res) => {
+  app.post("/api/graphs", requireWorkspaceMember(fromBody), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.body?.workspaceId);
       if ("error" in resolved) {
@@ -1918,7 +2071,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/graphs/:graphId", (req, res) => {
+  app.get("/api/graphs/:graphId", requireWorkspaceMember(fromQuery), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.query.workspaceId);
       if ("error" in resolved) {
@@ -1940,7 +2093,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/graph-runs", (req, res) => {
+  app.get("/api/graph-runs", requireWorkspaceMember(fromQuery), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.query.workspaceId);
       if ("error" in resolved) {
@@ -1959,7 +2112,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/graph-runs/:runId", (req, res) => {
+  app.get("/api/graph-runs/:runId", requireWorkspaceMember(fromQuery), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.query.workspaceId);
       if ("error" in resolved) {
@@ -1987,7 +2140,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // this deployment has no live per-token pricing wired to real usage
   // accounting, so cost is honestly reported ESTIMATE_UNAVAILABLE. This is
   // a read-only, non-billing endpoint — it never dispatches anything.
-  app.post("/api/graphs/estimate", (req, res) => {
+  app.post("/api/graphs/estimate", requireWorkspaceMember(fromBody), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.body?.workspaceId);
       if ("error" in resolved) {
@@ -2004,7 +2157,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.post("/api/graphs/execute", async (req, res) => {
+  app.post("/api/graphs/execute", requireWorkspaceMember(fromBody), async (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.body?.workspaceId);
       if ("error" in resolved) {
@@ -2093,10 +2246,13 @@ sourceHash: ${packageMetadataResult.sourceHash}
         const nodeModel = currentNode.assignedModel || "gemini-3.6-flash";
         const nodeDescription = `${currentNode.description || taskTitle}${previousOutput ? `\n\nUpstream Context from previous step:\n${previousOutput.slice(0, 1000)}` : ""}`;
 
-        // Dispatch through real execution spine
+        // Dispatch through real execution spine. The internal service
+        // token proves this call originated from this same process's own
+        // graph-execution loop — the outer /api/graphs/execute request was
+        // already authorized (requireWorkspaceMember) before this ran.
         const executionResponse = await fetch(`http://127.0.0.1:${PORT}/api/execute-agent-task`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-Internal-Service-Token": INTERNAL_SERVICE_TOKEN },
           body: JSON.stringify({
             taskId: nodeTaskId,
             taskTitle,
@@ -2194,7 +2350,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/execution/tasks/:taskId", (req, res) => {
+  app.get("/api/execution/tasks/:taskId", requireWorkspaceMember(fromBodyOrQuery), (req, res) => {
     try {
       const { taskId } = req.params;
       if (!enforceTaskWorkspaceAccess(req, res, taskId)) return;
@@ -2212,7 +2368,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/execution/tasks/:taskId/activity", (req, res) => {
+  app.get("/api/execution/tasks/:taskId/activity", requireWorkspaceMember(fromBodyOrQuery), (req, res) => {
     try {
       const { taskId } = req.params;
       if (!enforceTaskWorkspaceAccess(req, res, taskId)) return;
@@ -2228,7 +2384,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/execution/tasks/:taskId/artifacts", (req, res) => {
+  app.get("/api/execution/tasks/:taskId/artifacts", requireWorkspaceMember(fromBodyOrQuery), (req, res) => {
     try {
       const { taskId } = req.params;
       if (!enforceTaskWorkspaceAccess(req, res, taskId)) return;
@@ -2244,7 +2400,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/execution/tasks/:taskId/reviews", (req, res) => {
+  app.get("/api/execution/tasks/:taskId/reviews", requireWorkspaceMember(fromBodyOrQuery), (req, res) => {
     try {
       const { taskId } = req.params;
       if (!enforceTaskWorkspaceAccess(req, res, taskId)) return;
@@ -2264,7 +2420,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/execution/tasks/:taskId/receipts", (req, res) => {
+  app.get("/api/execution/tasks/:taskId/receipts", requireWorkspaceMember(fromBodyOrQuery), (req, res) => {
     try {
       const { taskId } = req.params;
       if (!enforceTaskWorkspaceAccess(req, res, taskId)) return;
@@ -2284,7 +2440,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.post(["/api/voice/tts", "/api/tts"], async (req, res) => {
+  app.post(["/api/voice/tts", "/api/tts"], requireAuth, async (req, res) => {
     try {
       const {
         text = "",
@@ -2516,7 +2672,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // GLOBAL JARVIS ADMINISTRATIVE COMMAND ENGINE
   // ==========================================
 
-  app.post("/api/jarvis/command", async (req, res) => {
+  app.post("/api/jarvis/command", requireWorkspaceMember(fromBody), async (req, res) => {
     try {
       const { command = "", sessionId = "jarvis-global-session" } = req.body || {};
       const trimmed = command.trim();
@@ -2608,59 +2764,52 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  // Real, workspace-scoped Jarvis conversation history. See
+  // Real, user-owned, workspace-scoped Jarvis conversation history. See
   // lib/jarvis-sessions.ts. This is additive persistence around the
   // existing /api/jarvis/command dispatcher above — that route's own
-  // request/response contract is unchanged.
-  app.post("/api/jarvis/sessions", (req, res) => {
+  // request/response contract is unchanged. Pass III / J1: a session
+  // belongs to the authenticated caller, not to "anyone in the workspace."
+  app.post("/api/jarvis/sessions", requireWorkspaceMember(fromBody), (req, res) => {
     try {
-      const resolved = resolveWorkspaceId(req.body?.workspaceId);
-      if ("error" in resolved) {
-        return res.status(400).json({ success: false, error: resolved.error });
-      }
-      const session = createJarvisSession(resolved.workspaceId, req.body?.title);
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const userId = (req as AuthedRequest).authUser!.user_id;
+      const session = createJarvisSession(workspaceId, userId, req.body?.title);
       return res.json({ success: true, session });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to create Jarvis session" });
     }
   });
 
-  app.get("/api/jarvis/sessions", (req, res) => {
+  app.get("/api/jarvis/sessions", requireWorkspaceMember(fromQuery), (req, res) => {
     try {
-      const resolved = resolveWorkspaceId(req.query.workspaceId);
-      if ("error" in resolved) {
-        return res.status(400).json({ success: false, error: resolved.error });
-      }
-      const sessions = listWorkspaceJarvisSessions(resolved.workspaceId);
-      return res.json({ success: true, workspaceId: resolved.workspaceId, sessions });
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const userId = (req as AuthedRequest).authUser!.user_id;
+      const sessions = listUserJarvisSessions(workspaceId, userId);
+      return res.json({ success: true, workspaceId, sessions });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to list Jarvis sessions" });
     }
   });
 
-  app.get("/api/jarvis/sessions/:sessionId", (req, res) => {
+  app.get("/api/jarvis/sessions/:sessionId", requireWorkspaceMember(fromQuery), (req, res) => {
     try {
-      const resolved = resolveWorkspaceId(req.query.workspaceId);
-      if ("error" in resolved) {
-        return res.status(400).json({ success: false, error: resolved.error });
-      }
-      const session = getWorkspaceJarvisSession(resolved.workspaceId, req.params.sessionId);
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const userId = (req as AuthedRequest).authUser!.user_id;
+      const session = getOwnedJarvisSession(workspaceId, userId, req.params.sessionId);
       if (!session) {
         return res.status(404).json({ success: false, error: "Session not found." });
       }
-      const messages = listSessionMessages(resolved.workspaceId, req.params.sessionId) || [];
+      const messages = listSessionMessages(workspaceId, userId, req.params.sessionId) || [];
       return res.json({ success: true, session, messages });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to get Jarvis session" });
     }
   });
 
-  app.post("/api/jarvis/sessions/:sessionId/messages", (req, res) => {
+  app.post("/api/jarvis/sessions/:sessionId/messages", requireWorkspaceMember(fromBody), (req, res) => {
     try {
-      const resolved = resolveWorkspaceId(req.body?.workspaceId);
-      if ("error" in resolved) {
-        return res.status(400).json({ success: false, error: resolved.error });
-      }
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const userId = (req as AuthedRequest).authUser!.user_id;
       const { role, content, messageType, provider, model } = req.body || {};
       if (role !== "user" && role !== "assistant") {
         return res.status(400).json({ success: false, error: 'role must be "user" or "assistant".' });
@@ -2669,7 +2818,8 @@ sourceHash: ${packageMetadataResult.sourceHash}
         return res.status(400).json({ success: false, error: "content is required." });
       }
       const message = appendJarvisMessage({
-        workspaceId: resolved.workspaceId,
+        workspaceId,
+        userId,
         sessionId: req.params.sessionId,
         role,
         content,
@@ -2690,7 +2840,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // APOLLO HERMES-SPECIFIC VOICE BRIDGE ENGINE
   // ==========================================
 
-  app.get("/api/apollo/status", (req, res) => {
+  app.get("/api/apollo/status", requireAuth, (req, res) => {
     const fishKey = process.env.FISH_AUDIO_API_KEY || "";
     const openAiKey = process.env.OPENAI_API_KEY || "";
     const elevenKey = process.env.ELEVENLABS_API_KEY || "";
@@ -2714,7 +2864,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     });
   });
 
-  app.post("/api/apollo/command", async (req, res) => {
+  app.post("/api/apollo/command", requireAuth, async (req, res) => {
     try {
       const { directive = "", targetAgent = "scout", priority = "P1" } = req.body || {};
       const trimmed = directive.trim();
@@ -2752,7 +2902,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // ==========================================
 
   // Terminal Backend Status & Health Check
-  app.get("/api/terminal/status", (req, res) => {
+  app.get("/api/terminal/status", requirePlatformAdmin, (req, res) => {
     try {
       const shellPath = process.env.SHELL || (os.platform() === "win32" ? "cmd.exe" : "/bin/bash");
       const shellExists = fs.existsSync(shellPath) || shellPath === "cmd.exe" || shellPath === "/bin/sh";
@@ -2782,7 +2932,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   });
 
   // Terminal Sessions List
-  app.get("/api/terminal/sessions", (req, res) => {
+  app.get("/api/terminal/sessions", requirePlatformAdmin, (req, res) => {
     return res.json({
       success: true,
       sessions: Array.from(terminalSessions.values())
@@ -2790,7 +2940,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   });
 
   // Create / Update Terminal Session
-  app.post("/api/terminal/sessions", (req, res) => {
+  app.post("/api/terminal/sessions", requirePlatformAdmin, (req, res) => {
     const { id = `session-${Date.now()}`, name = "Terminal Session", cwd = process.cwd(), associatedTaskId, associatedRunId } = req.body || {};
     const existing = terminalSessions.get(id);
     const session: ServerTerminalSession = {
@@ -2813,7 +2963,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   });
 
   // Delete Terminal Session
-  app.delete("/api/terminal/sessions/:id", (req, res) => {
+  app.delete("/api/terminal/sessions/:id", requirePlatformAdmin, (req, res) => {
     const { id } = req.params;
     if (id === "default") {
       return res.status(400).json({ success: false, error: "Cannot delete default session" });
@@ -2823,7 +2973,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   });
 
   // Guardian Check Pre-Execution Endpoint
-  app.post("/api/terminal/guardian-check", (req, res) => {
+  app.post("/api/terminal/guardian-check", requirePlatformAdmin, (req, res) => {
     const { command = "" } = req.body || {};
     const check = checkGuardianRules(command);
     return res.json({
@@ -2834,7 +2984,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   });
 
   // Real Shell Execution Endpoint
-  app.post("/api/terminal/exec", (req, res) => {
+  app.post("/api/terminal/exec", requirePlatformAdmin, (req, res) => {
     try {
       const {
         command = "",
@@ -3044,7 +3194,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   });
 
   // Server-Sent Events (SSE) Live Streamed Execution
-  app.get("/api/terminal/stream", (req, res) => {
+  app.get("/api/terminal/stream", requirePlatformAdmin, (req, res) => {
     const {
       command = "",
       cwd = process.cwd(),
@@ -3122,7 +3272,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // HERMES UPSTREAM UPDATE WATCHER & ADMIN CONTROLS (PER SPEC)
   // ============================================================================
 
-  app.get("/api/hermes/health", async (req, res) => {
+  app.get("/api/hermes/health", requireAuth, async (req, res) => {
     try {
       const health = await hermesAdapter.health();
       return res.json(health);
@@ -3144,7 +3294,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/hermes/capabilities", async (req, res) => {
+  app.get("/api/hermes/capabilities", requireAuth, async (req, res) => {
     try {
       const capabilities = await hermesAdapter.capabilities();
       return res.json(capabilities);
@@ -3160,7 +3310,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/hermes/upstream-status", async (req, res) => {
+  app.get("/api/hermes/upstream-status", requirePlatformAdmin, async (req, res) => {
     const health = await hermesAdapter.health();
     const isConnected = health.status === "UP";
     const installedVersion = health.runtime_version !== "NOT_AVAILABLE" && health.runtime_version !== "UNKNOWN" 
@@ -3206,7 +3356,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // remains GET /api/hermes/health -> hermesAdapter (ADR-001) — unaffected here.
   // ----------------------------------------------------------------------------
 
-  app.post("/api/hermes/check", (req, res) => {
+  app.post("/api/hermes/check", requirePlatformAdmin, (req, res) => {
     return res.json({
       success: false,
       status: "NOT_IMPLEMENTED",
@@ -3215,7 +3365,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     });
   });
 
-  app.post("/api/hermes/test-update", (req, res) => {
+  app.post("/api/hermes/test-update", requirePlatformAdmin, (req, res) => {
     return res.json({
       success: false,
       status: "NOT_IMPLEMENTED",
@@ -3224,7 +3374,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     });
   });
 
-  app.post("/api/hermes/approve-update", (req, res) => {
+  app.post("/api/hermes/approve-update", requirePlatformAdmin, (req, res) => {
     return res.json({
       success: false,
       status: "NOT_IMPLEMENTED",
@@ -3233,7 +3383,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     });
   });
 
-  app.post("/api/hermes/config-check", (req, res) => {
+  app.post("/api/hermes/config-check", requirePlatformAdmin, (req, res) => {
     return res.json({
       success: false,
       status: "NOT_IMPLEMENTED",
@@ -3244,7 +3394,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     });
   });
 
-  app.post("/api/hermes/config-migrate", (req, res) => {
+  app.post("/api/hermes/config-migrate", requirePlatformAdmin, (req, res) => {
     return res.json({
       success: false,
       status: "NOT_IMPLEMENTED",
@@ -3265,7 +3415,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // called them). They now report their true status instead.
   // ----------------------------------------------------------------------------
 
-  app.get("/api/hermes/db-state", (req, res) => {
+  app.get("/api/hermes/db-state", requirePlatformAdmin, (req, res) => {
     res.json({
       status: "NOT_IMPLEMENTED",
       connected: false,
@@ -3276,7 +3426,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     });
   });
 
-  app.get("/api/hermes/logs", (req, res) => {
+  app.get("/api/hermes/logs", requirePlatformAdmin, (req, res) => {
     res.json({
       status: "NOT_IMPLEMENTED",
       source: "NONE",
@@ -3301,7 +3451,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // resolved from a real artifact_id through lib/vault.ts's safety checks.
   // ==========================================
 
-  app.get("/api/vault", (req, res) => {
+  app.get("/api/vault", requireWorkspaceMember(fromQuery), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.query.workspaceId);
       if ("error" in resolved) {
@@ -3318,7 +3468,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/vault/:artifactId", (req, res) => {
+  app.get("/api/vault/:artifactId", requireWorkspaceMember(fromQuery), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.query.workspaceId);
       if ("error" in resolved) {
@@ -3342,7 +3492,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // index from what's already in the Vault, never to seed sample data.
   // ==========================================
 
-  app.get("/api/memory/search", (req, res) => {
+  app.get("/api/memory/search", requireWorkspaceMember(fromQuery), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.query.workspaceId);
       if ("error" in resolved) {
@@ -3358,7 +3508,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.post("/api/memory/reindex", (req, res) => {
+  app.post("/api/memory/reindex", requireWorkspaceMember(fromBody), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.body?.workspaceId);
       if ("error" in resolved) {
@@ -3374,7 +3524,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // Real, workspace-scoped skill registry. See lib/skills.ts — no execution
   // runtime is wired in this deployment, so /test always honestly returns
   // NOT_IMPLEMENTED rather than a fabricated "Sandbox" success.
-  app.get("/api/skills", (req, res) => {
+  app.get("/api/skills", requireWorkspaceMember(fromQuery), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.query.workspaceId);
       if ("error" in resolved) {
@@ -3396,7 +3546,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/skills/:skillId", (req, res) => {
+  app.get("/api/skills/:skillId", requireWorkspaceMember(fromQuery), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.query.workspaceId);
       if ("error" in resolved) {
@@ -3412,7 +3562,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.post("/api/skills", (req, res) => {
+  app.post("/api/skills", requireWorkspaceMember(fromBody), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.body?.workspaceId);
       if ("error" in resolved) {
@@ -3421,6 +3571,9 @@ sourceHash: ${packageMetadataResult.sourceHash}
       const { name, description, category, version, sourceType, sourceRef, markdownSpec, enabled } = req.body || {};
       if (!name || typeof name !== "string" || !name.trim()) {
         return res.status(400).json({ success: false, error: "name is required." });
+      }
+      if (sourceRef && !isValidMcpEndpointRef(sourceRef)) {
+        return res.status(400).json({ success: false, error: "sourceRef is not a valid URL." });
       }
       const skill = createSkill({
         workspaceId: resolved.workspaceId,
@@ -3439,11 +3592,14 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.patch("/api/skills/:skillId", (req, res) => {
+  app.patch("/api/skills/:skillId", requireWorkspaceAdmin(fromBody), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.body?.workspaceId);
       if ("error" in resolved) {
         return res.status(400).json({ success: false, error: resolved.error });
+      }
+      if (req.body?.source_ref && !isValidMcpEndpointRef(req.body.source_ref)) {
+        return res.status(400).json({ success: false, error: "source_ref is not a valid URL." });
       }
       const skill = updateSkill(resolved.workspaceId, req.params.skillId, req.body || {});
       if (!skill) {
@@ -3455,7 +3611,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.post("/api/skills/:skillId/test", (req, res) => {
+  app.post("/api/skills/:skillId/test", requireWorkspaceMember(fromBody), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.body?.workspaceId);
       if ("error" in resolved) {
@@ -3471,7 +3627,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/ton/status", async (req, res) => {
+  app.get("/api/ton/status", requireWorkspaceMember(fromQuery), async (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.query.workspaceId);
       if ("error" in resolved) {
@@ -3500,7 +3656,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/ton/telemetry", (req, res) => {
+  app.get("/api/ton/telemetry", requireWorkspaceMember(fromQuery), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.query.workspaceId);
       if ("error" in resolved) {
@@ -3515,7 +3671,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.post("/api/ton/telemetry", (req, res) => {
+  app.post("/api/ton/telemetry", requireWorkspaceMember(fromBody), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.body?.workspaceId);
       if ("error" in resolved) {
@@ -3538,7 +3694,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/ton/guardians", (req, res) => {
+  app.get("/api/ton/guardians", requireWorkspaceMember(fromQuery), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.query.workspaceId);
       if ("error" in resolved) {
@@ -3557,7 +3713,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.post("/api/ton/guardians", (req, res) => {
+  app.post("/api/ton/guardians", requireWorkspaceAdmin(fromBody), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.body?.workspaceId);
       if ("error" in resolved) {
@@ -3576,11 +3732,13 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/providers/status", (req, res) => {
-    const stateDbPath = getDatabasePath();
-    const vaultPath = path.join(process.cwd(), "vault");
-    const hasDb = fs.existsSync(stateDbPath);
-    const hasVault = fs.existsSync(vaultPath);
+  // Pass III / E3: this route was fully public and leaked the server's
+  // absolute filesystem paths (sqlitePath/vaultPath) plus a fabricated
+  // "Cloud-Run-Sandbox" environment claim. Now requires authentication and
+  // reports presence/status only — never a real path.
+  app.get("/api/providers/status", requireAuth, (req, res) => {
+    const hasDb = fs.existsSync(getDatabasePath());
+    const hasVault = fs.existsSync(path.join(process.cwd(), "vault"));
 
     res.json({
       success: true,
@@ -3605,29 +3763,25 @@ sourceHash: ${packageMetadataResult.sourceHash}
       },
       storage: {
         sqlite: hasDb ? "INITIALIZED" : "PENDING_INIT",
-        sqlitePath: stateDbPath,
-        vault: hasVault ? "LOCAL_DISK_PRESENT" : "NOT_FOUND",
-        vaultPath
+        vault: hasVault ? "LOCAL_DISK_PRESENT" : "NOT_FOUND"
       },
       runtime: {
-        environment: "Cloud-Run-Sandbox",
         nodeVersion: process.version,
-        port: 3000,
         timestamp: new Date().toISOString()
       }
     });
   });
 
-  app.get("/api/status", (req, res) => {
-    const stateDbPath = getDatabasePath();
-    const obsidianPath = path.join(process.cwd(), "vault");
-    const hasLocalState = fs.existsSync(stateDbPath);
-    const hasObsidian = fs.existsSync(obsidianPath);
+  // Pass III / E3 + O: same path leak as above, plus fabricated fields
+  // that were never backed by any real check (hermesVersion, serverRuntime,
+  // synapses, botMode, jarvisStatus) — removed rather than sanitized, since
+  // there is no honest real value to report for them here.
+  app.get("/api/status", requireAuth, (req, res) => {
+    const hasLocalState = fs.existsSync(getDatabasePath());
+    const hasObsidian = fs.existsSync(path.join(process.cwd(), "vault"));
 
     res.json({
       status: "online",
-      hermesVersion: "v4.2.0-airbyte-mesh",
-      serverRuntime: "AI_STUDIO_NODE_FULLSTACK",
       obsidianConnected: hasObsidian,
       obsidianClassification: hasObsidian ? "LOCAL_FOUND" : "NOT_CONNECTED",
       hermesDbConnected: hasLocalState,
@@ -3636,10 +3790,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
       fishAudioConfigured: !!process.env.FISH_AUDIO_API_KEY,
       openrouterConfigured: !!process.env.OPENROUTER_API_KEY,
       telegramConfigured: !!process.env.TELEGRAM_BOT_TOKEN,
-      synapses: ["gemini", "antigravity"],
-      botMode: "ACTIVE",
-      jarvisStatus: "READY",
-      lastSyncTime: new Date().toISOString(),
+      timestamp: new Date().toISOString(),
     });
   });
 
@@ -3648,7 +3799,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // ==========================================
 
   // 1. Comprehensive System Diagnostics
-  app.get("/api/master-admin/diagnostics", async (req, res) => {
+  app.get("/api/master-admin/diagnostics", requirePlatformAdmin, async (req, res) => {
     try {
       const dbPath = getDatabasePath();
       const hasDb = fs.existsSync(dbPath);
@@ -3837,7 +3988,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   });
 
   // 2. Real Database Read/Write Diagnostic Probe
-  app.post("/api/master-admin/database/test", async (req, res) => {
+  app.post("/api/master-admin/database/test", requirePlatformAdmin, async (req, res) => {
     const startTime = Date.now();
     try {
       const db = getDatabase();
@@ -3885,7 +4036,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   });
 
   // 3. Real Vault Read/Write Diagnostic Probe
-  app.post("/api/master-admin/vault/test", async (req, res) => {
+  app.post("/api/master-admin/vault/test", requirePlatformAdmin, async (req, res) => {
     const startTime = Date.now();
     const vaultPath = path.join(process.cwd(), "vault");
     const testFile = path.join(vaultPath, ".diagnostic-probe.md");
@@ -3930,7 +4081,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   });
 
   // 4. Real Provider Test Probe
-  app.post("/api/master-admin/provider/test", async (req, res) => {
+  app.post("/api/master-admin/provider/test", requirePlatformAdmin, async (req, res) => {
     const { provider = "gemini" } = req.body || {};
     const startTime = Date.now();
 
@@ -4047,7 +4198,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   });
 
   // 5. Authentic End-to-End Diagnostic Pipeline Check
-  app.post("/api/master-admin/e2e/test", async (req, res) => {
+  app.post("/api/master-admin/e2e/test", requirePlatformAdmin, async (req, res) => {
     const results: Array<{
       step: number;
       name: string;
@@ -4284,11 +4435,90 @@ sourceHash: ${packageMetadataResult.sourceHash}
     });
   });
 
+  // Real, platform-admin-only workspace administration (Pass III / D3).
+  // Replaces WorkspacesView.tsx's previous fabricated demo tenant list —
+  // every workspace here is a real row in the `workspaces` table this pass
+  // introduced, with a real member count derived from workspace_memberships.
+  app.get("/api/master-admin/workspaces", requirePlatformAdmin, (req, res) => {
+    try {
+      const workspaces = listWorkspaces().map((w) => ({
+        ...w,
+        memberCount: countWorkspaceMembers(w.workspace_id),
+      }));
+      return res.json({ success: true, workspaces });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list workspaces" });
+    }
+  });
+
+  app.post("/api/master-admin/workspaces", requirePlatformAdmin, (req, res) => {
+    try {
+      const { name } = req.body || {};
+      if (!name || typeof name !== "string" || !name.trim()) {
+        return res.status(400).json({ success: false, error: "name is required." });
+      }
+      const workspace = createWorkspace(name.trim());
+      return res.json({ success: true, workspace: { ...workspace, memberCount: 0 } });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to create workspace" });
+    }
+  });
+
+  app.get("/api/master-admin/workspaces/:workspaceId/members", requirePlatformAdmin, (req, res) => {
+    try {
+      const members = listWorkspaceMembers(req.params.workspaceId);
+      return res.json({ success: true, workspaceId: req.params.workspaceId, members });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list workspace members" });
+    }
+  });
+
+  app.post("/api/master-admin/workspaces/:workspaceId/members", requirePlatformAdmin, (req, res) => {
+    try {
+      const { userId, role } = req.body || {};
+      if (!userId || typeof userId !== "string") {
+        return res.status(400).json({ success: false, error: "userId is required." });
+      }
+      if (role !== "admin" && role !== "member") {
+        return res.status(400).json({ success: false, error: 'role must be "admin" or "member".' });
+      }
+      const membership = grantMembership(userId, req.params.workspaceId, role);
+      return res.json({ success: true, membership });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to assign membership" });
+    }
+  });
+
+  // Real, platform-admin-only user directory (Pass III / D2).
+  app.get("/api/master-admin/users", requirePlatformAdmin, (req, res) => {
+    try {
+      return res.json({ success: true, users: listUsers() });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list users" });
+    }
+  });
+
+  app.patch("/api/master-admin/users/:userId/status", requirePlatformAdmin, (req, res) => {
+    try {
+      const { status } = req.body || {};
+      if (status !== "active" && status !== "disabled") {
+        return res.status(400).json({ success: false, error: 'status must be "active" or "disabled".' });
+      }
+      const user = setUserStatus(req.params.userId, status);
+      if (!user) {
+        return res.status(404).json({ success: false, error: "User not found." });
+      }
+      return res.json({ success: true, user });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to update user status" });
+    }
+  });
+
   // Real local backup / restore. See lib/backup.ts. Instance-wide (the one
   // real SQLite database plus the real Vault directory) — not
   // workspace-scoped, since the database file itself is the unit of
   // backup/restore. Restore is always staged, never a live in-process swap.
-  app.post("/api/backup/create", async (_req, res) => {
+  app.post("/api/backup/create", requirePlatformAdmin, async (req, res) => {
     try {
       const summary = await createBackup();
       return res.json({ success: true, ...summary });
@@ -4297,7 +4527,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/backup/list", (_req, res) => {
+  app.get("/api/backup/list", requirePlatformAdmin, (req, res) => {
     try {
       return res.json({ success: true, backups: listBackups() });
     } catch (err: any) {
@@ -4305,7 +4535,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.get("/api/backup/:backupId/manifest", (req, res) => {
+  app.get("/api/backup/:backupId/manifest", requirePlatformAdmin, (req, res) => {
     try {
       const manifest = readManifestFromArchive(req.params.backupId);
       if (!manifest) {
@@ -4317,7 +4547,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.post("/api/backup/:backupId/validate", (req, res) => {
+  app.post("/api/backup/:backupId/validate", requirePlatformAdmin, (req, res) => {
     try {
       const validation = validateBackupArchive(req.params.backupId);
       return res.json({ success: true, validation });
@@ -4326,7 +4556,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
-  app.post("/api/backup/:backupId/restore", (req, res) => {
+  app.post("/api/backup/:backupId/restore", requirePlatformAdmin, (req, res) => {
     try {
       const result = stageRestore(req.params.backupId, req.body?.confirmed === true);
       if ("error" in result) {

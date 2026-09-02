@@ -455,6 +455,74 @@ export function getDatabase(): any {
       );
       CREATE INDEX IF NOT EXISTS idx_jarvis_messages_session ON jarvis_messages(session_id);
     `);
+
+    // Jarvis sessions predate identity (Pass II). A session's owner is
+    // nullable — a legacy pre-auth session has no owner and is visible to
+    // no one under the new authorization layer (never silently reassigned
+    // to whichever user happens to ask). New sessions always carry a real
+    // owning user_id (see createJarvisSession in lib/jarvis-sessions.ts).
+    const jarvisSessionCols = dbInstance.prepare("PRAGMA table_info(jarvis_sessions)").all() as Array<{ name: string }>;
+    if (!jarvisSessionCols.some((c) => c.name === 'user_id')) {
+      dbInstance.exec("ALTER TABLE jarvis_sessions ADD COLUMN user_id TEXT");
+    }
+
+    // ---------------------------------------------------------------------
+    // Identity & authorization (Pass III). Real, minimal, server-side.
+    // See lib/auth.ts (password/session mechanics) and
+    // lib/authorization.ts (the requireX() helpers routes call). No secret
+    // ever lives here in recoverable form: password_hash is a scrypt
+    // digest, user_sessions.token_hash is a sha256 of the raw session
+    // token — the raw token itself is never persisted, only ever handed to
+    // the client as an HttpOnly cookie value.
+    // ---------------------------------------------------------------------
+
+    // Workspaces did not exist as a real, listable entity before this pass
+    // — workspace_id was a bare string nobody validated against a
+    // canonical list. workspace_memberships below needs something real to
+    // reference.
+    dbInstance.exec(`
+      CREATE TABLE IF NOT EXISTS workspaces (
+        workspace_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS users (
+        user_id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        password_salt TEXT NOT NULL,
+        platform_role TEXT NOT NULL DEFAULT 'standard',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS user_sessions (
+        session_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        revoked_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
+
+      -- The ONE canonical membership relation (deliberately not a second
+      -- "workspace_members" table alongside this one — see B1).
+      CREATE TABLE IF NOT EXISTS workspace_memberships (
+        user_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'member',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, workspace_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_workspace_memberships_workspace ON workspace_memberships(workspace_id);
+    `);
   }
   return dbInstance;
 }

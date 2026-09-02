@@ -110,6 +110,27 @@ export function getWorkspaceSkill(workspaceId: string, skillId: string): SkillRe
   return withStats(toRecord(row));
 }
 
+/**
+ * Real URL validation for an MCP-category skill's HTTP(S) endpoint
+ * reference — F2's "if HTTP/SSE transport exists: validate URLs." Only
+ * validates shape (a real, well-formed http/https URL) — it never makes a
+ * network call, since a live connectivity probe against a caller-supplied
+ * URL from an authenticated-but-untrusted-endpoint would be a real SSRF
+ * risk this deployment's architecture doesn't yet have a proxy boundary
+ * for (see ADR-001 §6 — the MCP proxy path is still unverified/deferred).
+ * A non-HTTP sourceRef (e.g. a stdio command string) is left unvalidated
+ * here — that's a different, non-URL transport shape.
+ */
+export function isValidMcpEndpointRef(sourceRef: string): boolean {
+  if (!sourceRef.startsWith('http://') && !sourceRef.startsWith('https://')) return true;
+  try {
+    new URL(sourceRef);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function createSkill(params: {
   workspaceId: string;
   name: string;

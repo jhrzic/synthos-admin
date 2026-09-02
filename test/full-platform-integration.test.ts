@@ -29,6 +29,8 @@ import { structuralCompleteness, citationDensity, directiveTermCoverage, findUrl
 import { recordKilObservation } from '../lib/persistence';
 import { createJarvisSession, appendJarvisMessage, listSessionMessages } from '../lib/jarvis-sessions';
 import { createBackup, validateBackupArchive, BACKUP_ROOT } from '../lib/backup';
+import { createUser } from '../lib/auth';
+import { ensureWorkspace, grantMembership } from '../lib/workspaces';
 
 // ---------------------------------------------------------------------------
 // Workstream G — one integrated acceptance path across the now-real
@@ -46,6 +48,9 @@ import { createBackup, validateBackupArchive, BACKUP_ROOT } from '../lib/backup'
 // ---------------------------------------------------------------------------
 
 const WORKSPACE = 'ws-full-integration';
+const authedUser = createUser({ email: `full-integ-${Date.now()}@example.com`, password: 'full-integ-password-1', displayName: 'FullIntegUser' });
+ensureWorkspace(WORKSPACE, 'Full Integration Workspace');
+grantMembership(authedUser.user_id, WORKSPACE, 'admin');
 const UNIQUE_MARKER = `fullintegmarker${Date.now()}`;
 const RELATIVE_PATH = `Integration-Test-Runs/full-integ-${Date.now()}.md`;
 const DISK_PATH = path.join(VAULT_ROOT, RELATIVE_PATH);
@@ -215,8 +220,8 @@ describe('Full platform integration: graph -> execution -> receipt -> Vault -> M
   });
 
   it('9. Jarvis session reflects real workspace state — the same graph query logic /api/jarvis/command uses', () => {
-    const session = createJarvisSession(WORKSPACE);
-    appendJarvisMessage({ workspaceId: WORKSPACE, sessionId: session.session_id, role: 'user', content: 'show my graphs' });
+    const session = createJarvisSession(WORKSPACE, authedUser.user_id);
+    appendJarvisMessage({ workspaceId: WORKSPACE, userId: authedUser.user_id, sessionId: session.session_id, role: 'user', content: 'show my graphs' });
 
     // Exactly the real evidence-gathering server.ts's ADMIN_GRAPH_QUERY
     // branch uses — proves the session can genuinely reflect real state,
@@ -224,9 +229,9 @@ describe('Full platform integration: graph -> execution -> receipt -> Vault -> M
     const graphs = listGraphs(WORKSPACE);
     const runs = listGraphRuns(WORKSPACE);
     const reply = `SynthOS Graph Control Plane for workspace ${WORKSPACE}:\n- Total Graph DAGs: ${graphs.length}\n- Total Graph Execution Runs: ${runs.length}\n- Latest Run: ${runs[0]?.run_id || 'None'} [${runs[0]?.status || 'IDLE'}]`;
-    appendJarvisMessage({ workspaceId: WORKSPACE, sessionId: session.session_id, role: 'assistant', content: reply });
+    appendJarvisMessage({ workspaceId: WORKSPACE, userId: authedUser.user_id, sessionId: session.session_id, role: 'assistant', content: reply });
 
-    const messages = listSessionMessages(WORKSPACE, session.session_id)!;
+    const messages = listSessionMessages(WORKSPACE, authedUser.user_id, session.session_id)!;
     expect(messages[1].content).toContain(`Total Graph DAGs: ${graphs.length}`);
     expect(messages[1].content).toContain(runId);
     expect(graphs.some((g) => g.graph_id === graphId)).toBe(true);

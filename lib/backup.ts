@@ -62,7 +62,19 @@ function listFilesRecursive(root: string): string[] {
   if (!fs.existsSync(root)) return [];
   const results: string[] = [];
   const walk = (dir: string) => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    // A directory enumerated a moment ago as a subdirectory entry can
+    // genuinely disappear before it's scanned (a concurrent process
+    // deleting a now-empty directory elsewhere in the app touching
+    // Vault content). Skip it rather than failing the whole backup —
+    // same defensive posture as the per-file copy below.
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (err: any) {
+      if (err?.code === 'ENOENT') return;
+      throw err;
+    }
+    for (const entry of entries) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         walk(full);

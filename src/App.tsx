@@ -1569,7 +1569,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
 
           {/* Multi-Tenant Workspaces & Fleet Boundaries */}
           {activeTab === 'workspaces' && (
-            <WorkspacesView />
+            <WorkspacesView activeWorkspaceId={activeWorkspaceId} onSwitchWorkspace={setActiveWorkspaceId} />
           )}
 
           {/* Telegram Router Mesh */}
@@ -2038,7 +2038,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
 
           {/* Users & Roles View */}
           {activeTab === 'users-roles' && (
-            <WorkspacesView />
+            <WorkspacesView activeWorkspaceId={activeWorkspaceId} onSwitchWorkspace={setActiveWorkspaceId} />
           )}
 
           {/* System Settings & Connectors */}
