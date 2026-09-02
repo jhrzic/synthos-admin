@@ -436,6 +436,97 @@ export function recordArtifact(params: {
   };
 }
 
+// The single seeded workspace this deployment defaults to when a caller
+// omits workspaceId — matches the existing convention already used by
+// createInitialTask() and the graph/task execution routes.
+export const DEFAULT_WORKSPACE_ID = 'ws-synthos-primary';
+
+// Resolves a client-supplied workspace identity for read-path scoping.
+// - omitted -> defaults to the primary workspace (existing write-path
+//   convention, not a new mechanism).
+// - present but not a non-empty string -> explicitly invalid; the caller
+//   must reject the request rather than silently defaulting or ignoring it.
+export function resolveWorkspaceId(raw: unknown): { workspaceId: string } | { error: string } {
+  // Truly omitted (field absent from the request) -> default to the primary
+  // workspace, matching the existing write-path convention.
+  if (raw === undefined || raw === null) {
+    return { workspaceId: DEFAULT_WORKSPACE_ID };
+  }
+  // Explicitly supplied but empty/whitespace/non-string -> invalid. This is
+  // NOT treated the same as omission: a caller that sends a blank or
+  // malformed value gets a truthful rejection, never a silent default and
+  // never an unscoped read.
+  if (typeof raw !== 'string' || raw.trim().length === 0) {
+    return { error: 'workspaceId, when supplied, must be a non-empty string.' };
+  }
+  return { workspaceId: raw.trim() };
+}
+
+// Workspace-ownership check for read routes that accept a client-supplied
+// task_id directly (e.g. GET /api/execution/tasks/:taskId*). A task_id alone
+// is not proof of workspace membership — callers must verify the task's real
+// workspace_id matches the caller's active workspace before returning any
+// task-scoped data (activity, artifacts, reviews, receipts).
+export function getTaskWorkspaceId(taskId: string): string | null {
+  const db = getDatabase();
+  const row = db.prepare('SELECT workspace_id FROM tasks WHERE task_id = ?').get(taskId) as { workspace_id: string } | undefined;
+  return row?.workspace_id ?? null;
+}
+
+// The actual access-control decision behind every /api/execution/tasks/:taskId*
+// route: true only if the task exists AND its real workspace_id matches the
+// caller's resolved workspace. An unknown task_id is treated the same as a
+// mismatched one (false) — never distinguished in the response — so a caller
+// cannot use it as an oracle for whether a task_id exists in another workspace.
+export function isTaskInWorkspace(taskId: string, workspaceId: string): boolean {
+  return getTaskWorkspaceId(taskId) === workspaceId;
+}
+
+export interface WorkspaceTaskSummary {
+  task_id: string;
+  title: string;
+  assigned_agent: string;
+  assigned_model: string;
+  status: string;
+  created_at: string;
+}
+
+// Used by Jarvis's ADMIN_TASK_QUERY intent. Jarvis is a global UI surface,
+// but it reads within the caller's active workspace, not across tenants —
+// there is no privileged cross-workspace mode implemented in this
+// repository.
+export function listWorkspaceTasks(workspaceId: string, limit = 10): WorkspaceTaskSummary[] {
+  const db = getDatabase();
+  return (db.prepare(`
+    SELECT task_id, title, assigned_agent, assigned_model, status, created_at
+    FROM tasks
+    WHERE workspace_id = ?
+    ORDER BY created_at DESC
+    LIMIT ?
+  `).all(workspaceId, limit) as WorkspaceTaskSummary[]) || [];
+}
+
+export interface WorkspaceReceiptSummary {
+  receipt_id: string;
+  task_id: string;
+  algorithm: string;
+  created_at: string;
+}
+
+// Used by Jarvis's ADMIN_RECEIPT_QUERY intent. receipts carries no
+// workspace_id column directly — scoped via its owning task, which does.
+export function listWorkspaceReceipts(workspaceId: string, limit = 5): WorkspaceReceiptSummary[] {
+  const db = getDatabase();
+  return (db.prepare(`
+    SELECT r.receipt_id, r.task_id, r.algorithm, r.created_at
+    FROM receipts r
+    JOIN tasks t ON t.task_id = r.task_id
+    WHERE t.workspace_id = ?
+    ORDER BY r.created_at DESC
+    LIMIT ?
+  `).all(workspaceId, limit) as WorkspaceReceiptSummary[]) || [];
+}
+
 export function getTaskWithHistory(taskId: string): { task: TaskRecord | null; statusHistory: TaskStatusHistoryRecord[] } {
   const db = getDatabase();
   const task = (db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(taskId) as TaskRecord) || null;

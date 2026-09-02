@@ -34,7 +34,12 @@ import {
   saveGraphRun,
   getGraphRun,
   listGraphRuns,
-  getDatabase
+  getDatabase,
+  isTaskInWorkspace,
+  resolveWorkspaceId,
+  DEFAULT_WORKSPACE_ID,
+  listWorkspaceTasks,
+  listWorkspaceReceipts
 } from "./lib/persistence";
 import { hermesAdapter } from "./src/services/hermesAdapter";
 import { classifyModelRequest } from "./lib/model-router";
@@ -125,6 +130,38 @@ function checkGuardianRules(cmd: string): {
 }
 
 const DEFAULT_CANDIDATE_MODELS = ["gemini-3.1-flash-lite"];
+
+// ---------------------------------------------------------------------------
+// Workspace isolation on read paths.
+//
+// A task_id (or similar) supplied by a client is not proof the caller is
+// entitled to see that record. Every route that accepts a client-supplied
+// entity id directly must verify the entity's real workspace_id matches the
+// caller's resolved workspace identity before returning data — a bare
+// existence check ("does this task_id exist") is not sufficient isolation.
+//
+// Mismatches (and unknown ids) both respond 404 "Task not found" rather than
+// a distinct 403, so a caller cannot use the response to probe whether a
+// task_id exists in a workspace it is not scoped to.
+// ---------------------------------------------------------------------------
+function enforceTaskWorkspaceAccess(
+  req: express.Request,
+  res: express.Response,
+  taskId: string
+): boolean {
+  const resolved = resolveWorkspaceId(req.query.workspaceId ?? req.body?.workspaceId);
+  if ("error" in resolved) {
+    res.status(400).json({ success: false, error: resolved.error });
+    return false;
+  }
+
+  if (!isTaskInWorkspace(taskId, resolved.workspaceId)) {
+    res.status(404).json({ error: "Task not found", taskId });
+    return false;
+  }
+
+  return true;
+}
 
 async function startServer() {
   const app = express();
@@ -2011,6 +2048,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   app.get("/api/execution/tasks/:taskId", (req, res) => {
     try {
       const { taskId } = req.params;
+      if (!enforceTaskWorkspaceAccess(req, res, taskId)) return;
       const data = getTaskWithHistory(taskId);
       if (!data.task) {
         return res.status(404).json({ error: "Task not found", taskId });
@@ -2028,6 +2066,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   app.get("/api/execution/tasks/:taskId/activity", (req, res) => {
     try {
       const { taskId } = req.params;
+      if (!enforceTaskWorkspaceAccess(req, res, taskId)) return;
       const activity = getTaskActivityEvents(taskId);
       return res.json({
         success: true,
@@ -2043,6 +2082,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   app.get("/api/execution/tasks/:taskId/artifacts", (req, res) => {
     try {
       const { taskId } = req.params;
+      if (!enforceTaskWorkspaceAccess(req, res, taskId)) return;
       const artifacts = getTaskArtifacts(taskId);
       return res.json({
         success: true,
@@ -2058,6 +2098,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   app.get("/api/execution/tasks/:taskId/reviews", (req, res) => {
     try {
       const { taskId } = req.params;
+      if (!enforceTaskWorkspaceAccess(req, res, taskId)) return;
       const reviews = getTaskQualityReviews(taskId);
       return res.json({
         success: true,
@@ -2077,6 +2118,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
   app.get("/api/execution/tasks/:taskId/receipts", (req, res) => {
     try {
       const { taskId } = req.params;
+      if (!enforceTaskWorkspaceAccess(req, res, taskId)) return;
       const receipts = getTaskReceipts(taskId);
       return res.json({
         success: true,
@@ -2333,6 +2375,17 @@ sourceHash: ${packageMetadataResult.sourceHash}
         return res.status(400).json({ success: false, error: "Empty command received." });
       }
 
+      // Jarvis is a global UI surface, but it operates within the caller's
+      // active workspace, not across all tenants. No privileged cross-
+      // workspace mode exists in this deployment (verified — no such
+      // exception is implemented anywhere in this repository), so every
+      // admin-style query below is scoped to the resolved workspace.
+      const workspaceResolution = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in workspaceResolution) {
+        return res.status(400).json({ success: false, error: workspaceResolution.error });
+      }
+      const jarvisWorkspaceId = workspaceResolution.workspaceId;
+
       const lower = trimmed.toLowerCase();
       let reply = "";
       let intent = "GENERAL_DIRECTIVE";
@@ -2341,23 +2394,27 @@ sourceHash: ${packageMetadataResult.sourceHash}
       // Administrative Dispatch Routing
       if (lower.includes("task") || lower.includes("show all agent tasks") || lower.includes("list tasks")) {
         intent = "ADMIN_TASK_QUERY";
-        const db = getDatabase();
-        const tasks = db.prepare("SELECT task_id, title, assigned_agent, assigned_model, status, created_at FROM tasks ORDER BY created_at DESC LIMIT 10").all();
+        const tasks = listWorkspaceTasks(jarvisWorkspaceId, 10);
         evidence = tasks;
-        reply = `Found ${tasks.length} active agent tasks in SynthOS ledger:\n` +
+        reply = `Found ${tasks.length} active agent tasks in workspace ${jarvisWorkspaceId}:\n` +
           tasks.map((t: any, idx: number) => `${idx + 1}. [${t.status}] ${t.title} (${t.assigned_agent} / ${t.assigned_model}) - ID: ${t.task_id}`).join("\n");
       } else if (lower.includes("graph") || lower.includes("pipeline") || lower.includes("dag")) {
         intent = "ADMIN_GRAPH_QUERY";
+        // NOTE: graphs/graph_runs carry no workspace_id anywhere in the
+        // current schema — not on the tables, not on the write path
+        // (POST /api/graphs, /api/graphs/execute). This is a real, known
+        // gap left unresolved here deliberately: closing it would mean
+        // changing graph execution's write path and schema, which this fix
+        // is explicitly scoped not to touch. Reported, not silently patched.
         const graphs = listGraphs();
         const runs = listGraphRuns();
         evidence = { graphsCount: graphs.length, runsCount: runs.length, latestRun: runs[0] };
         reply = `SynthOS Graph Control Plane:\n- Total Graph DAGs: ${graphs.length}\n- Total Graph Execution Runs: ${runs.length}\n- Latest Run: ${runs[0]?.run_id || 'None'} [${runs[0]?.status || 'IDLE'}]`;
       } else if (lower.includes("receipt") || lower.includes("signature") || lower.includes("aegis")) {
         intent = "ADMIN_RECEIPT_QUERY";
-        const db = getDatabase();
-        const receipts = db.prepare("SELECT receipt_id, task_id, algorithm, created_at FROM receipts ORDER BY created_at DESC LIMIT 5").all();
+        const receipts = listWorkspaceReceipts(jarvisWorkspaceId, 5);
         evidence = receipts;
-        reply = `Verified Cryptographic Receipts Ledger (${receipts.length} recent):\n` +
+        reply = `Verified Cryptographic Receipts Ledger for workspace ${jarvisWorkspaceId} (${receipts.length} recent):\n` +
           receipts.map((r: any) => `• Receipt ${r.receipt_id} (Task: ${r.task_id}) - Algorithm: ${r.algorithm}`).join("\n");
       } else {
         // Natural Language Directive via Live Model
