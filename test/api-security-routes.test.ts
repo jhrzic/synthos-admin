@@ -46,6 +46,9 @@ describe('Pass III API security: workspace-scoped real data routes require requi
     '/api/memory/reindex',
     '/api/skills',
     '/api/skills/:skillId',
+    '/api/skills/:skillId/executability',
+    '/api/skills/:skillId/execute',
+    '/api/skills/:skillId/mcp/probe',
     '/api/ton/status',
     '/api/ton/telemetry',
     '/api/ton/guardians',
@@ -57,6 +60,13 @@ describe('Pass III API security: workspace-scoped real data routes require requi
       expect(line).toMatch(/requireWorkspaceMember\(|requireWorkspaceAdmin\(/);
     });
   }
+});
+
+describe('Pass V: skill execution requires the stricter requireWorkspaceAdmin, not just member', () => {
+  it('/api/skills/:skillId/execute specifically requires requireWorkspaceAdmin (can spend real provider budget / call external MCP servers)', () => {
+    const line = routeLine('/api/skills/:skillId/execute');
+    expect(line).toContain('requireWorkspaceAdmin(');
+  });
 });
 
 describe('Pass III API security: platform-level routes require requirePlatformAdmin', () => {
@@ -73,8 +83,14 @@ describe('Pass III API security: platform-level routes require requirePlatformAd
     '/api/backup/:backupId/restore',
     '/api/master-admin/workspaces',
     '/api/master-admin/workspaces/:workspaceId/members',
+    '/api/master-admin/workspaces/:workspaceId/members/:userId',
     '/api/master-admin/users',
+    '/api/master-admin/users/:userId',
     '/api/master-admin/users/:userId/status',
+    '/api/master-admin/users/:userId/platform-role',
+    '/api/master-admin/audit',
+    '/api/master-admin/runtime-status',
+    '/api/master-admin/runtime-events',
     '/api/terminal/status',
     '/api/terminal/sessions',
     '/api/terminal/sessions/:id',
@@ -132,11 +148,17 @@ describe('Pass III API security: the explicit public allowlist (E2) — never ac
     expect(routeLine('/api/skills/discover')).not.toMatch(/requireAuth|requireWorkspaceMember|requirePlatformAdmin/);
   });
 
+  it('Pass IV: setup-token validate/complete are public by design — the invited user has no session yet', () => {
+    expect(routeLine('/api/auth/setup-token/:token')).not.toMatch(/requireAuth|requireWorkspaceMember|requirePlatformAdmin/);
+    expect(routeLine('/api/auth/setup-token/:token/complete')).not.toMatch(/requireAuth|requireWorkspaceMember|requirePlatformAdmin/);
+  });
+
   it('no route outside the documented allowlist is missing every guard', () => {
     const allRouteMatches = [...serverContent.matchAll(/app\.(get|post|put|patch|delete)\(\s*(?:\[)?"([^"]+)"/g)];
     const guarded = new Set([
       // Explicit public allowlist — anything else must carry a guard.
       '/api/auth/setup-required', '/api/auth/setup', '/api/auth/login', '/api/auth/logout', '/api/auth/me',
+      '/api/auth/setup-token/:token', '/api/auth/setup-token/:token/complete',
       '/api/skills/discover',
       '*', // SPA shell fallback — no data of its own
     ]);

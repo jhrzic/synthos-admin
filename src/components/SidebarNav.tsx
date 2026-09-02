@@ -22,6 +22,8 @@ interface SidebarNavProps {
   onOpenHelp?: () => void;
   activeWorkspaceId?: string;
   onSwitchWorkspace?: (workspaceId: string) => void;
+  /** Real, authenticated user's own workspace memberships (Pass IV / E1) — never a hardcoded sample list. */
+  authorizedWorkspaces?: Array<{ workspace_id: string; workspace_name: string }>;
 }
 
 export const SidebarNav: React.FC<SidebarNavProps> = ({
@@ -32,7 +34,8 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
   isVisible = true,
   onOpenHelp,
   activeWorkspaceId = 'ws-synthos-primary',
-  onSwitchWorkspace
+  onSwitchWorkspace,
+  authorizedWorkspaces = [],
 }) => {
   // Collapsed rail state persisted locally, default to FALSE for clear navigation accessibility
   const [isCollapsed, setIsCollapsed] = useState<boolean>(() => {
@@ -245,19 +248,25 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
               </span>
               <span className="text-[9px] font-mono text-[#00D26A] font-bold">● ONLINE</span>
             </div>
-            <select
-              value={activeWorkspaceId}
-              onChange={(e) => {
-                if (onSwitchWorkspace) {
-                  onSwitchWorkspace(e.target.value);
-                }
-              }}
-              className="w-full bg-[#05060D] text-[11px] font-bold text-[#A5A2FF] hover:text-white border border-[#1E2240] focus:border-[#615EFF] rounded-lg px-2 py-1.5 outline-hidden transition cursor-pointer font-sans"
-            >
-              <option value="ws-synthos-primary">Primary Fleet (Prod)</option>
-              <option value="ws-research-sandbox">arXiv Sandbox (Stg)</option>
-              <option value="ws-growth-reach">GTM Viral Engine (Dev)</option>
-            </select>
+            {authorizedWorkspaces.length === 0 ? (
+              <div className="w-full bg-[#05060D] text-[10px] text-[#555A7E] border border-[#1E2240] rounded-lg px-2 py-1.5 font-sans">
+                No authorized workspaces
+              </div>
+            ) : (
+              <select
+                value={activeWorkspaceId}
+                onChange={(e) => {
+                  if (onSwitchWorkspace) {
+                    onSwitchWorkspace(e.target.value);
+                  }
+                }}
+                className="w-full bg-[#05060D] text-[11px] font-bold text-[#A5A2FF] hover:text-white border border-[#1E2240] focus:border-[#615EFF] rounded-lg px-2 py-1.5 outline-hidden transition cursor-pointer font-sans"
+              >
+                {authorizedWorkspaces.map((w) => (
+                  <option key={w.workspace_id} value={w.workspace_id}>{w.workspace_name}</option>
+                ))}
+              </select>
+            )}
           </div>
         )}
 

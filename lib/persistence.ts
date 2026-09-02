@@ -523,6 +523,91 @@ export function getDatabase(): any {
       );
       CREATE INDEX IF NOT EXISTS idx_workspace_memberships_workspace ON workspace_memberships(workspace_id);
     `);
+
+    // Pass IV — one-time account setup tokens (second-user onboarding, no
+    // email infrastructure exists in this codebase, so this is the real
+    // delivery mechanism: a link the platform admin copies and hands to the
+    // new user out of band). Only the hash is ever stored; the raw token is
+    // returned exactly once, at creation.
+    dbInstance.exec(`
+      CREATE TABLE IF NOT EXISTS setup_tokens (
+        token_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used_at TEXT,
+        revoked_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_setup_tokens_user ON setup_tokens(user_id);
+    `);
+
+    // Pass IV — real audit trail for authority-changing admin actions. Not
+    // a general-purpose activity log: `activity_events` (above) has a
+    // NOT NULL task_id and is genuinely task-execution-scoped, with its
+    // only reader (getTaskActivityEvents) task-scoped — forcing a "user
+    // disabled" event through it would mean fabricating a fake task_id.
+    // This is a small, purpose-built table for exactly one thing (who
+    // changed what authority, when), matching this codebase's existing
+    // pattern of separate small tables per real need rather than one
+    // universal log (skill_test_events, kil_observations, etc.).
+    dbInstance.exec(`
+      CREATE TABLE IF NOT EXISTS admin_audit_events (
+        event_id TEXT PRIMARY KEY,
+        actor_user_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        target_type TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        detail_json TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_admin_audit_events_created ON admin_audit_events(created_at);
+    `);
+
+    // Pass V — a skill's execution target. Deliberately absent (NULL) on
+    // every pre-existing skill and on every new skill by default: a skill
+    // being REGISTERED/ENABLED never implies it is EXECUTABLE (see
+    // lib/skills.ts classifySkillExecutability). `execution_target_ref`'s
+    // meaning depends on `execution_target_type` — a model alias, a
+    // deterministic action key from a fixed whitelist, or an MCP tool name
+    // (the MCP endpoint itself is the pre-existing `source_ref`).
+    // `credential_ciphertext` is AES-256-GCM at rest (lib/mcp-client.ts) —
+    // never plaintext, never returned by any route (see F2's own
+    // SECURITY_LIMITATION note in docs/adr-005 for what this does and does
+    // not protect against).
+    const skillCols = dbInstance.prepare("PRAGMA table_info(skills)").all() as Array<{ name: string }>;
+    if (!skillCols.some((c) => c.name === 'execution_target_type')) {
+      dbInstance.exec("ALTER TABLE skills ADD COLUMN execution_target_type TEXT");
+    }
+    if (!skillCols.some((c) => c.name === 'execution_target_ref')) {
+      dbInstance.exec("ALTER TABLE skills ADD COLUMN execution_target_ref TEXT");
+    }
+    if (!skillCols.some((c) => c.name === 'credential_ciphertext')) {
+      dbInstance.exec("ALTER TABLE skills ADD COLUMN credential_ciphertext TEXT");
+    }
+
+    // Pass V — a small, bounded, real runtime-event ledger (Workstream I).
+    // Deliberately not a reuse of `activity_events` (NOT NULL task_id,
+    // task-scoped) or `admin_audit_events` (authority-mutation-scoped) —
+    // this is for runtime-level events that are neither: skill execution
+    // attempts, MCP connection probes, and similar. Retention is enforced
+    // at insert time (see recordRuntimeEvent in lib/runtime-events.ts) —
+    // health polling must never grow this table unbounded.
+    dbInstance.exec(`
+      CREATE TABLE IF NOT EXISTS runtime_events (
+        event_id TEXT PRIMARY KEY,
+        workspace_id TEXT,
+        event_type TEXT NOT NULL,
+        target_type TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        latency_ms INTEGER,
+        detail_json TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_runtime_events_created ON runtime_events(created_at);
+      CREATE INDEX IF NOT EXISTS idx_runtime_events_target ON runtime_events(target_type, target_id);
+    `);
   }
   return dbInstance;
 }

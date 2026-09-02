@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Code, Terminal, Shield, Play, CheckCircle2,
-  AlertTriangle, RefreshCw, Plus, Search, Loader2, X
+  AlertTriangle, RefreshCw, Plus, Search, Loader2, X, Zap, Network
 } from 'lucide-react';
 
 type SkillCategory = 'system' | 'mcp' | 'custom' | 'tool' | 'integration';
+type ExecutionTargetType = 'model' | 'deterministic' | 'mcp_tool' | 'hermes_runtime';
 
 interface SkillRecord {
   skill_id: string;
@@ -18,11 +19,30 @@ interface SkillRecord {
   source_type: string;
   source_ref: string | null;
   markdown_spec: string | null;
+  execution_target_type: ExecutionTargetType | null;
+  execution_target_ref: string | null;
+  credential_configured: boolean;
   created_at: string;
   updated_at: string;
   callCount: number;
   successCount: number;
   lastTestedAt: string | null;
+}
+
+interface Executability {
+  executable: boolean;
+  reason: 'DISABLED' | 'NO_TARGET' | 'MISSING_PROVIDER' | 'MISSING_RUNTIME' | 'READY';
+  message: string;
+}
+
+interface McpProbeResult {
+  status: 'CONNECTED' | 'FAILED' | 'NOT_CONFIGURED' | 'PROBE_NOT_IMPLEMENTED';
+  transport?: string;
+  serverInfo?: { name?: string; version?: string };
+  tools?: Array<{ name: string; description?: string }>;
+  resources?: Array<{ uri: string; name?: string }>;
+  error?: string;
+  latencyMs?: number;
 }
 
 interface SkillRegistryViewProps {
@@ -61,6 +81,18 @@ export const SkillRegistryView: React.FC<SkillRegistryViewProps> = ({ activeWork
   const [newSourceRef, setNewSourceRef] = useState('');
   const [newMarkdown, setNewMarkdown] = useState('');
 
+  // Pass V / E9 — real executability, never guessed client-side.
+  const [executability, setExecutability] = useState<Executability | null>(null);
+  const [isExecuting, setIsExecuting] = useState(false);
+  const [executeInput, setExecuteInput] = useState('');
+  const [executeResult, setExecuteResult] = useState<{ success: boolean; status: string; output?: unknown; error?: string } | null>(null);
+  const [isProbing, setIsProbing] = useState(false);
+  const [probeResult, setProbeResult] = useState<McpProbeResult | null>(null);
+  const [isSavingTarget, setIsSavingTarget] = useState(false);
+  const [targetType, setTargetType] = useState<ExecutionTargetType | ''>('');
+  const [targetRef, setTargetRef] = useState('');
+  const [targetCredential, setTargetCredential] = useState('');
+
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3000);
@@ -90,6 +122,29 @@ export const SkillRegistryView: React.FC<SkillRegistryViewProps> = ({ activeWork
   useEffect(() => { fetchSkills(); }, [fetchSkills]);
 
   const activeSkill = skills.find((s) => s.skill_id === activeSkillId) || null;
+
+  const fetchExecutability = useCallback(async (skillId: string) => {
+    try {
+      const res = await fetch(`/api/skills/${encodeURIComponent(skillId)}/executability?workspaceId=${encodeURIComponent(workspaceId)}`);
+      const data = await res.json();
+      setExecutability(res.ok && data.success !== false ? data.executability : null);
+    } catch {
+      setExecutability(null);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    setExecuteResult(null);
+    setProbeResult(null);
+    if (activeSkill) {
+      fetchExecutability(activeSkill.skill_id);
+      setTargetType(activeSkill.execution_target_type || '');
+      setTargetRef(activeSkill.execution_target_ref || '');
+      setTargetCredential('');
+    } else {
+      setExecutability(null);
+    }
+  }, [activeSkill?.skill_id, fetchExecutability]);
 
   const filteredSkills = skills.filter((skill) => {
     const matchesCat = selectedCategory === 'all' || skill.category === selectedCategory;
@@ -138,6 +193,71 @@ export const SkillRegistryView: React.FC<SkillRegistryViewProps> = ({ activeWork
     }
   };
 
+  const handleSaveTarget = async (skill: SkillRecord) => {
+    setIsSavingTarget(true);
+    try {
+      const res = await fetch(`/api/skills/${encodeURIComponent(skill.skill_id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspaceId,
+          execution_target_type: targetType || null,
+          execution_target_ref: targetRef.trim() || null,
+          ...(targetCredential.trim() ? { credential: targetCredential.trim() } : {}),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.success === false) {
+        showToast(`Could not save execution target: ${data.error || `HTTP ${res.status}`}`);
+        return;
+      }
+      setTargetCredential('');
+      showToast('Execution target saved.');
+      await fetchSkills();
+      fetchExecutability(skill.skill_id);
+    } catch (err: any) {
+      showToast(`Could not save execution target: ${err?.message || 'network error'}`);
+    } finally {
+      setIsSavingTarget(false);
+    }
+  };
+
+  const handleExecute = async (skill: SkillRecord) => {
+    setIsExecuting(true);
+    setExecuteResult(null);
+    try {
+      const res = await fetch(`/api/skills/${encodeURIComponent(skill.skill_id)}/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, prompt: executeInput, query: executeInput }),
+      });
+      const data = await res.json();
+      setExecuteResult({ success: !!data.success, status: data.status || 'FAILED', output: data.output, error: data.error });
+    } catch (err: any) {
+      setExecuteResult({ success: false, status: 'FAILED', error: err?.message || 'Network error contacting the execute API.' });
+    } finally {
+      setIsExecuting(false);
+    }
+  };
+
+  const handleProbeMcp = async (skill: SkillRecord) => {
+    setIsProbing(true);
+    setProbeResult(null);
+    try {
+      const res = await fetch(`/api/skills/${encodeURIComponent(skill.skill_id)}/mcp/probe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+      const data = await res.json();
+      setProbeResult(res.ok && data.success !== false ? data.probe : { status: 'FAILED', error: data.error || `HTTP ${res.status}` });
+    } catch (err: any) {
+      setProbeResult({ status: 'FAILED', error: err?.message || 'Network error contacting the probe API.' });
+    } finally {
+      setIsProbing(false);
+    }
+  };
+
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName.trim()) return;
@@ -153,6 +273,9 @@ export const SkillRegistryView: React.FC<SkillRegistryViewProps> = ({ activeWork
           sourceType: newSourceRef.trim() ? 'manual' : 'manual',
           sourceRef: newSourceRef.trim() || undefined,
           markdownSpec: newMarkdown || undefined,
+          // No execution target is set at creation time by design — E1: a
+          // freshly registered skill is REGISTERED, never implicitly
+          // EXECUTABLE. Configure the target from the inspector afterward.
         }),
       });
       const data = await res.json();
@@ -330,6 +453,16 @@ export const SkillRegistryView: React.FC<SkillRegistryViewProps> = ({ activeWork
                       <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#7E8BB5]/15 text-[#7E8BB5] border border-[#7E8BB5]/30">
                         {activeSkill.status}
                       </span>
+                      {/* E9 — real, server-computed executability, never inferred from enabled alone */}
+                      {executability && (
+                        <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
+                          executability.executable
+                            ? 'bg-[#00D26A]/15 text-[#00D26A] border-[#00D26A]/30'
+                            : 'bg-[#7E8BB5]/15 text-[#7E8BB5] border-[#7E8BB5]/30'
+                        }`} title={executability.message}>
+                          {executability.executable ? 'EXECUTABLE' : executability.reason}
+                        </span>
+                      )}
                     </div>
                     <h2 className="text-base font-bold text-white mt-1.5 font-mono">
                       {activeSkill.name}
@@ -365,6 +498,135 @@ export const SkillRegistryView: React.FC<SkillRegistryViewProps> = ({ activeWork
                     </pre>
                   </div>
                 )}
+
+                {/* E2 — real, discriminated execution target. Registering or
+                    enabling a skill never implies a target exists; this is
+                    the one place that sets it. */}
+                <div className="bg-[#121424] border border-[#1E2238] p-4 rounded-xl space-y-3">
+                  <div className="text-[10px] font-mono uppercase tracking-wider text-[#A5A2FF] flex items-center gap-1.5">
+                    <Zap className="w-3.5 h-3.5" />
+                    <span>Execution Target</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <select
+                      value={targetType}
+                      onChange={(e) => setTargetType(e.target.value as ExecutionTargetType | '')}
+                      className="bg-[#141628] border border-[#1E2238] rounded-lg p-2 text-xs text-white focus:outline-none focus:border-[#615EFF]"
+                    >
+                      <option value="">No target (NOT_EXECUTABLE)</option>
+                      <option value="model">Model (Gemini via provider router)</option>
+                      <option value="deterministic">Deterministic action</option>
+                      <option value="mcp_tool">MCP tool</option>
+                      <option value="hermes_runtime">Hermes dedicated runtime</option>
+                    </select>
+                    <input
+                      type="text"
+                      value={targetRef}
+                      onChange={(e) => setTargetRef(e.target.value)}
+                      placeholder={targetType === 'model' ? 'gemini-3.1-flash-lite' : targetType === 'deterministic' ? 'vault.list | memory.search' : targetType === 'mcp_tool' ? 'tool name' : 'n/a'}
+                      disabled={!targetType || targetType === 'hermes_runtime'}
+                      className="bg-[#141628] border border-[#1E2238] rounded-lg p-2 text-xs text-white font-mono placeholder-[#5F6589] focus:outline-none focus:border-[#615EFF] disabled:opacity-40"
+                    />
+                  </div>
+                  {targetType === 'mcp_tool' && (
+                    <input
+                      type="password"
+                      value={targetCredential}
+                      onChange={(e) => setTargetCredential(e.target.value)}
+                      placeholder={activeSkill.credential_configured ? 'Credential configured (leave blank to keep)' : 'Bearer token (optional, write-only)'}
+                      className="w-full bg-[#141628] border border-[#1E2238] rounded-lg p-2 text-xs text-white placeholder-[#5F6589] focus:outline-none focus:border-[#615EFF]"
+                    />
+                  )}
+                  <button
+                    onClick={() => handleSaveTarget(activeSkill)}
+                    disabled={isSavingTarget}
+                    className="px-3 py-1.5 bg-[#14172B] hover:bg-[#1C203C] disabled:opacity-50 text-xs font-mono font-bold text-white rounded-lg border border-[#282F52] cursor-pointer"
+                  >
+                    {isSavingTarget ? 'Saving…' : 'Save Target'}
+                  </button>
+                </div>
+
+                {/* F4/F5/F6 — real MCP connection probe, mcp-category only */}
+                {activeSkill.category === 'mcp' && (
+                  <div className="bg-[#121424] border border-[#1E2238] p-4 rounded-xl space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="text-[10px] font-mono uppercase tracking-wider text-[#38BDF8] flex items-center gap-1.5">
+                        <Network className="w-3.5 h-3.5" />
+                        <span>MCP Connectivity</span>
+                      </div>
+                      <button
+                        onClick={() => handleProbeMcp(activeSkill)}
+                        disabled={isProbing || !activeSkill.source_ref}
+                        className="px-3 py-1.5 bg-[#14172B] hover:bg-[#1C203C] disabled:opacity-50 text-xs font-mono font-bold text-[#38BDF8] rounded-lg border border-[#282F52] cursor-pointer"
+                      >
+                        {isProbing ? 'Probing…' : 'Probe Connection'}
+                      </button>
+                    </div>
+                    {probeResult && (
+                      <div className="space-y-1.5">
+                        <div className={`text-[10px] font-mono font-bold ${
+                          probeResult.status === 'CONNECTED' ? 'text-[#00D26A]' : 'text-[#FF5E8E]'
+                        }`}>
+                          {probeResult.status}{typeof probeResult.latencyMs === 'number' ? ` (${probeResult.latencyMs}ms)` : ''}
+                        </div>
+                        {probeResult.error && (
+                          <div className="text-[11px] text-[#FF5E8E] font-mono">{probeResult.error}</div>
+                        )}
+                        {probeResult.status === 'CONNECTED' && (
+                          <div className="text-[11px] text-[#9AA2C6] font-mono">
+                            {probeResult.tools?.length || 0} tool(s), {probeResult.resources?.length || 0} resource(s) discovered live.
+                            {probeResult.tools && probeResult.tools.length > 0 && (
+                              <ul className="mt-1 list-disc list-inside">
+                                {probeResult.tools.map((t) => <li key={t.name}>{t.name}</li>)}
+                              </ul>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* E4/E5/E6/E8 — real execution, distinct from Test below */}
+                <div className="bg-[#121424] border border-[#1E2238] p-4 rounded-xl space-y-3">
+                  <div className="text-[10px] font-mono uppercase tracking-wider text-[#00D26A] flex items-center gap-1.5">
+                    <Play className="w-3.5 h-3.5" />
+                    <span>Execute</span>
+                  </div>
+                  <input
+                    type="text"
+                    value={executeInput}
+                    onChange={(e) => setExecuteInput(e.target.value)}
+                    placeholder={targetType === 'model' ? 'Prompt…' : targetType === 'deterministic' && targetRef === 'memory.search' ? 'Search query…' : 'Input (if applicable)…'}
+                    className="w-full bg-[#141628] border border-[#1E2238] rounded-lg p-2 text-xs text-white placeholder-[#5F6589] focus:outline-none focus:border-[#00D26A]"
+                  />
+                  <button
+                    onClick={() => handleExecute(activeSkill)}
+                    disabled={isExecuting || !executability?.executable}
+                    title={!executability?.executable ? executability?.message : undefined}
+                    className="flex items-center gap-2 px-4 py-2 bg-[#00D26A]/15 hover:bg-[#00D26A]/25 disabled:opacity-40 text-[#00D26A] text-xs font-bold rounded-xl border border-[#00D26A]/30 transition cursor-pointer"
+                  >
+                    <Play className={`w-3.5 h-3.5 ${isExecuting ? 'animate-spin' : ''}`} />
+                    <span>{isExecuting ? 'Executing…' : 'Execute Skill'}</span>
+                  </button>
+                  {executeResult && (
+                    <div className="pt-2 border-t border-[#1C2035] space-y-1">
+                      <div className={`text-[10px] font-mono font-bold ${executeResult.success ? 'text-[#00D26A]' : 'text-[#FF5E8E]'}`}>
+                        {executeResult.status}
+                      </div>
+                      {executeResult.error && (
+                        <pre className="text-xs font-mono whitespace-pre-wrap leading-relaxed bg-[#080911] p-3 rounded-lg border text-[#FF5E8E] border-[#FF5E8E]/30">
+                          {executeResult.error}
+                        </pre>
+                      )}
+                      {executeResult.success && executeResult.output !== undefined && (
+                        <pre className="text-xs font-mono whitespace-pre-wrap leading-relaxed bg-[#080911] p-3 rounded-lg border text-[#E2E8F0] border-[#161828] max-h-40 overflow-y-auto">
+                          {JSON.stringify(executeResult.output, null, 2)}
+                        </pre>
+                      )}
+                    </div>
+                  )}
+                </div>
 
                 {/* Test Harness — honest: no execution runtime is wired */}
                 <div className="bg-[#121424] border border-[#1E2238] p-4 rounded-xl space-y-3">

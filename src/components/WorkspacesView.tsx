@@ -14,6 +14,8 @@ interface RealWorkspace {
   workspace_id: string;
   name: string;
   memberCount: number;
+  taskCount: number;
+  graphCount: number;
   created_at: string;
   updated_at: string;
 }
@@ -191,8 +193,12 @@ export const WorkspacesView: React.FC<WorkspacesViewProps> = ({ activeWorkspaceI
                     <h3 className="text-sm font-bold text-white tracking-wide">{ws.name}</h3>
                     <p className="text-[11px] font-mono text-[#8E94B8] mt-0.5">{ws.workspace_id}</p>
                   </div>
-                  <div className="bg-[#141628] p-3 rounded-xl border border-[#2D3352]/60 text-[11px] font-mono text-[#8E94B8]">
-                    Created {new Date(ws.created_at).toLocaleDateString()}
+                  <div className="bg-[#141628] p-3 rounded-xl border border-[#2D3352]/60 text-[11px] font-mono text-[#8E94B8] space-y-1">
+                    <div>Created {new Date(ws.created_at).toLocaleDateString()}</div>
+                    <div className="flex items-center gap-3 pt-1 border-t border-[#2D3352]/60">
+                      <span>{ws.taskCount} task{ws.taskCount === 1 ? '' : 's'}</span>
+                      <span>{ws.graphCount} graph{ws.graphCount === 1 ? '' : 's'}</span>
+                    </div>
                   </div>
                 </div>
                 <button

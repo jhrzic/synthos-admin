@@ -76,9 +76,46 @@ import { JulianGoldieAuditRunner } from './components/JulianGoldieAuditRunner';
 import { MasterAdminView } from './components/MasterAdminView';
 import { GitMerge } from 'lucide-react';
 
-export default function App() {
+interface AppProps {
+  currentUser?: { user_id: string; email: string; display_name: string; platform_role: 'platform_admin' | 'standard' };
+  authorizedWorkspaces?: Array<{ workspace_id: string; workspace_name: string; role: 'admin' | 'member' }>;
+  onLogout?: () => void;
+}
+
+const LAST_WORKSPACE_STORAGE_KEY = 'synthos_last_workspace_id';
+
+export default function App({ currentUser, authorizedWorkspaces = [], onLogout }: AppProps = {}) {
   const [activeTab, setActiveTab] = useState<ActiveTab>('overview');
-  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>('ws-synthos-primary');
+  // E1/E3: the switcher's real options are the caller's own authorized
+  // workspaces (from /api/auth/me via AuthGate) — never a hardcoded
+  // sample list. Initial selection: a previously-selected workspace IF it
+  // is still in the real authorized list (never trusted on its own — see
+  // ADR-003 §7), else the first authorized workspace, else the historical
+  // default as a last-resort fallback (e.g. before the auth wiring above
+  // this component has resolved on first paint).
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem(LAST_WORKSPACE_STORAGE_KEY);
+      if (saved && authorizedWorkspaces.some((w) => w.workspace_id === saved)) return saved;
+    } catch { /* localStorage unavailable — fall through */ }
+    return authorizedWorkspaces[0]?.workspace_id || 'ws-synthos-primary';
+  });
+
+  useEffect(() => {
+    try { localStorage.setItem(LAST_WORKSPACE_STORAGE_KEY, activeWorkspaceId); } catch { /* best effort */ }
+  }, [activeWorkspaceId]);
+
+  // E3: re-validates on every authorizedWorkspaces change, not just at
+  // mount — covers a user switching accounts within the same browser tab
+  // (logout, then a different user logs in) without a full page reload,
+  // where this component instance persists across the identity change.
+  useEffect(() => {
+    if (authorizedWorkspaces.length === 0) return;
+    if (!authorizedWorkspaces.some((w) => w.workspace_id === activeWorkspaceId)) {
+      setActiveWorkspaceId(authorizedWorkspaces[0].workspace_id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authorizedWorkspaces]);
   const [models, setModels] = useState<Record<string, AIModelInfo>>(INITIAL_MODELS);
   const [agents, setAgents] = useState<Record<string, AgentInfo>>(AGENT_DEFINITIONS);
   const [kanbanTasks, setKanbanTasks] = useState<KanbanTask[]>(() => {
@@ -1332,6 +1369,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           onOpenHelp={() => setIsHelpDrawerOpen(true)}
           activeWorkspaceId={activeWorkspaceId}
           onSwitchWorkspace={setActiveWorkspaceId}
+          authorizedWorkspaces={authorizedWorkspaces.map((w) => ({ workspace_id: w.workspace_id, workspace_name: w.workspace_name }))}
         />
 
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">

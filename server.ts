@@ -52,12 +52,28 @@ import { tonGuardianViews, installTonGuardians } from "./lib/ton-guardians";
 import { listWorkspaceVaultEntries, getWorkspaceVaultEntry, previewWorkspaceVaultEntry } from "./lib/vault";
 import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory } from "./lib/memory-index";
 import { estimateGraphExecution, selectLiveExecutionNodes } from "./lib/graph-execution";
-import { listWorkspaceSkills, getWorkspaceSkill, createSkill, updateSkill, testSkill, discoverRepoSkillFiles, isValidMcpEndpointRef } from "./lib/skills";
+import { listWorkspaceSkills, getWorkspaceSkill, createSkill, updateSkill, testSkill, discoverRepoSkillFiles, isValidMcpEndpointRef, classifySkillExecutability, getRawCredentialCiphertext, ExecutionTargetType } from "./lib/skills";
+import { executeSkill } from "./lib/skill-execution";
+import { probeMcpServer, decryptCredential } from "./lib/mcp-client";
+import { recordRuntimeEvent, listRecentRuntimeEvents } from "./lib/runtime-events";
+import { getRuntimeStatus } from "./lib/runtime-status";
+
+const VALID_EXECUTION_TARGET_TYPES = new Set<ExecutionTargetType>(["model", "deterministic", "mcp_tool", "hermes_runtime"]);
 import { createJarvisSession, listUserJarvisSessions, getOwnedJarvisSession, listSessionMessages, appendJarvisMessage } from "./lib/jarvis-sessions";
 import { createBackup, listBackups, readManifestFromArchive, validateBackupArchive, stageRestore } from "./lib/backup";
-import { anyUserExists, createUser, login, resolveSessionUser, revokeSessionByToken, parseCookies, SESSION_COOKIE_NAME, listUsers, setUserStatus } from "./lib/auth";
-import { ensureWorkspace, listWorkspaces, createWorkspace, grantMembership, listUserMemberships, listWorkspaceMembers, countWorkspaceMembers, hasWorkspaceAccess } from "./lib/workspaces";
+import {
+  anyUserExists, createUser, login, resolveSessionUser, revokeSessionByToken, parseCookies,
+  SESSION_COOKIE_NAME, listUsers, setUserStatus, getUserById, createPendingUser, createSetupToken,
+  resolveSetupToken, completeSetup, setPlatformRole, countActivePlatformAdmins,
+} from "./lib/auth";
+import {
+  ensureWorkspace, listWorkspaces, createWorkspace, grantMembership,
+  countWorkspaceMembers, hasWorkspaceAccess, removeMembership,
+  updateMembershipRole, listUserMembershipsWithWorkspaceNames, listWorkspaceMembersWithUserInfo,
+  getWorkspaceActivityCounts,
+} from "./lib/workspaces";
 import { requireAuth, requireWorkspaceMember, requireWorkspaceAdmin, requirePlatformAdmin, requireSameOrigin, getRequestUser, fromBody, fromQuery, fromBodyOrQuery, AuthedRequest } from "./lib/authorization";
+import { recordAdminAuditEvent, listRecentAdminAuditEvents } from "./lib/audit";
 
 dotenv.config();
 
@@ -271,7 +287,7 @@ async function startServer() {
         return res.status(500).json({ success: false, error: "Account created but session could not be established." });
       }
       setSessionCookie(res, result.rawToken);
-      return res.json({ success: true, user: result.user, workspaces: listUserMemberships(user.user_id) });
+      return res.json({ success: true, user: result.user, workspaces: listUserMembershipsWithWorkspaceNames(user.user_id) });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Setup failed" });
     }
@@ -291,7 +307,7 @@ async function startServer() {
         return res.status(401).json({ success: false, error: "Invalid email or password." });
       }
       setSessionCookie(res, result.rawToken);
-      return res.json({ success: true, user: result.user, workspaces: listUserMemberships(result.user.user_id) });
+      return res.json({ success: true, user: result.user, workspaces: listUserMembershipsWithWorkspaceNames(result.user.user_id) });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Login failed" });
     }
@@ -317,7 +333,7 @@ async function startServer() {
       if (!user) {
         return res.json({ success: true, authenticated: false });
       }
-      return res.json({ success: true, authenticated: true, user, workspaces: listUserMemberships(user.user_id) });
+      return res.json({ success: true, authenticated: true, user, workspaces: listUserMembershipsWithWorkspaceNames(user.user_id) });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to resolve identity" });
     }
@@ -2840,56 +2856,93 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // APOLLO HERMES-SPECIFIC VOICE BRIDGE ENGINE
   // ==========================================
 
-  app.get("/api/apollo/status", requireAuth, (req, res) => {
-    const fishKey = process.env.FISH_AUDIO_API_KEY || "";
-    const openAiKey = process.env.OPENAI_API_KEY || "";
-    const elevenKey = process.env.ELEVENLABS_API_KEY || "";
+  // Pass V / Workstream D3, N — this previously reported "CONNECTED"
+  // whenever ANY voice-provider env var was merely *set*, with zero live
+  // probe of anything, and hardcoded bargeInEnabled: true unconditionally.
+  // Apollo is Hermes-specific (architecture rule 3) — its real status is
+  // derived from the real Hermes runtime health check, not from an env var
+  // being present. Voice-provider config is reported separately, honestly,
+  // as configuration presence — never conflated with "connected."
+  app.get("/api/apollo/status", requireAuth, async (req, res) => {
+    try {
+      const fishKey = process.env.FISH_AUDIO_API_KEY || "";
+      const openAiKey = process.env.OPENAI_API_KEY || "";
+      const elevenKey = process.env.ELEVENLABS_API_KEY || "";
 
-    const hasAudioCredential = Boolean(fishKey || openAiKey || elevenKey);
-    return res.json({
-      success: true,
-      service: "Apollo Voice Bridge",
-      role: "Hermes-specific voice/audio bridge (distinct from global Jarvis engine)",
-      status: hasAudioCredential ? "CONNECTED" : "DEGRADED",
-      reason: hasAudioCredential ? "OPERATIONAL" : "API_KEY_NOT_CONFIGURED",
-      providers: {
-        fish_audio: Boolean(fishKey),
-        openai_realtime: Boolean(openAiKey),
-        elevenlabs: Boolean(elevenKey),
-        browser_fallback: true
-      },
-      bargeInEnabled: true,
-      duplexBufferMs: 150,
-      timestamp: new Date().toISOString()
-    });
+      let status: "NOT_CONFIGURED" | "HEALTHY" | "DEGRADED" | "UNAVAILABLE" | "PARTIAL" = "NOT_CONFIGURED";
+      let reason = "HERMES_ADAPTER_BASE_URL_NOT_CONFIGURED";
+      let hermesHealthStatus: string | null = null;
+
+      if (process.env.HERMES_ADAPTER_BASE_URL) {
+        const health = await hermesAdapter.health();
+        hermesHealthStatus = health.status;
+        if (health.status === "UP") { status = "HEALTHY"; reason = "HERMES_RUNTIME_UP"; }
+        else if (health.status === "DEGRADED") { status = "DEGRADED"; reason = "HERMES_RUNTIME_DEGRADED"; }
+        else { status = "UNAVAILABLE"; reason = `HERMES_RUNTIME_${health.status}`; }
+      }
+
+      // Text dispatch is honestly NOT_IMPLEMENTED regardless of Hermes
+      // health — hermesAdapter.execute() has no real contract (ADR-001
+      // Phase 3, deferred). Reflected here so the UI never implies more
+      // capability than /api/apollo/command actually has.
+      if (status === "HEALTHY") status = "PARTIAL";
+
+      return res.json({
+        success: true,
+        service: "Apollo Voice Bridge",
+        role: "Hermes-specific voice/audio bridge (distinct from global Jarvis engine)",
+        status,
+        reason,
+        hermesRuntimeStatus: hermesHealthStatus,
+        textDispatch: "NOT_IMPLEMENTED",
+        voiceProviders: {
+          fish_audio: Boolean(fishKey),
+          openai_realtime: Boolean(openAiKey),
+          elevenlabs: Boolean(elevenKey),
+          browser_speech_recognition: "CLIENT_SIDE_CAPABILITY_CHECK_REQUIRED",
+        },
+        // Real capability (fishAudioClient.interrupt() sends an actual
+        // stream-flush over an open WebSocket) exists only when Fish Audio
+        // is configured — never unconditionally true.
+        bargeInEnabled: Boolean(fishKey),
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to get Apollo status" });
+    }
   });
 
+  // D2 — Apollo text stays truthful: since Hermes execute() has no real
+  // contract, this route never fabricates a dispatch reply. It records the
+  // real attempt and returns the real NOT_IMPLEMENTED outcome — no routing
+  // to Jarvis/generic Gemini chat as a disguise (explicit rule).
   app.post("/api/apollo/command", requireAuth, async (req, res) => {
     try {
       const { directive = "", targetAgent = "scout", priority = "P1" } = req.body || {};
-      const trimmed = directive.trim();
+      const trimmed = String(directive).trim();
       if (!trimmed) {
         return res.status(400).json({ success: false, error: "Empty Apollo directive received." });
       }
 
       const apolloTaskId = `apollo-${Date.now()}`;
-      const responseText = `Apollo Voice Bridge dispatched directive to Hermes Agent ${targetAgent.toUpperCase()}: "${trimmed}". Evaluated under Guardian Sentinel.`;
+      const hermesResult = await hermesAdapter.execute({ prompt: trimmed } as any);
 
       recordActivityEvent({
         taskId: apolloTaskId,
         agentId: "apollo",
         eventType: "APOLLO_VOICE_DIRECTIVE",
-        payload: { directive: trimmed, targetAgent, priority }
+        payload: { directive: trimmed, targetAgent, priority, hermesStatus: (hermesResult as any)?.status || "NOT_IMPLEMENTED" }
       });
 
       return res.json({
-        success: true,
+        success: false,
         service: "Apollo Voice Bridge",
         taskId: apolloTaskId,
         directive: trimmed,
         targetAgent,
         priority,
-        reply: responseText,
+        status: "NOT_IMPLEMENTED",
+        error: (hermesResult as any)?.error || "The dedicated Hermes runtime's execute() endpoint has no real contract in this deployment (ADR-001 Phase 3, deferred). This directive was not dispatched anywhere.",
         timestamp: new Date().toISOString()
       });
     } catch (err: any) {
@@ -3568,12 +3621,15 @@ sourceHash: ${packageMetadataResult.sourceHash}
       if ("error" in resolved) {
         return res.status(400).json({ success: false, error: resolved.error });
       }
-      const { name, description, category, version, sourceType, sourceRef, markdownSpec, enabled } = req.body || {};
+      const { name, description, category, version, sourceType, sourceRef, markdownSpec, enabled, executionTargetType, executionTargetRef, credential } = req.body || {};
       if (!name || typeof name !== "string" || !name.trim()) {
         return res.status(400).json({ success: false, error: "name is required." });
       }
       if (sourceRef && !isValidMcpEndpointRef(sourceRef)) {
         return res.status(400).json({ success: false, error: "sourceRef is not a valid URL." });
+      }
+      if (executionTargetType && !VALID_EXECUTION_TARGET_TYPES.has(executionTargetType)) {
+        return res.status(400).json({ success: false, error: `executionTargetType must be one of: ${[...VALID_EXECUTION_TARGET_TYPES].join(", ")}.` });
       }
       const skill = createSkill({
         workspaceId: resolved.workspaceId,
@@ -3585,9 +3641,15 @@ sourceHash: ${packageMetadataResult.sourceHash}
         sourceRef,
         markdownSpec,
         enabled,
+        executionTargetType,
+        executionTargetRef,
+        credential,
       });
       return res.json({ success: true, skill });
     } catch (err: any) {
+      if (err?.message?.includes("MCP_CREDENTIAL_ENCRYPTION_KEY")) {
+        return res.status(400).json({ success: false, error: err.message });
+      }
       return res.status(500).json({ success: false, error: err?.message || "Failed to create skill" });
     }
   });
@@ -3601,13 +3663,101 @@ sourceHash: ${packageMetadataResult.sourceHash}
       if (req.body?.source_ref && !isValidMcpEndpointRef(req.body.source_ref)) {
         return res.status(400).json({ success: false, error: "source_ref is not a valid URL." });
       }
+      if (req.body?.execution_target_type && !VALID_EXECUTION_TARGET_TYPES.has(req.body.execution_target_type)) {
+        return res.status(400).json({ success: false, error: `execution_target_type must be one of: ${[...VALID_EXECUTION_TARGET_TYPES].join(", ")}.` });
+      }
       const skill = updateSkill(resolved.workspaceId, req.params.skillId, req.body || {});
       if (!skill) {
         return res.status(404).json({ success: false, error: "Skill not found." });
       }
       return res.json({ success: true, skill });
     } catch (err: any) {
+      if (err?.message?.includes("MCP_CREDENTIAL_ENCRYPTION_KEY")) {
+        return res.status(400).json({ success: false, error: err.message });
+      }
       return res.status(500).json({ success: false, error: err?.message || "Failed to update skill" });
+    }
+  });
+
+  // Pass V / E9 — real, server-computed executability classification. The
+  // UI never guesses REGISTERED vs EXECUTABLE client-side (E9); this is the
+  // one source of truth, same classifySkillExecutability() the execute
+  // route itself gates on.
+  app.get("/api/skills/:skillId/executability", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.query.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const skill = getWorkspaceSkill(resolved.workspaceId, req.params.skillId);
+      if (!skill) {
+        return res.status(404).json({ success: false, error: "Skill not found." });
+      }
+      return res.json({ success: true, executability: classifySkillExecutability(skill) });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to classify skill executability" });
+    }
+  });
+
+  // E4/E5/E6/E8 — real execution, distinct from /test (which stays honestly
+  // NOT_IMPLEMENTED for every skill, unconditionally — see lib/skills.ts).
+  // Gated by requireWorkspaceAdmin rather than requireWorkspaceMember: this
+  // route can spend real provider budget or call an external MCP server,
+  // and no per-skill approval-queue concept exists yet in this codebase to
+  // gate it more granularly (E4's "respect existing... approval controls" —
+  // there is no existing skill-execution approval control to plug into, so
+  // this is the deliberate, documented interim posture: admin-only).
+  app.post("/api/skills/:skillId/execute", requireWorkspaceAdmin(fromBody), async (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const { prompt, query } = req.body || {};
+      const result = await executeSkill(resolved.workspaceId, req.params.skillId, { prompt, query });
+      if (!result) {
+        return res.status(404).json({ success: false, error: "Skill not found." });
+      }
+      return res.json({ success: result.success, ...result });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to execute skill" });
+    }
+  });
+
+  // F4/F5/F6 — real MCP connection probe. Deliberately a separate route
+  // from /test (which never changes its category-agnostic NOT_IMPLEMENTED
+  // behavior for any skill — see test/mcp-registry.test.ts). Only
+  // meaningful for category==='mcp' skills, but works for any skill with a
+  // source_ref that looks like an http(s) endpoint.
+  app.post("/api/skills/:skillId/mcp/probe", requireWorkspaceMember(fromBody), async (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const skill = getWorkspaceSkill(resolved.workspaceId, req.params.skillId);
+      if (!skill) {
+        return res.status(404).json({ success: false, error: "Skill not found." });
+      }
+      if (!skill.source_ref) {
+        return res.json({ success: true, probe: { status: "NOT_CONFIGURED", transport: "unknown", evidenceSource: "not_attempted" } });
+      }
+      const ciphertext = getRawCredentialCiphertext(resolved.workspaceId, req.params.skillId);
+      const credential = ciphertext ? decryptCredential(ciphertext) : null;
+      const startedAt = Date.now();
+      const probe = await probeMcpServer(skill.source_ref, credential);
+      recordRuntimeEvent({
+        workspaceId: resolved.workspaceId,
+        eventType: "MCP_PROBE",
+        targetType: "mcp_server",
+        targetId: req.params.skillId,
+        status: probe.status === "CONNECTED" ? "SUCCESS" : probe.status === "NOT_CONFIGURED" ? "NOT_CONFIGURED" : probe.status === "PROBE_NOT_IMPLEMENTED" ? "NOT_IMPLEMENTED" : "FAILED",
+        latencyMs: probe.latencyMs ?? Date.now() - startedAt,
+        detail: { toolCount: probe.tools?.length, resourceCount: probe.resources?.length },
+      });
+      return res.json({ success: true, probe });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to probe MCP server" });
     }
   });
 
@@ -3955,17 +4105,38 @@ sourceHash: ${packageMetadataResult.sourceHash}
           error: hermesHealth.error
         },
         providers,
-        guardian: {
-          status: "LIVE",
-          policyCount: 4,
-          mode: "ENFORCING",
-          hitlRequired: true
-        },
+        // Pass V / Workstream N: this previously hardcoded policyCount: 4,
+        // mode: "ENFORCING", hitlRequired: true with zero backing query —
+        // no guardian_policies table or approval-queue route exists
+        // anywhere in this codebase (confirmed by grep). What IS real: the
+        // deterministic verification gate baked into the execution spine
+        // (/api/execute-agent-task -> runDeterministicAegisVerification),
+        // evidenced by real quality_reviews rows.
+        guardian: (() => {
+          try {
+            const decisionRow = getDatabase().prepare(
+              "SELECT decision, COUNT(*) AS n FROM quality_reviews GROUP BY decision"
+            ).all() as Array<{ decision: string; n: number }>;
+            const byDecision: Record<string, number> = {};
+            for (const row of decisionRow) byDecision[row.decision] = row.n;
+            return {
+              status: "LIVE",
+              mode: "DETERMINISTIC_GATE_IN_EXECUTION_SPINE",
+              reviewsCount: dbStats.tables.quality_reviews,
+              byDecision,
+            };
+          } catch {
+            return { status: "UNKNOWN", mode: "DETERMINISTIC_GATE_IN_EXECUTION_SPINE", reviewsCount: dbStats.tables.quality_reviews, byDecision: {} };
+          }
+        })(),
         aegis: {
           status: "LIVE",
           mode: "DETERMINISTIC_VERIFICATION",
           receiptsCount: dbStats.tables.receipts,
-          signingAlgorithm: "HMAC-SHA256 / SHA-256 Digest"
+          // Pass IV / H: this previously read "HMAC-SHA256 / SHA-256
+          // Digest" — the real algorithm (lib/persistence.ts
+          // signReceiptPayload/verifyReceipt) is Ed25519.
+          signingAlgorithm: "Ed25519"
         },
         graphRuntime: {
           status: "PARTIAL",
@@ -3980,10 +4151,50 @@ sourceHash: ${packageMetadataResult.sourceHash}
           activeWorkers: 0,
           cronEngine: "Windmill External Orchestration Required",
           notice: "Autonomous cron scheduling must be executed via Windmill worker pool."
-        }
+        },
+        // Pass IV / N — real, cheap counts (no mock totals). Omitted
+        // entirely, not zero-filled, if the underlying query fails.
+        identity: (() => {
+          try {
+            const auditRow = getDatabase().prepare('SELECT COUNT(*) AS n FROM admin_audit_events').get() as { n: number };
+            return {
+              usersCount: listUsers().length,
+              workspacesCount: listWorkspaces().length,
+              adminAuditEventsCount: auditRow.n,
+            };
+          } catch {
+            return undefined;
+          }
+        })()
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Pass V / Workstream G — one small, truthful runtime-status aggregator.
+  // Not a second diagnostics endpoint competing with the one above: this is
+  // narrower (the LEGEND vocabulary — HEALTHY/DEGRADED/NOT_CONFIGURED/
+  // NOT_IMPLEMENTED/FAILED/UNKNOWN, plus an explicit evidenceSource per
+  // system) and adds MCP connectivity, which the diagnostics route above
+  // does not cover.
+  app.get("/api/master-admin/runtime-status", requirePlatformAdmin, async (req, res) => {
+    try {
+      const report = await getRuntimeStatus();
+      return res.json({ success: true, ...report });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to get runtime status" });
+    }
+  });
+
+  // Workstream I — the real runtime-event ledger, read-only.
+  app.get("/api/master-admin/runtime-events", requirePlatformAdmin, (req, res) => {
+    try {
+      const limit = req.query.limit ? Number(req.query.limit) : undefined;
+      const events = listRecentRuntimeEvents({ limit });
+      return res.json({ success: true, events });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list runtime events" });
     }
   });
 
@@ -4444,6 +4655,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
       const workspaces = listWorkspaces().map((w) => ({
         ...w,
         memberCount: countWorkspaceMembers(w.workspace_id),
+        ...getWorkspaceActivityCounts(w.workspace_id),
       }));
       return res.json({ success: true, workspaces });
     } catch (err: any) {
@@ -4458,15 +4670,24 @@ sourceHash: ${packageMetadataResult.sourceHash}
         return res.status(400).json({ success: false, error: "name is required." });
       }
       const workspace = createWorkspace(name.trim());
+      recordAdminAuditEvent({
+        actorUserId: (req as AuthedRequest).authUser!.user_id,
+        eventType: "WORKSPACE_CREATED",
+        targetType: "workspace",
+        targetId: workspace.workspace_id,
+        detail: { name: workspace.name },
+      });
       return res.json({ success: true, workspace: { ...workspace, memberCount: 0 } });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to create workspace" });
     }
   });
 
+  // Enriched with real user email/display_name — a workspace detail panel
+  // needs human identity, not just raw user_ids (Pass IV / B1, C3).
   app.get("/api/master-admin/workspaces/:workspaceId/members", requirePlatformAdmin, (req, res) => {
     try {
-      const members = listWorkspaceMembers(req.params.workspaceId);
+      const members = listWorkspaceMembersWithUserInfo(req.params.workspaceId);
       return res.json({ success: true, workspaceId: req.params.workspaceId, members });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to list workspace members" });
@@ -4482,19 +4703,132 @@ sourceHash: ${packageMetadataResult.sourceHash}
       if (role !== "admin" && role !== "member") {
         return res.status(400).json({ success: false, error: 'role must be "admin" or "member".' });
       }
+      if (!getUserById(userId)) {
+        return res.status(404).json({ success: false, error: "User not found." });
+      }
       const membership = grantMembership(userId, req.params.workspaceId, role);
+      recordAdminAuditEvent({
+        actorUserId: (req as AuthedRequest).authUser!.user_id,
+        eventType: "MEMBERSHIP_ASSIGNED",
+        targetType: "membership",
+        targetId: `${userId}:${req.params.workspaceId}`,
+        detail: { role },
+      });
       return res.json({ success: true, membership });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to assign membership" });
     }
   });
 
-  // Real, platform-admin-only user directory (Pass III / D2).
+  // B3 — real workspace-role change. Server-enforced (requirePlatformAdmin) —
+  // the frontend role dropdown is never trusted on its own.
+  app.patch("/api/master-admin/workspaces/:workspaceId/members/:userId", requirePlatformAdmin, (req, res) => {
+    try {
+      const { role } = req.body || {};
+      if (role !== "admin" && role !== "member") {
+        return res.status(400).json({ success: false, error: 'role must be "admin" or "member".' });
+      }
+      const membership = updateMembershipRole(req.params.userId, req.params.workspaceId, role);
+      if (!membership) {
+        return res.status(404).json({ success: false, error: "Membership not found." });
+      }
+      recordAdminAuditEvent({
+        actorUserId: (req as AuthedRequest).authUser!.user_id,
+        eventType: "MEMBERSHIP_ROLE_CHANGED",
+        targetType: "membership",
+        targetId: `${req.params.userId}:${req.params.workspaceId}`,
+        detail: { role },
+      });
+      return res.json({ success: true, membership });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to change membership role" });
+    }
+  });
+
+  // B4 — real removal. No "last owner" invariant exists in this schema
+  // (see lib/workspaces.ts removeMembership) — not invented here either.
+  app.delete("/api/master-admin/workspaces/:workspaceId/members/:userId", requirePlatformAdmin, (req, res) => {
+    try {
+      const removed = removeMembership(req.params.userId, req.params.workspaceId);
+      if (!removed) {
+        return res.status(404).json({ success: false, error: "Membership not found." });
+      }
+      recordAdminAuditEvent({
+        actorUserId: (req as AuthedRequest).authUser!.user_id,
+        eventType: "MEMBERSHIP_REMOVED",
+        targetType: "membership",
+        targetId: `${req.params.userId}:${req.params.workspaceId}`,
+      });
+      return res.json({ success: true });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to remove membership" });
+    }
+  });
+
+  // Real, platform-admin-only user directory (Pass III / D2, extended Pass IV).
   app.get("/api/master-admin/users", requirePlatformAdmin, (req, res) => {
     try {
       return res.json({ success: true, users: listUsers() });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to list users" });
+    }
+  });
+
+  // A3 — user detail, including real workspace memberships (with real
+  // workspace names, not just ids).
+  app.get("/api/master-admin/users/:userId", requirePlatformAdmin, (req, res) => {
+    try {
+      const user = getUserById(req.params.userId);
+      if (!user) {
+        return res.status(404).json({ success: false, error: "User not found." });
+      }
+      const memberships = listUserMembershipsWithWorkspaceNames(req.params.userId);
+      return res.json({ success: true, user, memberships });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to get user" });
+    }
+  });
+
+  // D2 — real admin-created account, no email sent (no mail infrastructure
+  // exists). Returns a one-time setup link the admin copies and delivers
+  // out of band — this is the ONLY moment the raw token is ever returned.
+  app.post("/api/master-admin/users", requirePlatformAdmin, (req, res) => {
+    try {
+      const { email, displayName, platformRole } = req.body || {};
+      if (!email || typeof email !== "string" || !email.includes("@")) {
+        return res.status(400).json({ success: false, error: "A valid email is required." });
+      }
+      if (!displayName || typeof displayName !== "string" || !displayName.trim()) {
+        return res.status(400).json({ success: false, error: "Display name is required." });
+      }
+      if (platformRole !== undefined && platformRole !== "platform_admin" && platformRole !== "standard") {
+        return res.status(400).json({ success: false, error: 'platformRole must be "platform_admin" or "standard".' });
+      }
+      const existing = listUsers().find((u) => u.email === email.trim().toLowerCase());
+      if (existing) {
+        return res.status(409).json({ success: false, error: "A user with this email already exists." });
+      }
+
+      const user = createPendingUser({ email, displayName: displayName.trim(), platformRole });
+      const { rawToken, expiresAt } = createSetupToken(user.user_id);
+
+      recordAdminAuditEvent({
+        actorUserId: (req as AuthedRequest).authUser!.user_id,
+        eventType: "USER_CREATED",
+        targetType: "user",
+        targetId: user.user_id,
+        detail: { email: user.email, platformRole: user.platform_role },
+      });
+      recordAdminAuditEvent({
+        actorUserId: (req as AuthedRequest).authUser!.user_id,
+        eventType: "SETUP_TOKEN_ISSUED",
+        targetType: "user",
+        targetId: user.user_id,
+      });
+
+      return res.json({ success: true, user, setupToken: rawToken, setupTokenExpiresAt: expiresAt });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to create user" });
     }
   });
 
@@ -4504,13 +4838,92 @@ sourceHash: ${packageMetadataResult.sourceHash}
       if (status !== "active" && status !== "disabled") {
         return res.status(400).json({ success: false, error: 'status must be "active" or "disabled".' });
       }
-      const user = setUserStatus(req.params.userId, status);
-      if (!user) {
+      const result = setUserStatus(req.params.userId, status);
+      if (!result) {
         return res.status(404).json({ success: false, error: "User not found." });
       }
-      return res.json({ success: true, user });
+      if (result.error) {
+        return res.status(409).json({ success: false, error: result.error });
+      }
+      recordAdminAuditEvent({
+        actorUserId: (req as AuthedRequest).authUser!.user_id,
+        eventType: status === "disabled" ? "USER_DISABLED" : "USER_ENABLED",
+        targetType: "user",
+        targetId: req.params.userId,
+      });
+      return res.json({ success: true, user: result.user });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to update user status" });
+    }
+  });
+
+  // A5 — real platform-role change. Guarded server-side against removing
+  // the last active platform_admin (lib/auth.ts setPlatformRole) — with no
+  // email/SSO recovery path in this codebase, that would be an
+  // unrecoverable lockout.
+  app.patch("/api/master-admin/users/:userId/platform-role", requirePlatformAdmin, (req, res) => {
+    try {
+      const { platformRole } = req.body || {};
+      if (platformRole !== "platform_admin" && platformRole !== "standard") {
+        return res.status(400).json({ success: false, error: 'platformRole must be "platform_admin" or "standard".' });
+      }
+      const result = setPlatformRole(req.params.userId, platformRole);
+      if (!result.success) {
+        return res.status(result.error === "User not found." ? 404 : 409).json({ success: false, error: result.error });
+      }
+      recordAdminAuditEvent({
+        actorUserId: (req as AuthedRequest).authUser!.user_id,
+        eventType: "PLATFORM_ROLE_CHANGED",
+        targetType: "user",
+        targetId: req.params.userId,
+        detail: { platformRole },
+      });
+      return res.json({ success: true, user: result.user });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to change platform role" });
+    }
+  });
+
+  // F2 — real recent admin activity, drawn only from admin_audit_events
+  // (never a fabricated/sample feed).
+  app.get("/api/master-admin/audit", requirePlatformAdmin, (req, res) => {
+    try {
+      const limitRaw = Number(req.query.limit);
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 50;
+      return res.json({ success: true, events: listRecentAdminAuditEvents(limit) });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to load audit log" });
+    }
+  });
+
+  // D3/D4 — public (the invited user has no session yet). Validates a real
+  // one-time setup token without requiring auth.
+  app.get("/api/auth/setup-token/:token", (req, res) => {
+    try {
+      const user = resolveSetupToken(req.params.token);
+      if (!user) {
+        return res.status(404).json({ success: false, error: "This setup link is invalid, already used, or has expired." });
+      }
+      return res.json({ success: true, email: user.email, displayName: user.display_name });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to validate setup link" });
+    }
+  });
+
+  app.post("/api/auth/setup-token/:token/complete", (req, res) => {
+    try {
+      const { password } = req.body || {};
+      if (!password || typeof password !== "string" || password.length < 10) {
+        return res.status(400).json({ success: false, error: "Password must be at least 10 characters." });
+      }
+      const result = completeSetup(req.params.token, password);
+      if (!result) {
+        return res.status(404).json({ success: false, error: "This setup link is invalid, already used, or has expired." });
+      }
+      setSessionCookie(res, result.rawSessionToken);
+      return res.json({ success: true, user: result.user, workspaces: listUserMembershipsWithWorkspaceNames(result.user.user_id) });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to complete setup" });
     }
   });
 

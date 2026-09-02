@@ -15,8 +15,10 @@ interface ApolloVoiceVisualizerProps {
   targetAgent?: string;
   guardianStatus?: 'PASS' | 'EVALUATING' | 'BLOCKED';
   aegisStatus?: 'VERIFIED' | 'PENDING' | 'SIGNING';
+  /** Real round-trip latency from the last /api/apollo/status poll — undefined until one has completed (D3/D6: no fabricated number). */
   latencyMs?: number;
-  connectionStatus?: 'CONNECTED' | 'RECONNECTING' | 'DISCONNECTED';
+  /** Real status string from /api/apollo/status (D3's vocabulary: NOT_CONFIGURED/HEALTHY/DEGRADED/UNAVAILABLE/PARTIAL), not a hardcoded default. */
+  connectionStatus?: string;
   currentTranscript?: string;
   assistantResponse?: string;
   activeTool?: string;
@@ -28,8 +30,8 @@ export const ApolloVoiceVisualizer: React.FC<ApolloVoiceVisualizerProps> = ({
   targetAgent = 'orchestrator',
   guardianStatus = 'PASS',
   aegisStatus = 'VERIFIED',
-  latencyMs = 42,
-  connectionStatus = 'CONNECTED',
+  latencyMs,
+  connectionStatus = 'LOADING',
   currentTranscript = '',
   assistantResponse = '',
   activeTool,
@@ -106,10 +108,17 @@ export const ApolloVoiceVisualizer: React.FC<ApolloVoiceVisualizerProps> = ({
         }}
       />
 
-      {/* Top Status & Telemetry Strip */}
+      {/* Top Status & Telemetry Strip — dot color and latency reflect the
+          real polled connectionStatus (D6: never a hardcoded "connected"
+          green indicator regardless of actual state). */}
       <div className="w-full flex flex-wrap items-center justify-between gap-3 text-[11px] z-10 border-b border-[#141628] pb-3">
         <div className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-[#00D26A] shadow-[0_0_8px_#00D26A]" />
+          <span className={`w-2 h-2 rounded-full ${
+            connectionStatus === 'HEALTHY' ? 'bg-[#00D26A] shadow-[0_0_8px_#00D26A]'
+            : connectionStatus === 'DEGRADED' || connectionStatus === 'PARTIAL' ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.6)]'
+            : connectionStatus === 'LOADING' ? 'bg-slate-500 animate-pulse'
+            : 'bg-[#FF5E8E] shadow-[0_0_8px_rgba(255,94,142,0.5)]'
+          }`} />
           <span className="text-white font-bold tracking-wider">APOLLO VOICE MATRIX</span>
           <span className="text-[#8E94B8]">/ {connectionStatus}</span>
         </div>
@@ -119,7 +128,7 @@ export const ApolloVoiceVisualizer: React.FC<ApolloVoiceVisualizerProps> = ({
             {config.label}
           </span>
           <span className="text-[10px] text-[#00D26A] bg-[#00D26A]/10 border border-[#00D26A]/30 px-2 py-0.5 rounded">
-            {latencyMs}ms
+            {typeof latencyMs === 'number' ? `${latencyMs}ms` : '—'}
           </span>
         </div>
       </div>

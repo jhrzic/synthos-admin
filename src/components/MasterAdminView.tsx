@@ -9,7 +9,7 @@ import {
   Sparkles, Check, ArrowRight, Play, ExternalLink, Sliders, 
   Lock, Key, HardDrive, Globe, Zap, Volume2, UserCheck, 
   Search, Eye, FileText, CheckSquare, BarChart3, AlertCircle,
-  Clock, GitMerge, FileCode, CheckCircle, Flame, HelpCircle
+  Clock, GitMerge, FileCode, CheckCircle, Flame, HelpCircle, Plus, Activity, Network
 } from 'lucide-react';
 import { synthosControl } from '../services/synthosControlService';
 import { speakText } from '../services/voiceEngine';
@@ -47,6 +47,8 @@ export type MasterAdminSection =
   | 'health'
   | 'audit'
   | 'backup'
+  | 'users'
+  | 'runtime'
   | 'walkthrough';
 
 interface LiveDiagnostics {
@@ -125,6 +127,12 @@ interface LiveDiagnostics {
     activeWorkers: number;
     cronEngine: string;
     notice: string;
+  };
+  /** Pass IV / N — real counts, omitted (not zero-filled) if the query fails. */
+  identity?: {
+    usersCount: number;
+    workspacesCount: number;
+    adminAuditEventsCount: number;
   };
 }
 
@@ -230,6 +238,291 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
     }
   };
 
+  // Pass IV — real user management (A) + second-user onboarding (D) + real
+  // membership management (B), all against the real, guarded
+  // /api/master-admin/* routes built in this and the prior pass.
+  interface AdminUserRow {
+    user_id: string;
+    email: string;
+    display_name: string;
+    platform_role: 'platform_admin' | 'standard';
+    status: 'active' | 'disabled' | 'setup_required';
+    created_at: string;
+    updated_at: string;
+  }
+  interface AdminMembershipRow {
+    user_id: string;
+    workspace_id: string;
+    workspace_name: string;
+    role: 'admin' | 'member';
+    status: string;
+    created_at: string;
+  }
+  interface AdminWorkspaceRow {
+    workspace_id: string;
+    name: string;
+    memberCount: number;
+    created_at: string;
+    updated_at: string;
+  }
+  interface AdminWorkspaceMemberRow {
+    user_id: string;
+    workspace_id: string;
+    role: 'admin' | 'member';
+    status: string;
+    email: string;
+    display_name: string;
+    created_at: string;
+  }
+
+  const [adminUsers, setAdminUsers] = useState<AdminUserRow[]>([]);
+  const [isLoadingUsers, setIsLoadingUsers] = useState(false);
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
+  const [selectedUserMemberships, setSelectedUserMemberships] = useState<AdminMembershipRow[]>([]);
+  const [adminWorkspaces, setAdminWorkspaces] = useState<AdminWorkspaceRow[]>([]);
+  const [userActionError, setUserActionError] = useState<string | null>(null);
+  const [userActionNotice, setUserActionNotice] = useState<string | null>(null);
+
+  const [showCreateUser, setShowCreateUser] = useState(false);
+  const [newUserEmail, setNewUserEmail] = useState('');
+  const [newUserName, setNewUserName] = useState('');
+  const [newUserIsAdmin, setNewUserIsAdmin] = useState(false);
+  const [creatingUser, setCreatingUser] = useState(false);
+  const [newSetupLink, setNewSetupLink] = useState<string | null>(null);
+
+  const [showAssignMembership, setShowAssignMembership] = useState(false);
+  const [assignWorkspaceId, setAssignWorkspaceId] = useState('');
+  const [assignRole, setAssignRole] = useState<'admin' | 'member'>('member');
+  const [showConfirmDisable, setShowConfirmDisable] = useState<AdminUserRow | null>(null);
+
+  const [workspaceMembers, setWorkspaceMembers] = useState<Record<string, AdminWorkspaceMemberRow[]>>({});
+
+  const fetchAdminUsers = useCallback(async () => {
+    setIsLoadingUsers(true);
+    try {
+      const res = await fetch('/api/master-admin/users');
+      const data = await res.json();
+      setAdminUsers(res.ok && data.success !== false ? (data.users || []) : []);
+    } catch {
+      setAdminUsers([]);
+    } finally {
+      setIsLoadingUsers(false);
+    }
+  }, []);
+
+  const fetchAdminWorkspaces = useCallback(async () => {
+    try {
+      const res = await fetch('/api/master-admin/workspaces');
+      const data = await res.json();
+      setAdminWorkspaces(res.ok && data.success !== false ? (data.workspaces || []) : []);
+    } catch {
+      setAdminWorkspaces([]);
+    }
+  }, []);
+
+  interface AdminAuditEventRow {
+    event_id: string;
+    actor_user_id: string;
+    event_type: string;
+    target_type: string;
+    target_id: string;
+    created_at: string;
+  }
+  const [adminAuditEvents, setAdminAuditEvents] = useState<AdminAuditEventRow[]>([]);
+  const [isLoadingAudit, setIsLoadingAudit] = useState(false);
+  const fetchAdminAudit = useCallback(async () => {
+    setIsLoadingAudit(true);
+    try {
+      const res = await fetch('/api/master-admin/audit?limit=20');
+      const data = await res.json();
+      setAdminAuditEvents(res.ok && data.success !== false ? (data.events || []) : []);
+    } catch {
+      setAdminAuditEvents([]);
+    } finally {
+      setIsLoadingAudit(false);
+    }
+  }, []);
+
+  // Pass V / G4 — real runtime-status aggregator + the runtime-event ledger.
+  interface RuntimeSystemRow {
+    system: string;
+    status: string;
+    evidenceSource: string;
+    lastCheck: string | null;
+    detail?: string;
+  }
+  interface RuntimeEventRow {
+    event_id: string;
+    event_type: string;
+    target_type: string;
+    target_id: string;
+    status: string;
+    latency_ms: number | null;
+    created_at: string;
+  }
+  const [runtimeSystems, setRuntimeSystems] = useState<RuntimeSystemRow[]>([]);
+  const [runtimeEvents, setRuntimeEvents] = useState<RuntimeEventRow[]>([]);
+  const [isLoadingRuntime, setIsLoadingRuntime] = useState(false);
+  const fetchRuntimeStatus = useCallback(async () => {
+    setIsLoadingRuntime(true);
+    try {
+      const [statusRes, eventsRes] = await Promise.all([
+        fetch('/api/master-admin/runtime-status'),
+        fetch('/api/master-admin/runtime-events?limit=20'),
+      ]);
+      const statusData = await statusRes.json();
+      const eventsData = await eventsRes.json();
+      setRuntimeSystems(statusRes.ok && statusData.success !== false ? (statusData.systems || []) : []);
+      setRuntimeEvents(eventsRes.ok && eventsData.success !== false ? (eventsData.events || []) : []);
+    } catch {
+      setRuntimeSystems([]);
+      setRuntimeEvents([]);
+    } finally {
+      setIsLoadingRuntime(false);
+    }
+  }, []);
+
+  const fetchUserDetail = async (userId: string) => {
+    setSelectedUserId(userId);
+    setUserActionError(null);
+    try {
+      const res = await fetch(`/api/master-admin/users/${encodeURIComponent(userId)}`);
+      const data = await res.json();
+      setSelectedUserMemberships(res.ok && data.success !== false ? (data.memberships || []) : []);
+    } catch {
+      setSelectedUserMemberships([]);
+    }
+  };
+
+  const showNotice = (msg: string) => {
+    setUserActionNotice(msg);
+    setTimeout(() => setUserActionNotice(null), 4000);
+  };
+
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCreatingUser(true);
+    setUserActionError(null);
+    try {
+      const res = await fetch('/api/master-admin/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: newUserEmail.trim(),
+          displayName: newUserName.trim(),
+          platformRole: newUserIsAdmin ? 'platform_admin' : 'standard',
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.success === false) {
+        setUserActionError(data.error || `HTTP ${res.status}`);
+        return;
+      }
+      const link = `${window.location.origin}/setup/${data.setupToken}`;
+      setNewSetupLink(link);
+      setNewUserEmail('');
+      setNewUserName('');
+      setNewUserIsAdmin(false);
+      fetchAdminUsers();
+    } catch (err: any) {
+      setUserActionError(err?.message || 'Network error.');
+    } finally {
+      setCreatingUser(false);
+    }
+  };
+
+  const handleToggleUserStatus = async (user: AdminUserRow, nextStatus: 'active' | 'disabled') => {
+    setUserActionError(null);
+    try {
+      const res = await fetch(`/api/master-admin/users/${encodeURIComponent(user.user_id)}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.success === false) {
+        setUserActionError(data.error || `HTTP ${res.status}`);
+        return;
+      }
+      showNotice(`${user.display_name} is now ${nextStatus}.`);
+      fetchAdminUsers();
+    } catch (err: any) {
+      setUserActionError(err?.message || 'Network error.');
+    } finally {
+      setShowConfirmDisable(null);
+    }
+  };
+
+  const handleChangePlatformRole = async (user: AdminUserRow, nextRole: 'platform_admin' | 'standard') => {
+    setUserActionError(null);
+    try {
+      const res = await fetch(`/api/master-admin/users/${encodeURIComponent(user.user_id)}/platform-role`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platformRole: nextRole }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.success === false) {
+        setUserActionError(data.error || `HTTP ${res.status}`);
+        return;
+      }
+      showNotice(`${user.display_name} is now ${nextRole === 'platform_admin' ? 'a platform administrator' : 'a standard user'}.`);
+      fetchAdminUsers();
+    } catch (err: any) {
+      setUserActionError(err?.message || 'Network error.');
+    }
+  };
+
+  const handleAssignMembership = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedUserId || !assignWorkspaceId) return;
+    try {
+      const res = await fetch(`/api/master-admin/workspaces/${encodeURIComponent(assignWorkspaceId)}/members`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: selectedUserId, role: assignRole }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.success === false) {
+        setUserActionError(data.error || `HTTP ${res.status}`);
+        return;
+      }
+      showNotice('Membership assigned.');
+      setShowAssignMembership(false);
+      setAssignWorkspaceId('');
+      fetchUserDetail(selectedUserId);
+    } catch (err: any) {
+      setUserActionError(err?.message || 'Network error.');
+    }
+  };
+
+  const handleChangeMembershipRole = async (workspaceId: string, role: 'admin' | 'member') => {
+    if (!selectedUserId) return;
+    try {
+      await fetch(`/api/master-admin/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(selectedUserId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role }),
+      });
+      fetchUserDetail(selectedUserId);
+    } catch {
+      setUserActionError('Network error changing membership role.');
+    }
+  };
+
+  const handleRemoveMembership = async (workspaceId: string) => {
+    if (!selectedUserId) return;
+    try {
+      await fetch(`/api/master-admin/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(selectedUserId)}`, {
+        method: 'DELETE',
+      });
+      showNotice('Membership removed.');
+      fetchUserDetail(selectedUserId);
+    } catch {
+      setUserActionError('Network error removing membership.');
+    }
+  };
+
   const normalizeMasterAdminSection = (subTab?: string): MasterAdminSection => {
     if (!subTab || subTab === 'overview' || subTab === 'master-admin') return 'overview';
 
@@ -249,6 +542,19 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
   useEffect(() => {
     setActiveSection(normalizeMasterAdminSection(initialSubTab));
   }, [initialSubTab]);
+
+  useEffect(() => {
+    if (activeSection === 'users') {
+      fetchAdminUsers();
+      fetchAdminWorkspaces();
+    }
+    if (activeSection === 'overview') {
+      fetchAdminAudit();
+    }
+    if (activeSection === 'runtime') {
+      fetchRuntimeStatus();
+    }
+  }, [activeSection, fetchAdminUsers, fetchAdminWorkspaces, fetchAdminAudit, fetchRuntimeStatus]);
 
   // Authoritative live diagnostics from server
   const [diagnostics, setDiagnostics] = useState<LiveDiagnostics | null>(null);
@@ -802,6 +1108,7 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
       <div className="flex items-center gap-1.5 overflow-x-auto pb-2 border-b border-[#181B34] scrollbar-none font-mono text-xs">
         {[
           { id: 'overview' as MasterAdminSection, label: 'Overview & Scorecard', icon: Sliders },
+          { id: 'users' as MasterAdminSection, label: 'Users', icon: UserCheck },
           { id: 'walkthrough' as MasterAdminSection, label: 'Setup Walkthrough (12 Steps)', icon: CheckSquare },
           { id: 'platform' as MasterAdminSection, label: 'Platform', icon: Server },
           { id: 'database' as MasterAdminSection, label: 'Database', icon: Database },
@@ -817,6 +1124,7 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
           { id: 'workers' as MasterAdminSection, label: 'Workers / Windmill', icon: Clock },
           { id: 'updates' as MasterAdminSection, label: 'Updates', icon: RefreshCw },
           { id: 'health' as MasterAdminSection, label: 'Health & Ping', icon: BarChart3 },
+          { id: 'runtime' as MasterAdminSection, label: 'Runtime', icon: Activity },
           { id: 'audit' as MasterAdminSection, label: 'Audit', icon: FileText },
           { id: 'backup' as MasterAdminSection, label: 'Backup & Restore', icon: HardDrive },
         ].map((tab) => {
@@ -856,7 +1164,24 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
               </span>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+              {/* Priority 0: real identity counts (Pass IV / N) */}
+              <div
+                onClick={() => setActiveSection('users')}
+                className="p-3.5 bg-[#080914] border border-[#21274A] hover:border-[#615EFF] rounded-xl cursor-pointer transition space-y-2 group"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-mono font-bold text-[#A5A2FF] bg-[#615EFF]/10 px-2 py-0.5 rounded">
+                    IDENTITY
+                  </span>
+                  <ArrowRight className="w-3.5 h-3.5 text-slate-400 group-hover:text-white transition-transform group-hover:translate-x-1" />
+                </div>
+                <p className="text-xs font-bold text-slate-200">
+                  {diagnostics?.identity ? `${diagnostics.identity.usersCount} user(s) · ${diagnostics.identity.workspacesCount} workspace(s)` : 'Users & Workspaces'}
+                </p>
+                <p className="text-[11px] text-slate-400">Manage real accounts and workspace memberships.</p>
+              </div>
+
               {/* Priority 1 */}
               <div 
                 onClick={() => setActiveSection('database')}
@@ -910,6 +1235,31 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
                 </p>
               </div>
             </div>
+          </div>
+
+          {/* F2 — real recent admin activity, drawn only from admin_audit_events. */}
+          <div className="bg-[#090A16] border border-[#1C203E] p-6 rounded-2xl space-y-3 shadow-xl">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-mono font-bold text-white flex items-center gap-2">
+                <FileText className="w-4 h-4 text-[#A5A2FF]" />
+                Recent Admin Activity
+              </h3>
+              <button onClick={fetchAdminAudit} className="text-[#8E94B8] hover:text-white cursor-pointer">
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingAudit ? 'animate-spin' : ''}`} />
+              </button>
+            </div>
+            {adminAuditEvents.length === 0 ? (
+              <p className="text-xs text-slate-500 font-mono">No admin activity has been recorded yet.</p>
+            ) : (
+              <div className="space-y-1.5 font-mono text-[11px] max-h-64 overflow-y-auto">
+                {adminAuditEvents.map((ev) => (
+                  <div key={ev.event_id} className="flex items-center justify-between p-2 bg-[#06070E] border border-[#181B30] rounded-lg">
+                    <span className="text-slate-300">{ev.event_type.replace(/_/g, ' ')} · <span className="text-slate-500">{ev.target_type}:{ev.target_id}</span></span>
+                    <span className="text-slate-500">{new Date(ev.created_at).toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Subsystem Readiness Matrix */}
@@ -1136,7 +1486,7 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 font-mono text-xs">
             <div className="p-4 bg-[#06070E] border border-[#1A1D34] rounded-xl space-y-2">
               <span className="text-[10px] text-slate-500 uppercase block">Node.js Version</span>
-              <p className="text-sm font-bold text-white">{diagnostics?.platform.nodeVersion || process.version}</p>
+              <p className="text-sm font-bold text-white">{diagnostics?.platform.nodeVersion || 'Loading…'}</p>
               <span className="text-[10px] text-slate-500 uppercase block pt-2">Container Port</span>
               <p className="text-sm font-bold text-[#00D26A]">3000 (0.0.0.0)</p>
             </div>
@@ -1351,6 +1701,40 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
                     </tr>
                   );
                 })}
+                {/* Pass V / H2 — Hermes MODEL and Hermes dedicated RUNTIME are
+                    architecturally different things (rule 1/9) and must never
+                    be shown as one combined "Hermes" row. */}
+                <tr className="hover:bg-[#0D0F22]/50 transition border-t-2 border-[#1A1D34]">
+                  <td className="py-3 font-bold text-white flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-slate-600" />
+                    Hermes MODEL (via OpenRouter alias)
+                  </td>
+                  <td className="py-3"><span className="text-slate-500">NOT CONFIGURED</span></td>
+                  <td className="py-3 text-slate-300">nousresearch/hermes-3-llama-3.1-405b</td>
+                  <td className="py-3"><span className="text-slate-600">UNSUPPORTED — no execution mapping wired (lib/model-router.ts)</span></td>
+                  <td className="py-3 text-right text-slate-600">N/A</td>
+                </tr>
+                <tr className="hover:bg-[#0D0F22]/50 transition">
+                  <td className="py-3 font-bold text-white flex items-center gap-2">
+                    <span className={`w-2 h-2 rounded-full ${diagnostics?.hermes?.status === 'UP' ? 'bg-[#00D26A]' : 'bg-slate-600'}`} />
+                    Hermes Dedicated Runtime (ADR-001)
+                  </td>
+                  <td className="py-3 text-slate-400">HERMES_ADAPTER_BASE_URL (see Live Status)</td>
+                  <td className="py-3 text-slate-300">N/A — not a model, a separate runtime service</td>
+                  <td className="py-3">
+                    <span className={diagnostics?.hermes?.status === 'UP' ? 'text-[#00D26A] font-bold' : 'text-slate-600'}>
+                      {diagnostics?.hermes?.status || 'NOT_CONNECTED'}
+                    </span>
+                  </td>
+                  <td className="py-3 text-right">
+                    <button
+                      onClick={() => onSelectTab('hermes')}
+                      className="px-2.5 py-1 rounded bg-[#161932] hover:bg-[#202446] text-[#38BDF8] border border-[#2B325E] font-bold transition cursor-pointer"
+                    >
+                      DETAILS
+                    </button>
+                  </td>
+                </tr>
               </tbody>
             </table>
           </div>
@@ -1495,33 +1879,34 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
             <div>
               <h2 className="text-lg font-bold text-white font-mono flex items-center gap-2">
                 <Terminal className="w-5 h-5 text-[#F59E0B]" />
-                Model Context Protocol (MCP) & Sandbox Tools
+                Model Context Protocol (MCP) Registry
               </h2>
               <p className="text-xs text-slate-400 mt-0.5">
-                Tool grant permissions, isolated execution sandboxes, and registered capabilities.
+                Real, persisted MCP-category skill entries only (Pass IV / I1). CONFIGURED is never shown as CONNECTED — no live connection probe exists in this deployment.
               </p>
             </div>
             <button
               onClick={() => onSelectTab('skill-registry')}
               className="px-3 py-1.5 bg-[#14172B] hover:bg-[#1C203C] text-xs font-mono font-bold text-white rounded-lg border border-[#282F52] flex items-center gap-1.5 cursor-pointer"
             >
-              Open Skill Registry <ExternalLink className="w-3.5 h-3.5" />
+              Add / Edit in Skill Registry <ExternalLink className="w-3.5 h-3.5" />
             </button>
           </div>
 
           <div className="space-y-3 font-mono text-xs">
-            {skills.length === 0 && (
+            {skills.filter((s) => s.category === 'mcp').length === 0 && (
               <div className="p-4 text-center text-slate-500 text-xs bg-[#06070E] border border-[#181B30] rounded-xl">
-                No skills are registered for this workspace.
+                No MCP servers are configured for this workspace.
               </div>
             )}
-            {skills.map((tool) => (
+            {skills.filter((s) => s.category === 'mcp').map((tool) => (
               <div key={tool.skill_id} className="p-3.5 bg-[#06070E] border border-[#181B30] rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-3">
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-bold text-white">{tool.name}</span>
-                    <span className="text-[10px] px-2 py-0.5 bg-[#615EFF]/20 text-[#A5A2FF] rounded font-bold">
-                      {tool.category}
+                    {/* I4: real schema scope — every skill (MCP included) is workspace-scoped; no platform-level skill concept exists. */}
+                    <span className="text-[10px] px-2 py-0.5 bg-[#0088CC]/20 text-[#0088CC] rounded font-bold">
+                      SCOPE: WORKSPACE
                     </span>
                     <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${tool.enabled ? 'bg-[#00D26A]/10 text-[#00D26A]' : 'bg-[#FF5E8E]/10 text-[#FF5E8E]'}`}>
                       {tool.enabled ? 'ENABLED' : 'DISABLED'}
@@ -1531,6 +1916,7 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
                 </div>
 
                 <div className="flex items-center gap-3 shrink-0">
+                  {/* I3: real status only — CONFIGURED/NOT_CONFIGURED/NOT_IMPLEMENTED, never CONNECTED without a real probe. */}
                   <span className="text-[#7E8BB5] font-bold text-[10px]">● {tool.status}</span>
                 </div>
               </div>
@@ -1838,6 +2224,97 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
       )}
 
       {/* SECTION 17: AUDIT */}
+      {/* Pass V / G4 — one small, truthful runtime-status panel. Not a
+          second diagnostics dashboard: this is the LEGEND vocabulary
+          (HEALTHY/DEGRADED/NOT_CONFIGURED/NOT_IMPLEMENTED/FAILED/UNKNOWN)
+          with a real evidence source per system, plus the real recent
+          runtime-event ledger (skill executions, MCP probes). */}
+      {activeSection === 'runtime' && (
+        <div className="bg-[#090A16] border border-[#1C203E] p-6 rounded-2xl space-y-6 shadow-xl">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#181B34] pb-4">
+            <div>
+              <h2 className="text-lg font-bold text-white font-mono flex items-center gap-2">
+                <Activity className="w-5 h-5 text-[#A5A2FF]" />
+                Runtime & Infrastructure Status
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Every row carries a real evidence source — configuration presence is never shown as healthy.
+              </p>
+            </div>
+            <button
+              onClick={fetchRuntimeStatus}
+              disabled={isLoadingRuntime}
+              className="px-3.5 py-1.5 bg-[#615EFF] hover:bg-[#524EFA] disabled:opacity-50 text-xs font-mono font-bold text-white rounded-lg flex items-center gap-1.5 cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isLoadingRuntime ? 'animate-spin' : ''}`} /> Refresh
+            </button>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left font-mono text-xs">
+              <thead>
+                <tr className="border-b border-[#1A1D34] text-slate-500 uppercase text-[10px]">
+                  <th className="pb-3">System</th>
+                  <th className="pb-3">Status</th>
+                  <th className="pb-3">Evidence</th>
+                  <th className="pb-3">Last Checked</th>
+                  <th className="pb-3">Detail</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#15172C]">
+                {runtimeSystems.map((s) => (
+                  <tr key={s.system} className="hover:bg-[#0D0F22]/50 transition">
+                    <td className="py-3 font-bold text-white">{s.system}</td>
+                    <td className="py-3">
+                      <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${
+                        s.status === 'HEALTHY' ? 'bg-[#00D26A]/15 text-[#00D26A]'
+                        : s.status === 'DEGRADED' ? 'bg-amber-400/15 text-amber-400'
+                        : s.status === 'FAILED' ? 'bg-[#FF5E8E]/15 text-[#FF5E8E]'
+                        : 'bg-[#7E8BB5]/15 text-[#7E8BB5]'
+                      }`}>
+                        {s.status}
+                      </span>
+                    </td>
+                    <td className="py-3 text-slate-400">{s.evidenceSource}</td>
+                    <td className="py-3 text-slate-500">{s.lastCheck ? new Date(s.lastCheck).toLocaleTimeString() : 'never'}</td>
+                    <td className="py-3 text-slate-400 max-w-md truncate" title={s.detail}>{s.detail}</td>
+                  </tr>
+                ))}
+                {runtimeSystems.length === 0 && !isLoadingRuntime && (
+                  <tr><td colSpan={5} className="py-6 text-center text-slate-500">No runtime status data yet.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="pt-4 border-t border-[#181B34] space-y-3">
+            <h3 className="text-xs font-bold text-white font-mono flex items-center gap-1.5">
+              <Network className="w-3.5 h-3.5 text-[#38BDF8]" /> Recent Runtime Events
+            </h3>
+            {runtimeEvents.length === 0 ? (
+              <p className="text-[11px] text-slate-500">No runtime events have been recorded yet.</p>
+            ) : (
+              <div className="space-y-1.5">
+                {runtimeEvents.map((ev) => (
+                  <div key={ev.event_id} className="flex items-center justify-between p-2.5 bg-[#06070E] border border-[#181B30] rounded-lg text-[11px]">
+                    <span className="text-slate-300">
+                      {ev.event_type} · {ev.target_type}:{ev.target_id}
+                    </span>
+                    <span className="flex items-center gap-2">
+                      <span className={ev.status === 'SUCCESS' ? 'text-[#00D26A]' : ev.status === 'FAILED' ? 'text-[#FF5E8E]' : 'text-[#7E8BB5]'}>
+                        {ev.status}
+                      </span>
+                      {ev.latency_ms !== null && <span className="text-slate-500">{ev.latency_ms}ms</span>}
+                      <span className="text-slate-600">{new Date(ev.created_at).toLocaleTimeString()}</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {activeSection === 'audit' && (
         <div className="bg-[#090A16] border border-[#1C203E] p-6 rounded-2xl space-y-6 shadow-xl">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#181B34] pb-4">
@@ -1992,6 +2469,277 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Pass IV — real user management, second-user onboarding, membership control */}
+      {activeSection === 'users' && (
+        <div className="bg-[#090A16] border border-[#1C203E] p-6 rounded-2xl space-y-6 shadow-xl">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#181B34] pb-4">
+            <div>
+              <h2 className="text-lg font-bold text-white font-mono flex items-center gap-2">
+                <UserCheck className="w-5 h-5 text-[#615EFF]" />
+                Users
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Real accounts, real sessions, real workspace memberships. No email is sent — onboarding uses a one-time setup link you deliver yourself.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => { fetchAdminUsers(); fetchAdminWorkspaces(); }}
+                className="p-2 bg-[#14172B] hover:bg-[#1C203C] text-white rounded-lg border border-[#282F52] cursor-pointer"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingUsers ? 'animate-spin' : ''}`} />
+              </button>
+              <button
+                onClick={() => { setShowCreateUser(true); setNewSetupLink(null); setUserActionError(null); }}
+                className="px-3.5 py-1.5 bg-[#615EFF] hover:bg-[#524EFA] text-xs font-mono font-bold text-white rounded-lg flex items-center gap-1.5 cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5" /> Create User
+              </button>
+            </div>
+          </div>
+
+          {userActionNotice && (
+            <div className="p-3 bg-[#00D26A]/10 border border-[#00D26A]/30 rounded-xl text-xs text-[#00D26A] font-mono">{userActionNotice}</div>
+          )}
+          {userActionError && (
+            <div className="p-3 bg-[#FF5E8E]/10 border border-[#FF5E8E]/30 rounded-xl text-xs text-[#FF5E8E] font-mono">{userActionError}</div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+            {/* A2: real user list */}
+            <div className="lg:col-span-2 space-y-2 max-h-[560px] overflow-y-auto pr-1">
+              {isLoadingUsers ? (
+                <div className="text-xs text-slate-500 text-center py-8 font-mono">Loading…</div>
+              ) : adminUsers.length === 0 ? (
+                <div className="text-xs text-slate-500 text-center py-8 font-mono bg-[#06070E] border border-[#181B30] rounded-xl">No users exist yet.</div>
+              ) : (
+                adminUsers.map((u) => {
+                  const isSelected = u.user_id === selectedUserId;
+                  const statusColor = u.status === 'active' ? '#00D26A' : u.status === 'setup_required' ? '#F59E0B' : '#FF5E8E';
+                  return (
+                    <div
+                      key={u.user_id}
+                      onClick={() => fetchUserDetail(u.user_id)}
+                      className={`p-3 rounded-xl border cursor-pointer font-mono transition ${isSelected ? 'bg-[#121424] border-[#615EFF]' : 'bg-[#06070E] border-[#181B30] hover:border-[#282F52]'}`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-bold text-white truncate">{u.display_name}</span>
+                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded" style={{ backgroundColor: `${statusColor}20`, color: statusColor }}>
+                          {u.status.toUpperCase()}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-slate-500 truncate">{u.email}</p>
+                      {u.platform_role === 'platform_admin' && (
+                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-[#615EFF]/20 text-[#A5A2FF] inline-block mt-1">PLATFORM ADMIN</span>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* A3/A4/A5/B1-B4: real user detail */}
+            <div className="lg:col-span-3">
+              {!selectedUserId ? (
+                <div className="text-xs text-slate-500 text-center py-16 font-mono bg-[#06070E] border border-[#181B30] rounded-xl">
+                  Select a user to inspect identity, status, platform role, and workspace memberships.
+                </div>
+              ) : (() => {
+                const u = adminUsers.find((x) => x.user_id === selectedUserId);
+                if (!u) return null;
+                return (
+                  <div className="bg-[#06070E] border border-[#181B30] rounded-xl p-4 space-y-4 font-mono">
+                    <div className="border-b border-[#181B30] pb-3">
+                      <h3 className="text-sm font-bold text-white">{u.display_name}</h3>
+                      <p className="text-xs text-slate-400">{u.email}</p>
+                      <p className="text-[10px] text-slate-500 mt-1">Created {new Date(u.created_at).toLocaleString()}</p>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 text-xs">
+                      <div className="bg-[#0B0D1B] p-2.5 rounded-lg border border-[#1A1E36]">
+                        <span className="text-[10px] text-slate-500 block">Status</span>
+                        <span className="text-white font-bold">{u.status}</span>
+                      </div>
+                      <div className="bg-[#0B0D1B] p-2.5 rounded-lg border border-[#1A1E36]">
+                        <span className="text-[10px] text-slate-500 block">Platform Role</span>
+                        <span className="text-white font-bold">{u.platform_role}</span>
+                      </div>
+                    </div>
+
+                    {/* A4: enable/disable with explicit confirmation for disabling */}
+                    <div className="flex flex-wrap items-center gap-2">
+                      {u.status === 'active' ? (
+                        <button onClick={() => setShowConfirmDisable(u)} className="px-3 py-1.5 bg-[#FF5E8E]/15 hover:bg-[#FF5E8E]/25 text-[#FF5E8E] rounded-lg border border-[#FF5E8E]/30 text-[11px] cursor-pointer">
+                          Disable User
+                        </button>
+                      ) : u.status === 'disabled' ? (
+                        <button onClick={() => handleToggleUserStatus(u, 'active')} className="px-3 py-1.5 bg-[#00D26A]/15 hover:bg-[#00D26A]/25 text-[#00D26A] rounded-lg border border-[#00D26A]/30 text-[11px] cursor-pointer">
+                          Enable User
+                        </button>
+                      ) : (
+                        <span className="text-[10px] text-[#F59E0B]">Awaiting first login via setup link.</span>
+                      )}
+
+                      {/* A5: platform role, server-guarded against last-admin lockout */}
+                      {u.platform_role === 'standard' ? (
+                        <button onClick={() => handleChangePlatformRole(u, 'platform_admin')} className="px-3 py-1.5 bg-[#615EFF]/15 hover:bg-[#615EFF]/25 text-[#A5A2FF] rounded-lg border border-[#615EFF]/30 text-[11px] cursor-pointer">
+                          Grant Platform Admin
+                        </button>
+                      ) : (
+                        <button onClick={() => handleChangePlatformRole(u, 'standard')} className="px-3 py-1.5 bg-[#14172B] hover:bg-[#1C203C] text-slate-300 rounded-lg border border-[#282F52] text-[11px] cursor-pointer">
+                          Revoke Platform Admin
+                        </button>
+                      )}
+                    </div>
+
+                    {/* B1: real workspace memberships for this user */}
+                    <div className="border-t border-[#181B30] pt-3 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-white">Workspace Memberships</span>
+                        <button onClick={() => setShowAssignMembership(true)} className="text-[10px] text-[#A5A2FF] hover:underline cursor-pointer">+ Assign to workspace</button>
+                      </div>
+                      {selectedUserMemberships.length === 0 ? (
+                        <p className="text-[11px] text-slate-500">No workspace memberships.</p>
+                      ) : (
+                        selectedUserMemberships.map((m) => (
+                          <div key={m.workspace_id} className="flex items-center justify-between bg-[#0B0D1B] p-2.5 rounded-lg border border-[#1A1E36] text-[11px]">
+                            <div>
+                              <span className="text-white font-bold">{m.workspace_name}</span>
+                              <span className="text-slate-500 ml-2">{m.workspace_id}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <select
+                                value={m.role}
+                                onChange={(e) => handleChangeMembershipRole(m.workspace_id, e.target.value as 'admin' | 'member')}
+                                className="bg-[#141628] border border-[#282F52] rounded px-1.5 py-0.5 text-[10px] text-white"
+                              >
+                                <option value="member">member</option>
+                                <option value="admin">admin</option>
+                              </select>
+                              <button onClick={() => handleRemoveMembership(m.workspace_id)} className="text-[#FF5E8E] hover:underline cursor-pointer">Remove</button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* D2/D3: create user modal — real one-time setup link, never a fake "invitation sent" claim */}
+      {showCreateUser && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#0F111E] border border-[#2D3352] rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 font-mono">
+            {!newSetupLink ? (
+              <>
+                <div className="flex items-center justify-between border-b border-[#2D3352] pb-3">
+                  <h3 className="text-sm font-bold text-white">Create User</h3>
+                  <button onClick={() => setShowCreateUser(false)} className="text-slate-400 hover:text-white cursor-pointer">✕</button>
+                </div>
+                <form onSubmit={handleCreateUser} className="space-y-3">
+                  <div>
+                    <label className="text-[11px] text-slate-400 uppercase block mb-1">Display Name</label>
+                    <input type="text" required value={newUserName} onChange={(e) => setNewUserName(e.target.value)} className="w-full bg-[#141628] border border-[#2D3352] rounded-lg px-3 py-2 text-xs text-white" />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-slate-400 uppercase block mb-1">Email</label>
+                    <input type="email" required value={newUserEmail} onChange={(e) => setNewUserEmail(e.target.value)} className="w-full bg-[#141628] border border-[#2D3352] rounded-lg px-3 py-2 text-xs text-white" />
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-slate-300">
+                    <input type="checkbox" checked={newUserIsAdmin} onChange={(e) => setNewUserIsAdmin(e.target.checked)} />
+                    Grant platform administrator role
+                  </label>
+                  <p className="text-[10px] text-slate-500">No email will be sent. You'll get a one-time setup link to copy and deliver yourself.</p>
+                  <div className="flex gap-2 pt-2">
+                    <button type="button" onClick={() => setShowCreateUser(false)} className="flex-1 py-2 rounded-xl bg-[#141628] border border-[#2D3352] text-xs font-bold text-slate-300 cursor-pointer">Cancel</button>
+                    <button type="submit" disabled={creatingUser} className="flex-1 py-2 rounded-xl bg-[#615EFF] hover:bg-[#5653D9] disabled:opacity-50 text-xs font-bold text-white cursor-pointer">
+                      {creatingUser ? 'Creating…' : 'Create'}
+                    </button>
+                  </div>
+                </form>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-2 text-[#00D26A]">
+                  <CheckCircle2 className="w-5 h-5" />
+                  <h3 className="text-sm font-bold">User Created</h3>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Copy this one-time setup link and send it to the user yourself (email, Slack, etc.) — it will not be shown again and expires in 24 hours.
+                </p>
+                <div className="bg-[#06070E] border border-[#181B30] rounded-lg p-3 text-[11px] text-[#A5A2FF] break-all select-all">
+                  {newSetupLink}
+                </div>
+                <button
+                  onClick={() => { navigator.clipboard?.writeText(newSetupLink); }}
+                  className="w-full py-2 rounded-xl bg-[#141628] border border-[#2D3352] text-xs font-bold text-white cursor-pointer"
+                >
+                  Copy Link
+                </button>
+                <button onClick={() => setShowCreateUser(false)} className="w-full py-2 rounded-xl bg-[#615EFF] hover:bg-[#5653D9] text-xs font-bold text-white cursor-pointer">
+                  Done
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* B2: assign membership modal */}
+      {showAssignMembership && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#0F111E] border border-[#2D3352] rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 font-mono">
+            <div className="flex items-center justify-between border-b border-[#2D3352] pb-3">
+              <h3 className="text-sm font-bold text-white">Assign to Workspace</h3>
+              <button onClick={() => setShowAssignMembership(false)} className="text-slate-400 hover:text-white cursor-pointer">✕</button>
+            </div>
+            <form onSubmit={handleAssignMembership} className="space-y-3">
+              <div>
+                <label className="text-[11px] text-slate-400 uppercase block mb-1">Workspace</label>
+                <select required value={assignWorkspaceId} onChange={(e) => setAssignWorkspaceId(e.target.value)} className="w-full bg-[#141628] border border-[#2D3352] rounded-lg px-3 py-2 text-xs text-white">
+                  <option value="">Select a workspace…</option>
+                  {adminWorkspaces.map((w) => <option key={w.workspace_id} value={w.workspace_id}>{w.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="text-[11px] text-slate-400 uppercase block mb-1">Role</label>
+                <select value={assignRole} onChange={(e) => setAssignRole(e.target.value as 'admin' | 'member')} className="w-full bg-[#141628] border border-[#2D3352] rounded-lg px-3 py-2 text-xs text-white">
+                  <option value="member">member</option>
+                  <option value="admin">admin</option>
+                </select>
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button type="button" onClick={() => setShowAssignMembership(false)} className="flex-1 py-2 rounded-xl bg-[#141628] border border-[#2D3352] text-xs font-bold text-slate-300 cursor-pointer">Cancel</button>
+                <button type="submit" className="flex-1 py-2 rounded-xl bg-[#615EFF] hover:bg-[#5653D9] text-xs font-bold text-white cursor-pointer">Assign</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* A4: explicit confirmation before disabling */}
+      {showConfirmDisable && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#0F111E] border border-[#FF5E8E]/40 rounded-2xl max-w-sm w-full p-6 shadow-2xl space-y-4 font-mono">
+            <div className="flex items-center gap-2 text-[#FF5E8E]">
+              <AlertTriangle className="w-5 h-5" />
+              <h3 className="text-sm font-bold">Disable {showConfirmDisable.display_name}?</h3>
+            </div>
+            <p className="text-xs text-slate-400">
+              This immediately blocks future logins and revokes any authorization this account currently has. Existing sessions are rejected on their next request.
+            </p>
+            <div className="flex gap-2">
+              <button onClick={() => setShowConfirmDisable(null)} className="flex-1 py-2 rounded-xl bg-[#141628] border border-[#2D3352] text-xs font-bold text-slate-300 cursor-pointer">Cancel</button>
+              <button onClick={() => handleToggleUserStatus(showConfirmDisable, 'disabled')} className="flex-1 py-2 rounded-xl bg-[#FF5E8E] text-xs font-bold text-black cursor-pointer">Disable</button>
+            </div>
+          </div>
         </div>
       )}
     </div>

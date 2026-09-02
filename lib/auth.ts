@@ -26,7 +26,7 @@ export interface UserRecord {
   email: string;
   display_name: string;
   platform_role: 'platform_admin' | 'standard';
-  status: 'active' | 'disabled';
+  status: 'active' | 'disabled' | 'setup_required';
   created_at: string;
   updated_at: string;
 }
@@ -101,6 +101,109 @@ export function createUser(params: {
   return { user_id: userId, email: normalizedEmail, display_name: params.displayName, platform_role: params.platformRole || 'standard', status: 'active', created_at: now, updated_at: now };
 }
 
+/**
+ * Admin-created account, awaiting first login (Pass IV / D2). No email is
+ * ever sent — this codebase has no mail infrastructure. The account gets a
+ * real password hash of a random, internally-generated, immediately
+ * discarded string (never the empty string, never a guessable default) —
+ * login is cryptographically impossible until the recipient completes
+ * setup via a real one-time token (see createSetupToken). Status
+ * 'setup_required' keeps it out of both `login()` and `resolveSessionUser`
+ * (both already reject any non-'active' status).
+ */
+export function createPendingUser(params: {
+  email: string;
+  displayName: string;
+  platformRole?: 'platform_admin' | 'standard';
+}): UserRecord {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  const userId = `user-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+  const unguessablePlaceholder = crypto.randomBytes(32).toString('hex');
+  const { hash, salt } = hashPassword(unguessablePlaceholder);
+  const normalizedEmail = params.email.trim().toLowerCase();
+
+  db.prepare(`
+    INSERT INTO users (user_id, email, display_name, password_hash, password_salt, platform_role, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'setup_required', ?, ?)
+  `).run(userId, normalizedEmail, params.displayName, hash, salt, params.platformRole || 'standard', now, now);
+
+  return { user_id: userId, email: normalizedEmail, display_name: params.displayName, platform_role: params.platformRole || 'standard', status: 'setup_required', created_at: now, updated_at: now };
+}
+
+const SETUP_TOKEN_TTL_MS = 1000 * 60 * 60 * 24; // 24 hours
+
+export interface SetupTokenResult {
+  rawToken: string;
+  expiresAt: string;
+}
+
+/** Creates a real one-time setup token. The raw value is returned exactly once — only its hash is ever stored. */
+export function createSetupToken(userId: string): SetupTokenResult {
+  const db = getDatabase();
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const expiresAt = new Date(now.getTime() + SETUP_TOKEN_TTL_MS).toISOString();
+  const rawToken = crypto.randomBytes(SESSION_TOKEN_BYTES).toString('hex');
+  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  const tokenId = `setup-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+
+  db.prepare(`
+    INSERT INTO setup_tokens (token_id, user_id, token_hash, created_at, expires_at, used_at, revoked_at)
+    VALUES (?, ?, ?, ?, ?, NULL, NULL)
+  `).run(tokenId, userId, tokenHash, nowIso, expiresAt);
+
+  return { rawToken, expiresAt };
+}
+
+interface SetupTokenRow {
+  token_id: string;
+  user_id: string;
+  expires_at: string;
+  used_at: string | null;
+  revoked_at: string | null;
+}
+
+/** Real validation: exists, unused, unrevoked, unexpired. Returns the associated (still setup_required) user, or null. */
+export function resolveSetupToken(rawToken: string | undefined | null): UserRecord | null {
+  if (!rawToken) return null;
+  const db = getDatabase();
+  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  const token = db.prepare('SELECT * FROM setup_tokens WHERE token_hash = ?').get(tokenHash) as SetupTokenRow | undefined;
+  if (!token) return null;
+  if (token.used_at || token.revoked_at) return null;
+  if (new Date(token.expires_at).getTime() <= Date.now()) return null;
+
+  const user = getUserById(token.user_id);
+  if (!user || user.status !== 'setup_required') return null;
+  return user;
+}
+
+/**
+ * Completes onboarding: sets a real password, activates the account, marks
+ * the token used (single-use, enforced at read time above too), and logs
+ * the user in immediately (D4: "user completes password setup -> user
+ * logs in" is one step). Returns null if the token is invalid for any
+ * reason — never partially applies a setup.
+ */
+export function completeSetup(rawToken: string, password: string): { user: UserRecord; rawSessionToken: string; session: SessionRecord } | null {
+  const user = resolveSetupToken(rawToken);
+  if (!user) return null;
+
+  const db = getDatabase();
+  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  const now = new Date().toISOString();
+  const { hash, salt } = hashPassword(password);
+
+  db.prepare('UPDATE users SET password_hash = ?, password_salt = ?, status = ?, updated_at = ? WHERE user_id = ?')
+    .run(hash, salt, 'active', now, user.user_id);
+  db.prepare('UPDATE setup_tokens SET used_at = ? WHERE token_hash = ?').run(now, tokenHash);
+
+  const loginResult = login(user.email, password);
+  if (!loginResult) return null; // should be unreachable — password was just set
+  return { user: loginResult.user, rawSessionToken: loginResult.rawToken, session: loginResult.session };
+}
+
 export function getUserByEmail(email: string): UserRow | null {
   const db = getDatabase();
   const row = db.prepare('SELECT * FROM users WHERE email = ?').get(email.trim().toLowerCase()) as UserRow | undefined;
@@ -119,11 +222,60 @@ export function listUsers(): UserRecord[] {
   return rows.map(toUserRecord);
 }
 
-export function setUserStatus(userId: string, status: 'active' | 'disabled'): UserRecord | null {
+/**
+ * Returns null if the user doesn't exist, or an object with `error` set if
+ * disabling would remove the last active platform_admin (same
+ * unrecoverable-lockout risk as demoting the last admin — see
+ * setPlatformRole). Enabling a user never has this restriction.
+ */
+export function setUserStatus(userId: string, status: 'active' | 'disabled'): { user?: UserRecord; error?: string } | null {
+  const user = getUserById(userId);
+  if (!user) return null;
+
+  if (status === 'disabled' && user.platform_role === 'platform_admin' && user.status === 'active' && countActivePlatformAdmins() <= 1) {
+    return { error: 'Cannot disable the last active platform administrator.' };
+  }
+
   const db = getDatabase();
   const now = new Date().toISOString();
   db.prepare('UPDATE users SET status = ?, updated_at = ? WHERE user_id = ?').run(status, now, userId);
-  return getUserById(userId);
+  return { user: getUserById(userId)! };
+}
+
+/** How many active platform_admin accounts currently exist — used to guard the last-admin invariant. */
+export function countActivePlatformAdmins(): number {
+  const db = getDatabase();
+  const row = db.prepare("SELECT COUNT(*) AS n FROM users WHERE platform_role = 'platform_admin' AND status = 'active'").get() as { n: number };
+  return row.n;
+}
+
+export interface RoleChangeResult {
+  success: boolean;
+  user?: UserRecord;
+  error?: string;
+}
+
+/**
+ * Changes a user's platform role. Refuses (rather than silently allowing)
+ * any change that would leave zero active platform_admin accounts — with
+ * no email/SSO recovery path in this codebase, that would be an
+ * unrecoverable lockout, not just an inconvenience.
+ */
+export function setPlatformRole(userId: string, role: 'platform_admin' | 'standard'): RoleChangeResult {
+  const user = getUserById(userId);
+  if (!user) return { success: false, error: 'User not found.' };
+  if (user.platform_role === role) return { success: true, user };
+
+  if (user.platform_role === 'platform_admin' && role === 'standard') {
+    if (user.status === 'active' && countActivePlatformAdmins() <= 1) {
+      return { success: false, error: 'Cannot remove the last active platform administrator.' };
+    }
+  }
+
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  db.prepare('UPDATE users SET platform_role = ?, updated_at = ? WHERE user_id = ?').run(role, now, userId);
+  return { success: true, user: getUserById(userId)! };
 }
 
 /**

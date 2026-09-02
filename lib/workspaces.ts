@@ -93,3 +93,74 @@ export function countWorkspaceMembers(workspaceId: string): number {
   const row = db.prepare("SELECT COUNT(*) AS n FROM workspace_memberships WHERE workspace_id = ? AND status = 'active'").get(workspaceId) as { n: number };
   return row.n;
 }
+
+/**
+ * Real per-workspace activity counts (Pass IV / C3) — cheap because `tasks`
+ * and `graphs` already carry a real `workspace_id` column (lib/persistence.ts),
+ * so this is a plain indexed COUNT, not new architecture. Deliberately does
+ * NOT include a vault/note count: the Obsidian vault is filesystem-scoped,
+ * not workspace-scoped in the DB, and faking that mapping would be worse
+ * than omitting it (C3's own instruction: only if cheap and real).
+ */
+export function getWorkspaceActivityCounts(workspaceId: string): { taskCount: number; graphCount: number } {
+  const db = getDatabase();
+  const tasks = db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE workspace_id = ?').get(workspaceId) as { n: number };
+  const graphs = db.prepare('SELECT COUNT(*) AS n FROM graphs WHERE workspace_id = ?').get(workspaceId) as { n: number };
+  return { taskCount: tasks.n, graphCount: graphs.n };
+}
+
+/**
+ * Real removal (a hard DELETE, not a soft "disabled" status) — B4. No
+ * "last owner" invariant exists in this schema (there is no `owner` role
+ * distinct from `admin`, and a workspace left with zero members is
+ * recoverable by any platform_admin re-granting membership — unlike the
+ * last-platform-admin case in lib/auth.ts, which has no recovery path at
+ * all). Per B4's own instruction not to invent an invariant that doesn't
+ * exist: this is reported as current behavior, not silently guarded.
+ */
+export function removeMembership(userId: string, workspaceId: string): boolean {
+  const db = getDatabase();
+  const result = db.prepare('DELETE FROM workspace_memberships WHERE user_id = ? AND workspace_id = ?').run(userId, workspaceId);
+  return (result as any).changes > 0;
+}
+
+export function updateMembershipRole(userId: string, workspaceId: string, role: WorkspaceRole): MembershipRecord | null {
+  const existing = getMembership(userId, workspaceId);
+  if (!existing) return null;
+  const db = getDatabase();
+  db.prepare('UPDATE workspace_memberships SET role = ? WHERE user_id = ? AND workspace_id = ?').run(role, userId, workspaceId);
+  return { ...existing, role };
+}
+
+export interface MembershipWithWorkspaceName extends MembershipRecord {
+  workspace_name: string;
+}
+
+/** listUserMemberships, enriched with the real workspace name — needed anywhere a human-readable switcher/list is shown, not just raw ids. */
+export function listUserMembershipsWithWorkspaceNames(userId: string): MembershipWithWorkspaceName[] {
+  const db = getDatabase();
+  return db.prepare(`
+    SELECT m.*, w.name AS workspace_name
+    FROM workspace_memberships m
+    JOIN workspaces w ON w.workspace_id = m.workspace_id
+    WHERE m.user_id = ? AND m.status = 'active'
+    ORDER BY m.created_at ASC
+  `).all(userId) as MembershipWithWorkspaceName[];
+}
+
+export interface MembershipWithUserInfo extends MembershipRecord {
+  email: string;
+  display_name: string;
+}
+
+/** listWorkspaceMembers, enriched with the real user's email/display name — needed for a workspace detail panel, not just raw user_ids. */
+export function listWorkspaceMembersWithUserInfo(workspaceId: string): MembershipWithUserInfo[] {
+  const db = getDatabase();
+  return db.prepare(`
+    SELECT m.*, u.email AS email, u.display_name AS display_name
+    FROM workspace_memberships m
+    JOIN users u ON u.user_id = m.user_id
+    WHERE m.workspace_id = ?
+    ORDER BY m.created_at ASC
+  `).all(workspaceId) as MembershipWithUserInfo[];
+}

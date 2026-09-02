@@ -48,6 +48,36 @@ export const ApolloVoiceView: React.FC<ApolloVoiceViewProps> = ({
   const [bargeInEnabled, setBargeInEnabled] = useState(true);
   const [interruptionActive, setInterruptionActive] = useState(false);
   const [autoExecute, setAutoExecute] = useState(true);
+
+  // Pass V / D6, N — real Apollo status, polled from the server (which
+  // itself derives status from a real hermesAdapter.health() call — see
+  // /api/apollo/status). Previously these were hardcoded ("CONNECTED",
+  // latencyMs={38}) regardless of whether anything was actually reachable.
+  const [apolloStatus, setApolloStatus] = useState<string>('LOADING');
+  const [apolloLatencyMs, setApolloLatencyMs] = useState<number | null>(null);
+  const [bargeInReallyAvailable, setBargeInReallyAvailable] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetchStatus = async () => {
+      const startedAt = performance.now();
+      try {
+        const res = await fetch('/api/apollo/status');
+        const data = await res.json();
+        if (cancelled) return;
+        setApolloStatus(data.status || 'UNKNOWN');
+        setApolloLatencyMs(Math.round(performance.now() - startedAt));
+        setBargeInReallyAvailable(Boolean(data.bargeInEnabled));
+      } catch {
+        if (cancelled) return;
+        setApolloStatus('UNAVAILABLE');
+        setApolloLatencyMs(null);
+      }
+    };
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 15000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
   
   // Realtime Parsing State
   const [parsedTarget, setParsedTarget] = useState<string>('orchestrator');
@@ -96,8 +126,11 @@ export const ApolloVoiceView: React.FC<ApolloVoiceViewProps> = ({
 
   // Speaks actual system state (TTS)
   const speakSystemResponse = async (text: string) => {
-    if (isSpeaking && bargeInEnabled) {
-      console.log('Interrupted active speaking via Apollo full-duplex barge-in.');
+    // D5/N — this visual flash previously fired for ANY isSpeaking+toggle
+    // state, including when bargeInReallyAvailable is false (no real Fish
+    // Audio connection to actually interrupt) — a UI animation with no
+    // underlying capability. It's now gated on the real capability check.
+    if (isSpeaking && bargeInEnabled && bargeInReallyAvailable) {
       setInterruptionActive(true);
       setTimeout(() => setInterruptionActive(false), 800);
     }
@@ -175,53 +208,66 @@ export const ApolloVoiceView: React.FC<ApolloVoiceViewProps> = ({
 
     setCreatedTaskId(taskId);
 
-    // Give visual delay to simulate the pipeline dispatch
-    setTimeout(async () => {
-      setGuardianStatus('PASS');
-      setVoiceState('TOOL_RUNNING');
-      setActiveTool('hermes_sandbox_tool');
-      
-      const spokenResponse = `Apollo voice request registered in Triage. Assigned to Agent ${targetAgent.toUpperCase()}. Pre-execution Guardian evaluation verified.`;
-      setAudioLogs(prev => [...prev, {
-        id: `sys-${Date.now()}`,
-        sender: 'system',
-        text: spokenResponse,
-        timestamp: new Date().toLocaleTimeString()
-      }]);
+    // N — this previously claimed "Pre-execution Guardian evaluation
+    // verified" and, later, unconditionally "VERIFIED"/"signed by Aegis"
+    // regardless of whether the real execution below actually succeeded.
+    // No Guardian/Aegis evaluation runs client-side at all — the real
+    // deterministic verification happens server-side, inside
+    // onExecuteTask's call to /api/execute-agent-task. What's shown here
+    // now reflects that call's real outcome, not a fixed-duration mime.
+    setGuardianStatus('PASS'); // real: task creation itself succeeded (no client-side gate exists to fail here)
+    setVoiceState('TOOL_RUNNING');
+    setActiveTool('hermes_sandbox_tool');
 
-      await speakSystemResponse(spokenResponse);
+    const dispatchedResponse = `Apollo voice request registered in Triage and assigned to Agent ${targetAgent.toUpperCase()}.`;
+    setAudioLogs(prev => [...prev, {
+      id: `sys-${Date.now()}`,
+      sender: 'system',
+      text: dispatchedResponse,
+      timestamp: new Date().toLocaleTimeString()
+    }]);
+    await speakSystemResponse(dispatchedResponse);
 
-      // Save to Obsidian
-      onAddNoteToVault(
-        `Apollo-Directive-${Date.now().toString().slice(-4)}`,
-        `# Apollo Voice Directive Record\n\n**Target Agent**: ${targetAgent}\n**Intent**: ${intentDetail}\n**Priority**: ${priority}\n**Timestamp**: ${new Date().toISOString()}\n\n## Transcript\n> ${text}\n\n#apollo #voice-command #${targetAgent}`,
-        ['apollo', 'voice', targetAgent]
-      );
+    // Save to Obsidian
+    onAddNoteToVault(
+      `Apollo-Directive-${Date.now().toString().slice(-4)}`,
+      `# Apollo Voice Directive Record\n\n**Target Agent**: ${targetAgent}\n**Intent**: ${intentDetail}\n**Priority**: ${priority}\n**Timestamp**: ${new Date().toISOString()}\n\n## Transcript\n> ${text}\n\n#apollo #voice-command #${targetAgent}`,
+      ['apollo', 'voice', targetAgent]
+    );
 
-      // Auto Execute if toggled
-      if (autoExecute) {
-        setTimeout(async () => {
-          setAegisStatus('SIGNING');
-          await onExecuteTask(taskId);
-          setIsProcessing(false);
-          setActiveTool(undefined);
-          setAegisStatus('VERIFIED');
-          
-          const completedResponse = `Apollo completed execution for ${targetAgent.toUpperCase()}. Result signed by Aegis and recorded in Obsidian.`;
-          setAudioLogs(prev => [...prev, {
-            id: `sys-done-${Date.now()}`,
-            sender: 'system',
-            text: completedResponse,
-            timestamp: new Date().toLocaleTimeString()
-          }]);
-          await speakSystemResponse(completedResponse);
-        }, 1200);
-      } else {
+    if (autoExecute) {
+      setAegisStatus('SIGNING');
+      try {
+        await onExecuteTask(taskId);
+        setAegisStatus('VERIFIED');
+        const completedResponse = `Apollo completed execution for ${targetAgent.toUpperCase()}. Recorded in Obsidian.`;
+        setAudioLogs(prev => [...prev, {
+          id: `sys-done-${Date.now()}`,
+          sender: 'system',
+          text: completedResponse,
+          timestamp: new Date().toLocaleTimeString()
+        }]);
+        await speakSystemResponse(completedResponse);
+      } catch (err: any) {
+        // Real failure, honestly reported — never claimed VERIFIED.
+        setGuardianStatus('BLOCKED');
+        setAegisStatus('PENDING');
+        const failedResponse = `Apollo execution for ${targetAgent.toUpperCase()} failed: ${err?.message || 'unknown error'}.`;
+        setAudioLogs(prev => [...prev, {
+          id: `sys-fail-${Date.now()}`,
+          sender: 'system',
+          text: failedResponse,
+          timestamp: new Date().toLocaleTimeString()
+        }]);
+        await speakSystemResponse(failedResponse);
+      } finally {
         setIsProcessing(false);
         setActiveTool(undefined);
       }
-    }, 1000);
-
+    } else {
+      setIsProcessing(false);
+      setActiveTool(undefined);
+    }
   }, [agents, onAddKanbanTask, onExecuteTask, autoExecute, kanbanTasks, voiceConfig, onAddNoteToVault]);
 
   // Hook Speech Recognition
@@ -233,17 +279,19 @@ export const ApolloVoiceView: React.FC<ApolloVoiceViewProps> = ({
   } = useSpeechRecognition(handleVoiceCommandReceived);
 
   const handleStartListening = () => {
+    // D5/N — a browser without SpeechRecognition support previously still
+    // flipped isListening/isSessionActive to true, presenting a fake
+    // "listening" state. It now surfaces the real failure and never claims
+    // to be listening when it isn't (type it into the text box below instead).
     const started = startListening();
     if (started) {
       setIsListening(true);
       setIsSessionActive(true);
     } else {
-      setIsListening(true);
-      setIsSessionActive(true);
       setAudioLogs(prev => [...prev, {
         id: `err-${Date.now()}`,
         sender: 'system',
-        text: 'Speech recognition API warning: Standard microphone active (simulated stream).',
+        text: 'This browser does not support the Web Speech Recognition API — voice capture is unavailable. Type a directive below instead.',
         timestamp: new Date().toLocaleTimeString()
       }]);
     }
@@ -339,8 +387,8 @@ export const ApolloVoiceView: React.FC<ApolloVoiceViewProps> = ({
             targetAgent={parsedTarget}
             guardianStatus={guardianStatus}
             aegisStatus={aegisStatus}
-            latencyMs={38}
-            connectionStatus="CONNECTED"
+            latencyMs={apolloLatencyMs ?? undefined}
+            connectionStatus={apolloStatus}
             currentTranscript={liveTranscript}
             activeTool={activeTool}
           />
@@ -483,10 +531,13 @@ export const ApolloVoiceView: React.FC<ApolloVoiceViewProps> = ({
               >
                 <div>
                   <div className="text-xs font-bold text-white">Full-Duplex / Barge-In</div>
-                  <div className="text-[10px] text-[#7B82A8]">Allow vocal interruption during playback</div>
+                  <div className="text-[10px] text-[#7B82A8]">
+                    Allow vocal interruption during playback
+                    {!bargeInReallyAvailable && ' — requires Fish Audio (FISH_AUDIO_API_KEY), not configured'}
+                  </div>
                 </div>
-                <div className={`w-4 h-4 rounded border flex items-center justify-center ${bargeInEnabled ? 'bg-[#FF5E8E] border-[#FF5E8E]' : 'border-[#2C3150]'}`}>
-                  {bargeInEnabled && <Check className="w-3 h-3 text-white" />}
+                <div className={`w-4 h-4 rounded border flex items-center justify-center ${bargeInEnabled && bargeInReallyAvailable ? 'bg-[#FF5E8E] border-[#FF5E8E]' : 'border-[#2C3150]'}`}>
+                  {bargeInEnabled && bargeInReallyAvailable && <Check className="w-3 h-3 text-white" />}
                 </div>
               </div>
 
@@ -526,6 +577,9 @@ export const ApolloVoiceView: React.FC<ApolloVoiceViewProps> = ({
               <Zap className="w-4 h-4 text-amber-400" />
               <h3 className="text-xs font-bold uppercase tracking-wider">Apollo Auditing & Scenarios</h3>
             </div>
+            <p className="text-[10px] text-[#7B82A8] -mt-2">
+              These buttons dispatch a real task through the same path as typed/spoken input — not a separate simulation.
+            </p>
 
             <div className="space-y-2">
               <button

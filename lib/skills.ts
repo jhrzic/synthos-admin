@@ -19,8 +19,27 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { getDatabase } from './persistence';
+import { classifyModelRequest } from './model-router';
+import { encryptCredential, credentialEncryptionConfigured } from './mcp-client';
 
 export type SkillCategory = 'system' | 'mcp' | 'custom' | 'tool' | 'integration';
+
+// Pass V / Workstream E2 — the discriminated execution-target type. A skill
+// with no target (the default for every pre-existing skill and every new
+// one unless explicitly set) is REGISTERED but never EXECUTABLE — this is
+// not inferred from `enabled`, `category`, or anything else; it is this
+// one explicit field. See classifySkillExecutability below.
+export type ExecutionTargetType = 'model' | 'deterministic' | 'mcp_tool' | 'hermes_runtime';
+
+/**
+ * E3 — the deterministic-skill whitelist. Deliberately tiny and explicit:
+ * only real, already-workspace-scoped, read-only functions this codebase
+ * already exposes elsewhere (lib/vault.ts, lib/memory-index.ts). This is
+ * NOT a generic "expose any server function" mechanism — adding an entry
+ * here is a deliberate code change, never data-driven.
+ */
+export const DETERMINISTIC_ACTIONS = ['vault.list', 'memory.search'] as const;
+export type DeterministicAction = (typeof DETERMINISTIC_ACTIONS)[number];
 
 export interface SkillRecord {
   skill_id: string;
@@ -34,6 +53,9 @@ export interface SkillRecord {
   source_type: string;
   source_ref: string | null;
   markdown_spec: string | null;
+  execution_target_type: ExecutionTargetType | null;
+  execution_target_ref: string | null;
+  credential_configured: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -56,6 +78,9 @@ interface SkillRow {
   source_type: string;
   source_ref: string | null;
   markdown_spec: string | null;
+  execution_target_type: string | null;
+  execution_target_ref: string | null;
+  credential_ciphertext: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -73,9 +98,20 @@ function toRecord(row: SkillRow): SkillRecord {
     source_type: row.source_type,
     source_ref: row.source_ref,
     markdown_spec: row.markdown_spec,
+    execution_target_type: (row.execution_target_type as ExecutionTargetType) || null,
+    execution_target_ref: row.execution_target_ref,
+    // Never the ciphertext itself — only whether a credential exists (F2).
+    credential_configured: !!row.credential_ciphertext,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
+}
+
+/** Internal-only accessor — the decrypted credential never leaves lib/skills.ts or lib/skill-execution.ts. */
+export function getRawCredentialCiphertext(workspaceId: string, skillId: string): string | null {
+  const db = getDatabase();
+  const row = db.prepare('SELECT credential_ciphertext FROM skills WHERE workspace_id = ? AND skill_id = ?').get(workspaceId, skillId) as { credential_ciphertext: string | null } | undefined;
+  return row?.credential_ciphertext || null;
 }
 
 function withStats(record: SkillRecord): SkillRecordWithStats {
@@ -131,6 +167,12 @@ export function isValidMcpEndpointRef(sourceRef: string): boolean {
   }
 }
 
+/** Throws if a credential was supplied but no encryption key is configured — never silently stores plaintext (F2). */
+function encryptCredentialOrThrow(credential: string | undefined | null): string | null {
+  if (!credential) return null;
+  return encryptCredential(credential); // throws if MCP_CREDENTIAL_ENCRYPTION_KEY is unset
+}
+
 export function createSkill(params: {
   workspaceId: string;
   name: string;
@@ -141,14 +183,18 @@ export function createSkill(params: {
   sourceRef?: string;
   markdownSpec?: string;
   enabled?: boolean;
+  executionTargetType?: ExecutionTargetType | null;
+  executionTargetRef?: string | null;
+  credential?: string | null;
 }): SkillRecordWithStats {
   const db = getDatabase();
   const now = new Date().toISOString();
   const skillId = `skill-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+  const credentialCiphertext = encryptCredentialOrThrow(params.credential);
 
   db.prepare(`
-    INSERT INTO skills (skill_id, workspace_id, name, description, category, version, enabled, status, source_type, source_ref, markdown_spec, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'NOT_CONFIGURED', ?, ?, ?, ?, ?)
+    INSERT INTO skills (skill_id, workspace_id, name, description, category, version, enabled, status, source_type, source_ref, markdown_spec, execution_target_type, execution_target_ref, credential_ciphertext, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'NOT_CONFIGURED', ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     skillId,
     params.workspaceId,
@@ -160,6 +206,9 @@ export function createSkill(params: {
     params.sourceType || 'manual',
     params.sourceRef || null,
     params.markdownSpec || null,
+    params.executionTargetType || null,
+    params.executionTargetRef || null,
+    credentialCiphertext,
     now,
     now
   );
@@ -176,7 +225,10 @@ export function createSkill(params: {
 export function updateSkill(
   workspaceId: string,
   skillId: string,
-  patch: Partial<Pick<SkillRecord, 'name' | 'description' | 'category' | 'version' | 'enabled' | 'source_ref' | 'markdown_spec'>>
+  patch: Partial<Pick<SkillRecord, 'name' | 'description' | 'category' | 'version' | 'enabled' | 'source_ref' | 'markdown_spec' | 'execution_target_type' | 'execution_target_ref'>> & {
+    /** Write-only. Omit to leave unchanged; pass '' or null to clear; pass a value to re-encrypt and replace. */
+    credential?: string | null;
+  }
 ): SkillRecordWithStats | null {
   const existing = getWorkspaceSkill(workspaceId, skillId);
   if (!existing) return null;
@@ -184,8 +236,20 @@ export function updateSkill(
   const db = getDatabase();
   const next = { ...existing, ...patch };
   const now = new Date().toISOString();
+
+  // 'credential' undefined => leave the stored ciphertext untouched.
+  // 'credential' === '' or null => explicitly clear it.
+  // 'credential' === a string => re-encrypt and replace.
+  let credentialSql = '';
+  let credentialArgs: unknown[] = [];
+  if (Object.prototype.hasOwnProperty.call(patch, 'credential')) {
+    const ciphertext = patch.credential ? encryptCredentialOrThrow(patch.credential) : null;
+    credentialSql = ', credential_ciphertext = ?';
+    credentialArgs = [ciphertext];
+  }
+
   db.prepare(`
-    UPDATE skills SET name = ?, description = ?, category = ?, version = ?, enabled = ?, source_ref = ?, markdown_spec = ?, updated_at = ?
+    UPDATE skills SET name = ?, description = ?, category = ?, version = ?, enabled = ?, source_ref = ?, markdown_spec = ?, execution_target_type = ?, execution_target_ref = ?, updated_at = ?${credentialSql}
     WHERE workspace_id = ? AND skill_id = ?
   `).run(
     next.name,
@@ -195,12 +259,84 @@ export function updateSkill(
     next.enabled ? 1 : 0,
     next.source_ref,
     next.markdown_spec,
+    next.execution_target_type,
+    next.execution_target_ref,
     now,
+    ...credentialArgs,
     workspaceId,
     skillId
   );
 
   return getWorkspaceSkill(workspaceId, skillId);
+}
+
+// ---------------------------------------------------------------------------
+// E1/E9 — real executability classification. A skill being REGISTERED or
+// ENABLED never implies EXECUTABLE — this function is the one place that
+// decides it, and it decides from real evidence only (a real target set, a
+// real provider-identity classification, a real credential-encryption
+// configuration check) — never from `enabled` alone.
+// ---------------------------------------------------------------------------
+
+export type SkillExecutabilityReason =
+  | 'DISABLED'
+  | 'NO_TARGET'
+  | 'MISSING_PROVIDER'
+  | 'MISSING_RUNTIME'
+  | 'READY';
+
+export interface SkillExecutability {
+  executable: boolean;
+  reason: SkillExecutabilityReason;
+  message: string;
+}
+
+export function classifySkillExecutability(skill: SkillRecord): SkillExecutability {
+  if (!skill.enabled) {
+    return { executable: false, reason: 'DISABLED', message: 'Skill is disabled.' };
+  }
+  if (!skill.execution_target_type) {
+    return { executable: false, reason: 'NO_TARGET', message: 'No execution target is configured — this skill is registered but has never been wired to a real target.' };
+  }
+
+  switch (skill.execution_target_type) {
+    case 'model': {
+      const classification = classifyModelRequest(skill.execution_target_ref || undefined);
+      if (classification.provider !== 'GEMINI') {
+        return { executable: false, reason: 'MISSING_PROVIDER', message: classification.message };
+      }
+      if (!process.env.GEMINI_API_KEY) {
+        return { executable: false, reason: 'MISSING_PROVIDER', message: 'GEMINI_API_KEY is not configured in this deployment.' };
+      }
+      return { executable: true, reason: 'READY', message: `Routes to Gemini model "${classification.resolvedModel}".` };
+    }
+    case 'hermes_runtime': {
+      // execute() is an honest Phase-1 NOT_IMPLEMENTED stub (ADR-001) — no
+      // real contract exists yet, so this is never executable today. See
+      // docs/adr-005-runtime-provider-boundaries.md.
+      return { executable: false, reason: 'MISSING_RUNTIME', message: 'The dedicated Hermes runtime execute() endpoint has no real contract in this deployment (ADR-001 Phase 3, deferred until Phase 2 passes).' };
+    }
+    case 'mcp_tool': {
+      if (!skill.source_ref) {
+        return { executable: false, reason: 'MISSING_RUNTIME', message: 'No MCP endpoint (source_ref) is configured on this skill.' };
+      }
+      if (!skill.execution_target_ref) {
+        return { executable: false, reason: 'NO_TARGET', message: 'No MCP tool name is configured.' };
+      }
+      // Connectivity itself is only known at call time (a live probe) — a
+      // skill is structurally executable if it has an endpoint and a tool
+      // name; whether the server actually answers is discovered on execute.
+      return { executable: true, reason: 'READY', message: `Will call tool "${skill.execution_target_ref}" on ${skill.source_ref} — connectivity is verified live at execution time.` };
+    }
+    case 'deterministic': {
+      if (!DETERMINISTIC_ACTIONS.includes(skill.execution_target_ref as DeterministicAction)) {
+        return { executable: false, reason: 'NO_TARGET', message: `"${skill.execution_target_ref}" is not a recognized deterministic action.` };
+      }
+      return { executable: true, reason: 'READY', message: `Runs the real internal action "${skill.execution_target_ref}".` };
+    }
+    default:
+      return { executable: false, reason: 'NO_TARGET', message: 'Unrecognized execution target type.' };
+  }
 }
 
 export interface SkillTestResult {
