@@ -18,7 +18,7 @@ interface GlobalVoiceOverlayProps {
   onUpdateSettings?: (newSettings: Partial<JarvisSettings>) => void;
   onSendQuery: (query: string, targetModel: string) => Promise<string>;
   /** Real, workspace-scoped /api/jarvis/command dispatcher — see JarvisView for the same contract. */
-  onJarvisCommand: (command: string) => Promise<string>;
+  onJarvisCommand: (command: string, messageType?: 'text' | 'voice_transcript') => Promise<string>;
   onAddKanbanTask?: (task: Omit<KanbanTask, 'id' | 'createdAt' | 'updatedAt' | 'subtasks'>) => void;
   onAddNoteToVault?: (title: string, content: string, tags: string[], folder?: string) => void;
   onOpenFullJarvis?: () => void;
@@ -159,7 +159,7 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
       // classification (task/graph/receipt keywords) sees exactly what the
       // user said rather than a system-prompt wrapper that could shift or
       // mask those keywords.
-      const reply = await onJarvisCommand(directiveText);
+      const reply = await onJarvisCommand(directiveText, 'voice_transcript');
       
       setPipelineTrace({
         workspace: workspaceContext,

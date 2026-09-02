@@ -29,7 +29,10 @@ describe('Jarvis admin intent wiring: previously orphaned /api/jarvis/command is
   });
 
   it('7. GlobalVoiceOverlay\'s directive submission uses the same dispatcher (voice text, not new streaming audio)', () => {
-    expect(voiceOverlayContent).toContain('onJarvisCommand(directiveText)');
+    // Passes 'voice_transcript' as the real message_type for session
+    // persistence (see lib/jarvis-sessions.ts) — still the same shared
+    // dispatcher and the same directiveText, not a new/parallel call path.
+    expect(voiceOverlayContent).toContain("onJarvisCommand(directiveText, 'voice_transcript')");
     // Confirms no new streaming/barge-in audio infrastructure was introduced
     // as part of this wiring — the existing speech-to-text -> text dispatch
     // path is reused, not replaced with something new.
@@ -128,5 +131,13 @@ describe('8. Apollo remains completely unaffected by this wiring', () => {
   it('/api/apollo/status and /api/apollo/command routes are untouched and still exist, separate from /api/jarvis/command', () => {
     expect(serverContent).toContain('app.get("/api/apollo/status"');
     expect(serverContent).toContain('app.post("/api/apollo/command"');
+  });
+});
+
+describe('Workstream F truth sweep: JarvisView header no longer claims an unconditional Fish Audio connection', () => {
+  it('the header badge is gated on real activeApiKey evidence, not an unconditional "Connected" claim', () => {
+    expect(jarvisViewContent).not.toContain('●●●● Connected to Fish Audio Plus');
+    expect(jarvisViewContent).toContain('activeApiKey && activeApiKey.length > 5 ?');
+    expect(jarvisViewContent).toContain('NOT_CONFIGURED — falls back to browser speech synthesis');
   });
 });

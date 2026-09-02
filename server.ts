@@ -51,6 +51,10 @@ import { tonAnalyticsSnapshot, recordTonTelemetry } from "./lib/ton-analytics";
 import { tonGuardianViews, installTonGuardians } from "./lib/ton-guardians";
 import { listWorkspaceVaultEntries, getWorkspaceVaultEntry, previewWorkspaceVaultEntry } from "./lib/vault";
 import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory } from "./lib/memory-index";
+import { estimateGraphExecution, selectLiveExecutionNodes } from "./lib/graph-execution";
+import { listWorkspaceSkills, getWorkspaceSkill, createSkill, updateSkill, testSkill, discoverRepoSkillFiles } from "./lib/skills";
+import { createJarvisSession, listWorkspaceJarvisSessions, getWorkspaceJarvisSession, listSessionMessages, appendJarvisMessage } from "./lib/jarvis-sessions";
+import { createBackup, listBackups, readManifestFromArchive, validateBackupArchive, stageRestore } from "./lib/backup";
 
 dotenv.config();
 
@@ -1976,6 +1980,30 @@ sourceHash: ${packageMetadataResult.sourceHash}
     }
   });
 
+  // Real, evidenced pre-execution estimate for a candidate graph — the node
+  // count that will actually be dispatched and each node's real provider
+  // routing status (classifyModelRequest, the same gate every real
+  // generateContent() call site uses). No dollar figure is ever invented:
+  // this deployment has no live per-token pricing wired to real usage
+  // accounting, so cost is honestly reported ESTIMATE_UNAVAILABLE. This is
+  // a read-only, non-billing endpoint — it never dispatches anything.
+  app.post("/api/graphs/estimate", (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const { nodes = [] } = req.body || {};
+      if (!Array.isArray(nodes) || nodes.length === 0) {
+        return res.status(400).json({ success: false, error: "Graph must contain at least one node to estimate." });
+      }
+      const estimate = estimateGraphExecution(nodes);
+      return res.json({ success: true, workspaceId: resolved.workspaceId, estimate });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to estimate graph execution" });
+    }
+  });
+
   app.post("/api/graphs/execute", async (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.body?.workspaceId);
@@ -1984,16 +2012,36 @@ sourceHash: ${packageMetadataResult.sourceHash}
       }
       const workspaceId = resolved.workspaceId;
 
+      // Structural approval gate: this route makes real, paid provider
+      // calls per node (via /api/execute-agent-task). It must never fire
+      // because a UI button happened to be clicked once — the caller must
+      // have already shown the user a real routing estimate (see
+      // /api/graphs/estimate above) and gotten explicit confirmation.
+      // Server-enforced, not just a client-side modal: a request missing
+      // `confirmed: true` is rejected before any node runs.
+      if (req.body?.confirmed !== true) {
+        return res.status(400).json({
+          success: false,
+          error: "Live graph execution requires explicit confirmation. Set confirmed: true after the user has reviewed the execution estimate.",
+        });
+      }
+
       const {
         graphId = `graph-${Date.now()}`,
         name = "Sequential DAG",
-        nodes = [],
+        nodes: rawNodes = [],
         edges = [],
         runId = `run-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`
       } = req.body || {};
 
+      // Only 'agent' nodes represent real dispatchable work — a canvas can
+      // mix trigger/agent/model/tool/logic node types, and only agent nodes
+      // should ever become a real task. Same filter the estimate endpoint
+      // uses, so the two never disagree about what will run.
+      const nodes = selectLiveExecutionNodes(Array.isArray(rawNodes) ? rawNodes : []);
+
       if (!nodes || nodes.length === 0) {
-        return res.status(400).json({ success: false, error: "Graph must contain at least one node." });
+        return res.status(400).json({ success: false, error: "Graph must contain at least one agent node to execute." });
       }
 
       // 1. Persist graph definition — graph ownership is authoritative from
@@ -2069,25 +2117,33 @@ sourceHash: ${packageMetadataResult.sourceHash}
         const isNodeVerified = nodeExecData.success && nodeExecData.status === "DONE" && nodeExecData.receipt?.verified === true;
 
         if (!isNodeVerified) {
-          // Halt execution DAG immediately on gate failure
+          // Halt execution DAG immediately on gate failure. Truthfully
+          // distinguish PARTIAL (at least one prior node genuinely
+          // completed and was verified) from FAILED (nothing did) — a run
+          // that produced real, verified work before halting is not the
+          // same outcome as one that produced none, and collapsing them
+          // into one status would hide real completed evidence.
+          const haltStatus = executionResults.length > 0 ? "PARTIAL" : "FAILED";
           const failedState = {
             graphId,
             failedNodeId: currentNode.id,
+            completedNodeIds: executionResults.map((r) => r.nodeId),
             error: "Node failed verification gate. Graph execution halted.",
             nodeResults: Object.fromEntries(executionResults.map(r => [r.nodeId, r]))
           };
           saveGraphRun({
             runId,
             graphId,
-            status: "FAILED",
+            status: haltStatus,
             currentNodeId: currentNode.id,
             state: failedState
           });
           return res.json({
             success: false,
             runId,
-            status: "FAILED",
+            status: haltStatus,
             failedAtNode: currentNode.id,
+            completedNodes: executionResults.length,
             nodeExecution: nodeExecData
           });
         }
@@ -2549,6 +2605,84 @@ sourceHash: ${packageMetadataResult.sourceHash}
     } catch (err: any) {
       console.error("[Jarvis Command Error]:", err);
       return res.status(500).json({ success: false, error: err?.message || "Jarvis command dispatch failed" });
+    }
+  });
+
+  // Real, workspace-scoped Jarvis conversation history. See
+  // lib/jarvis-sessions.ts. This is additive persistence around the
+  // existing /api/jarvis/command dispatcher above — that route's own
+  // request/response contract is unchanged.
+  app.post("/api/jarvis/sessions", (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const session = createJarvisSession(resolved.workspaceId, req.body?.title);
+      return res.json({ success: true, session });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to create Jarvis session" });
+    }
+  });
+
+  app.get("/api/jarvis/sessions", (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.query.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const sessions = listWorkspaceJarvisSessions(resolved.workspaceId);
+      return res.json({ success: true, workspaceId: resolved.workspaceId, sessions });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list Jarvis sessions" });
+    }
+  });
+
+  app.get("/api/jarvis/sessions/:sessionId", (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.query.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const session = getWorkspaceJarvisSession(resolved.workspaceId, req.params.sessionId);
+      if (!session) {
+        return res.status(404).json({ success: false, error: "Session not found." });
+      }
+      const messages = listSessionMessages(resolved.workspaceId, req.params.sessionId) || [];
+      return res.json({ success: true, session, messages });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to get Jarvis session" });
+    }
+  });
+
+  app.post("/api/jarvis/sessions/:sessionId/messages", (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const { role, content, messageType, provider, model } = req.body || {};
+      if (role !== "user" && role !== "assistant") {
+        return res.status(400).json({ success: false, error: 'role must be "user" or "assistant".' });
+      }
+      if (!content || typeof content !== "string") {
+        return res.status(400).json({ success: false, error: "content is required." });
+      }
+      const message = appendJarvisMessage({
+        workspaceId: resolved.workspaceId,
+        sessionId: req.params.sessionId,
+        role,
+        content,
+        messageType,
+        provider,
+        model,
+      });
+      if (!message) {
+        return res.status(404).json({ success: false, error: "Session not found." });
+      }
+      return res.json({ success: true, message });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to append Jarvis message" });
     }
   });
 
@@ -3234,6 +3368,106 @@ sourceHash: ${packageMetadataResult.sourceHash}
       return res.json({ success: true, workspaceId: resolved.workspaceId, ...result });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Memory reindex failed" });
+    }
+  });
+
+  // Real, workspace-scoped skill registry. See lib/skills.ts — no execution
+  // runtime is wired in this deployment, so /test always honestly returns
+  // NOT_IMPLEMENTED rather than a fabricated "Sandbox" success.
+  app.get("/api/skills", (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.query.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const skills = listWorkspaceSkills(resolved.workspaceId);
+      return res.json({ success: true, workspaceId: resolved.workspaceId, skills });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list skills" });
+    }
+  });
+
+  app.get("/api/skills/discover", (_req, res) => {
+    try {
+      const files = discoverRepoSkillFiles();
+      return res.json({ success: true, discovered: files, sourceDir: "skills/" });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to discover skill files" });
+    }
+  });
+
+  app.get("/api/skills/:skillId", (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.query.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const skill = getWorkspaceSkill(resolved.workspaceId, req.params.skillId);
+      if (!skill) {
+        return res.status(404).json({ success: false, error: "Skill not found." });
+      }
+      return res.json({ success: true, skill });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to get skill" });
+    }
+  });
+
+  app.post("/api/skills", (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const { name, description, category, version, sourceType, sourceRef, markdownSpec, enabled } = req.body || {};
+      if (!name || typeof name !== "string" || !name.trim()) {
+        return res.status(400).json({ success: false, error: "name is required." });
+      }
+      const skill = createSkill({
+        workspaceId: resolved.workspaceId,
+        name: name.trim(),
+        description,
+        category,
+        version,
+        sourceType,
+        sourceRef,
+        markdownSpec,
+        enabled,
+      });
+      return res.json({ success: true, skill });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to create skill" });
+    }
+  });
+
+  app.patch("/api/skills/:skillId", (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const skill = updateSkill(resolved.workspaceId, req.params.skillId, req.body || {});
+      if (!skill) {
+        return res.status(404).json({ success: false, error: "Skill not found." });
+      }
+      return res.json({ success: true, skill });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to update skill" });
+    }
+  });
+
+  app.post("/api/skills/:skillId/test", (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const result = testSkill(resolved.workspaceId, req.params.skillId);
+      if (!result) {
+        return res.status(404).json({ success: false, error: "Skill not found." });
+      }
+      return res.json({ success: true, ...result });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to test skill" });
     }
   });
 
@@ -4048,6 +4282,60 @@ sourceHash: ${packageMetadataResult.sourceHash}
       blockingDependencies: blocking,
       timestamp: new Date().toISOString()
     });
+  });
+
+  // Real local backup / restore. See lib/backup.ts. Instance-wide (the one
+  // real SQLite database plus the real Vault directory) — not
+  // workspace-scoped, since the database file itself is the unit of
+  // backup/restore. Restore is always staged, never a live in-process swap.
+  app.post("/api/backup/create", async (_req, res) => {
+    try {
+      const summary = await createBackup();
+      return res.json({ success: true, ...summary });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to create backup" });
+    }
+  });
+
+  app.get("/api/backup/list", (_req, res) => {
+    try {
+      return res.json({ success: true, backups: listBackups() });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list backups" });
+    }
+  });
+
+  app.get("/api/backup/:backupId/manifest", (req, res) => {
+    try {
+      const manifest = readManifestFromArchive(req.params.backupId);
+      if (!manifest) {
+        return res.status(404).json({ success: false, error: "Backup not found or manifest unreadable." });
+      }
+      return res.json({ success: true, manifest });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to read manifest" });
+    }
+  });
+
+  app.post("/api/backup/:backupId/validate", (req, res) => {
+    try {
+      const validation = validateBackupArchive(req.params.backupId);
+      return res.json({ success: true, validation });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to validate backup" });
+    }
+  });
+
+  app.post("/api/backup/:backupId/restore", (req, res) => {
+    try {
+      const result = stageRestore(req.params.backupId, req.body?.confirmed === true);
+      if ("error" in result) {
+        return res.status(400).json({ success: false, ...result });
+      }
+      return res.json({ success: true, ...result });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to stage restore" });
+    }
   });
 
   if (process.env.NODE_ENV !== "production") {

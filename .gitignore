@@ -13,3 +13,6 @@ data/*.db-*
 data/keys/
 data/runtime/
 vault/Startup-Theses/Read-SynthOS-Admin-package-version.md
+
+# SynthOS Backups (real database + vault snapshots — never committed)
+backups/

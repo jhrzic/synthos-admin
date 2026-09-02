@@ -7,7 +7,8 @@ import {
   Settings, ChevronRight, ArrowRight, CornerDownRight, X,
   FileText, Activity, Radio, Crown, AlertTriangle, Search,
   BookOpen, Lock, Unlock, HelpCircle, Code2, Link, Copy, Check,
-  Sliders, ArrowUpRight, FileCode, ShieldCheck, HardDrive, Filter, Server
+  Sliders, ArrowUpRight, FileCode, ShieldCheck, HardDrive, Filter, Server,
+  Rocket, DollarSign, Loader2
 } from 'lucide-react';
 
 // ============================================================================
@@ -152,6 +153,30 @@ interface GraphBuilderViewProps {
   onAddNoteToVault?: (title: string, content: string, tags?: string[], folder?: string) => void;
   onExecuteGraph?: (data: any) => void;
   onSaveGraph?: (name: string) => void;
+  activeWorkspaceId?: string;
+}
+
+// Real routing status for one node in a live-execution estimate — see
+// lib/graph-execution.ts on the server. No dollar figure is ever shown:
+// this deployment has no live per-token pricing wired to real usage
+// accounting.
+interface LiveNodeEstimate {
+  nodeId: string;
+  label: string;
+  assignedAgent: string;
+  requestedModel: string;
+  routing: { provider: 'GEMINI' | 'UNSUPPORTED'; message?: string };
+}
+
+interface LiveExecutionEstimate {
+  agentNodeCount: number;
+  totalNodeCount: number;
+  nodes: LiveNodeEstimate[];
+  allNodesRoutable: boolean;
+  unroutableNodes: LiveNodeEstimate[];
+  costEstimateStatus: 'ESTIMATE_UNAVAILABLE';
+  costEstimateUsd: null;
+  costEstimateReason: string;
 }
 
 // Initial Templates with varying field completeness
@@ -368,7 +393,9 @@ export const GraphBuilderView: React.FC<GraphBuilderViewProps> = ({
   onSelectTab,
   onExecutePrompt,
   onAddNoteToVault,
+  activeWorkspaceId,
 }) => {
+  const workspaceId = activeWorkspaceId || 'ws-synthos-primary';
   const [nodes, setNodes] = useState<GraphNode[]>(TEMPLATES[0].nodes);
   const [edges, setEdges] = useState<GraphEdge[]>(TEMPLATES[0].edges);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>('n2');
@@ -395,6 +422,17 @@ export const GraphBuilderView: React.FC<GraphBuilderViewProps> = ({
   const [showResearchQueueModal, setShowResearchQueueModal] = useState<boolean>(false);
   const [autoInjectResearchTasks, setAutoInjectResearchTasks] = useState<boolean>(true);
   const [activeTaskFilter, setActiveTaskFilter] = useState<'all' | 'queued' | 'researching' | 'resolved'>('all');
+
+  // Real Live Execution — separate from the dry-run preview above. See
+  // lib/graph-execution.ts / POST /api/graphs/estimate / POST
+  // /api/graphs/execute (confirmed:true required) on the server.
+  const [isEstimating, setIsEstimating] = useState<boolean>(false);
+  const [liveEstimate, setLiveEstimate] = useState<LiveExecutionEstimate | null>(null);
+  const [liveEstimateError, setLiveEstimateError] = useState<string | null>(null);
+  const [showLiveConfirm, setShowLiveConfirm] = useState<boolean>(false);
+  const [isLiveRunning, setIsLiveRunning] = useState<boolean>(false);
+  const [liveRunResult, setLiveRunResult] = useState<any | null>(null);
+  const [liveRunError, setLiveRunError] = useState<string | null>(null);
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
@@ -863,8 +901,104 @@ Please research and resolve all missing fields according to the Required Field S
     setActiveStepIndex(-1);
     setExecutionLogs((prev) => [
       ...prev,
-      `[GraphCompiler]: Dry-run preview finished — all nodes structurally valid. No model calls were made. To actually run this graph against the live execution backend, save it and dispatch it from Graph Runs.`,
+      `[GraphCompiler]: Dry-run preview finished — all nodes structurally valid. No model calls were made. Use "Run Live" to actually execute this graph against real providers.`,
     ]);
+  };
+
+  // --------------------------------------------------------------------
+  // Real Live Execution. Two-step: request a real routing estimate, show
+  // it to the user for explicit confirmation, then dispatch. The server
+  // independently enforces the confirmation gate (confirmed:true) — this
+  // client-side flow can't be skipped by calling execute directly, because
+  // the route itself rejects an unconfirmed request.
+  // --------------------------------------------------------------------
+
+  const agentNodesForLiveRun = () => nodes.filter((n) => n.type === 'agent');
+
+  const handleRequestLiveRun = async () => {
+    const draftNodes = nodes.filter((n) => n.type === 'agent' && n.status === 'draft');
+    if (draftNodes.length > 0) {
+      setValidationModalMessage(
+        `LIVE EXECUTION BLOCKED: ${draftNodes.length} agent node(s) remain in DRAFT status (${draftNodes.map(n => n.label).join(', ')}). Please invoke Research Assistant to resolve all required fields before running live.`
+      );
+      setShowValidationModal(true);
+      return;
+    }
+    const agentNodes = agentNodesForLiveRun();
+    if (agentNodes.length === 0) {
+      setValidationModalMessage('LIVE EXECUTION BLOCKED: this graph has no agent-type nodes. Only agent nodes are dispatched as real, paid tasks.');
+      setShowValidationModal(true);
+      return;
+    }
+
+    setIsEstimating(true);
+    setLiveEstimateError(null);
+    setLiveEstimate(null);
+    setLiveRunResult(null);
+    setLiveRunError(null);
+    try {
+      const res = await fetch('/api/graphs/estimate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspaceId,
+          nodes: agentNodes.map((n) => ({ id: n.id, label: n.label, type: n.type, assignedAgent: n.agentRole })),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.success === false) {
+        setLiveEstimateError(data.error || `HTTP ${res.status}`);
+      } else {
+        setLiveEstimate(data.estimate);
+      }
+    } catch (err: any) {
+      setLiveEstimateError(err?.message || 'Network error contacting the estimate API.');
+    } finally {
+      setIsEstimating(false);
+      setShowLiveConfirm(true);
+    }
+  };
+
+  const handleConfirmLiveRun = async () => {
+    const agentNodes = agentNodesForLiveRun();
+    setIsLiveRunning(true);
+    setLiveRunError(null);
+    setLiveRunResult(null);
+    try {
+      const template = TEMPLATES.find((t) => t.id === selectedTemplateId);
+      const res = await fetch('/api/graphs/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspaceId,
+          name: template?.name || 'Untitled Graph',
+          nodes: agentNodes.map((n) => ({
+            id: n.id,
+            type: n.type,
+            name: n.label,
+            description: n.description,
+            assignedAgent: n.agentRole || 'dev',
+          })),
+          edges,
+          confirmed: true,
+        }),
+      });
+      const data = await res.json();
+      setLiveRunResult(data);
+      if (!res.ok || data.success === false) {
+        setLiveRunError(data.error || `Run ended with status ${data.status || res.status}`);
+      }
+      setExecutionLogs((prev) => [
+        ...prev,
+        `[LiveExecution]: Run ${data.runId || '(no run id)'} finished with status ${data.status || 'UNKNOWN'}. ${data.nodesExecuted ?? data.completedNodes ?? 0} node(s) completed and verified.`,
+      ]);
+    } catch (err: any) {
+      setLiveRunError(err?.message || 'Network error contacting the live execution API.');
+      setExecutionLogs((prev) => [...prev, `[LiveExecution]: FAILED — ${err?.message || 'network error'}.`]);
+    } finally {
+      setIsLiveRunning(false);
+      setShowLiveConfirm(false);
+    }
   };
 
   const getNodeColor = (type: GraphNode['type'], status: GraphNode['status']) => {
@@ -975,10 +1109,11 @@ Please research and resolve all missing fields according to the Required Field S
             {isResearching ? 'Researching Fields...' : 'Auto-Resolve Draft Nodes'}
           </button>
 
-          {/* Compile & Run Graph Button */}
+          {/* Dry-Run Preview — local structural validation only, zero model calls */}
           <button
             onClick={handleRunGraph}
             disabled={isRunning || nodes.length === 0}
+            title="Local structural validation only. Makes no model calls and spends no budget."
             className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition shadow-lg cursor-pointer ${
               isRunning
                 ? 'bg-[#1E2138] text-[#8E94B8] border border-[#2D3352]'
@@ -988,12 +1123,42 @@ Please research and resolve all missing fields according to the Required Field S
             {isRunning ? (
               <>
                 <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#00D26A]" />
-                Executing DAG...
+                Validating...
               </>
             ) : (
               <>
                 <Play className="w-3.5 h-3.5 fill-current" />
-                Compile & Run DAG
+                Dry-Run Preview
+              </>
+            )}
+          </button>
+
+          {/* Run Live — real, paid execution. Separate action, separate
+              color, requires an explicit confirmation step below. */}
+          <button
+            onClick={handleRequestLiveRun}
+            disabled={isEstimating || isLiveRunning || nodes.length === 0}
+            title="Real execution against live providers. Spends budget. Requires confirmation."
+            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition shadow-lg cursor-pointer ${
+              isEstimating || isLiveRunning
+                ? 'bg-[#1E2138] text-[#8E94B8] border border-[#2D3352]'
+                : 'bg-[#F59E0B] text-black hover:bg-[#FFB020] shadow-[#F59E0B]/20'
+            }`}
+          >
+            {isEstimating ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Estimating...
+              </>
+            ) : isLiveRunning ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Running Live...
+              </>
+            ) : (
+              <>
+                <Rocket className="w-3.5 h-3.5" />
+                Run Live
               </>
             )}
           </button>
@@ -2279,6 +2444,111 @@ Please research and resolve all missing fields according to the Required Field S
               )}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Run Live confirmation — real, evidenced routing estimate. No
+          dollar figure is ever shown, because none is honestly computable
+          in this deployment. Server independently enforces confirmed:true. */}
+      {showLiveConfirm && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-[#0B0D18] border border-[#F59E0B]/50 rounded-2xl w-full max-w-lg p-6 space-y-4 shadow-2xl font-mono text-white">
+            <div className="flex items-center gap-3 text-[#F59E0B]">
+              <Rocket className="w-6 h-6 shrink-0" />
+              <h3 className="font-bold text-sm uppercase tracking-wide">Confirm Live Execution</h3>
+            </div>
+
+            {liveEstimateError ? (
+              <p className="text-xs text-[#FF5E8E] leading-relaxed bg-[#14121A] p-3 rounded-xl border border-[#FF5E8E]/30">
+                Could not retrieve a routing estimate: {liveEstimateError}
+              </p>
+            ) : liveEstimate ? (
+              <div className="space-y-3 text-xs text-[#C5C9E5]">
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="bg-[#14121A] p-2.5 rounded-xl border border-[#232742]">
+                    <span className="text-[10px] text-[#7A82A6] block">Workspace</span>
+                    <span className="text-white font-bold">{workspaceId}</span>
+                  </div>
+                  <div className="bg-[#14121A] p-2.5 rounded-xl border border-[#232742]">
+                    <span className="text-[10px] text-[#7A82A6] block">Agent Nodes To Dispatch</span>
+                    <span className="text-white font-bold">{liveEstimate.agentNodeCount} of {liveEstimate.totalNodeCount} total</span>
+                  </div>
+                </div>
+
+                <div className="bg-[#14121A] p-2.5 rounded-xl border border-[#232742] flex items-center gap-2">
+                  <DollarSign className="w-3.5 h-3.5 text-[#F59E0B] shrink-0" />
+                  <span>Estimated cost: <strong className="text-[#F59E0B]">{liveEstimate.costEstimateStatus}</strong> — {liveEstimate.costEstimateReason}</span>
+                </div>
+
+                <div className="bg-[#14121A] p-2.5 rounded-xl border border-[#232742] space-y-1.5 max-h-40 overflow-y-auto">
+                  {liveEstimate.nodes.map((n) => (
+                    <div key={n.nodeId} className="flex items-center justify-between gap-2">
+                      <span className="truncate">{n.label} <span className="text-[#7A82A6]">({n.assignedAgent})</span></span>
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${n.routing.provider === 'GEMINI' ? 'bg-[#00D26A]/20 text-[#00D26A]' : 'bg-[#FF5E8E]/20 text-[#FF5E8E]'}`}>
+                        {n.routing.provider === 'GEMINI' ? n.requestedModel : 'UNROUTABLE'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                {!liveEstimate.allNodesRoutable && (
+                  <p className="text-[#FF5E8E] bg-[#FF5E8E]/10 border border-[#FF5E8E]/30 p-2.5 rounded-xl">
+                    {liveEstimate.unroutableNodes.length} node(s) have no configured provider mapping and will fail immediately if you proceed.
+                  </p>
+                )}
+              </div>
+            ) : (
+              <p className="text-xs text-[#8E94B8]">No estimate available.</p>
+            )}
+
+            <p className="text-[10px] text-[#7A82A6] leading-relaxed">
+              Confirming dispatches real tasks to configured providers, subject to the existing Aegis verification gate — a node is only marked complete with a real, signed receipt.
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                onClick={() => { setShowLiveConfirm(false); setLiveEstimate(null); setLiveEstimateError(null); }}
+                className="px-3 py-1.5 rounded-lg bg-[#181B2E] text-[#8E94B8] hover:text-white text-xs cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmLiveRun}
+                disabled={!liveEstimate || isLiveRunning}
+                className="px-4 py-1.5 rounded-lg bg-[#F59E0B] text-black font-bold text-xs hover:bg-[#FFB020] transition cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+              >
+                {isLiveRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Rocket className="w-3.5 h-3.5" />}
+                Confirm & Run Live
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Real Live Execution result — only rendered once a real response
+          has come back from POST /api/graphs/execute. */}
+      {(liveRunResult || liveRunError) && (
+        <div className="fixed bottom-4 right-4 z-40 w-full max-w-sm bg-[#0B0D18] border border-[#232742] rounded-2xl p-4 shadow-2xl font-mono text-white space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold flex items-center gap-1.5">
+              {liveRunError ? <AlertTriangle className="w-3.5 h-3.5 text-[#FF5E8E]" /> : <CheckCircle2 className="w-3.5 h-3.5 text-[#00D26A]" />}
+              Live Execution {liveRunResult?.status || 'FAILED'}
+            </span>
+            <button onClick={() => { setLiveRunResult(null); setLiveRunError(null); }} className="text-[#7A82A6] hover:text-white cursor-pointer">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          <p className="text-[11px] text-[#8E94B8]">
+            {liveRunError || `${liveRunResult?.nodesExecuted ?? 0} node(s) completed and verified.`}
+          </p>
+          {liveRunResult?.runId && onSelectTab && (
+            <button
+              onClick={() => onSelectTab('graph-runs')}
+              className="text-[11px] text-[#F59E0B] hover:underline cursor-pointer"
+            >
+              View run {liveRunResult.runId} in Graph Runs →
+            </button>
+          )}
         </div>
       )}
     </div>

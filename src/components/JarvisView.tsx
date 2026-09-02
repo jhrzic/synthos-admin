@@ -17,7 +17,8 @@ import {
   Sparkles, Mic, MicOff, Volume2, VolumeX, Shield, 
   Cpu, Sliders, Play, Save, CheckCircle2, RefreshCw, 
   Terminal, Zap, Radio, Database, Lock, Eye, AlertCircle,
-  RadioTower, Layers, ArrowRight, ShieldCheck, Check, Send, Key, Settings
+  RadioTower, Layers, ArrowRight, ShieldCheck, Check, Send, Key, Settings,
+  History, Plus, X, Loader2
 } from 'lucide-react';
 
 interface JarvisViewProps {
@@ -33,7 +34,11 @@ interface JarvisViewProps {
    * so its "show my tasks"-style directives actually reach that real
    * infrastructure instead of a generic chat call that can't answer them.
    */
-  onJarvisCommand: (command: string) => Promise<string>;
+  onJarvisCommand: (command: string, messageType?: 'text' | 'voice_transcript') => Promise<string>;
+  /** Real workspace-scoped session history — see lib/jarvis-sessions.ts. */
+  activeWorkspaceId?: string;
+  /** Starts a fresh Jarvis session on the next directive. */
+  onNewJarvisSession?: () => void;
 }
 
 export const JarvisView: React.FC<JarvisViewProps> = ({
@@ -42,7 +47,10 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
   onAddNoteToVault,
   onSendQuery,
   onJarvisCommand,
+  activeWorkspaceId,
+  onNewJarvisSession,
 }) => {
+  const workspaceId = activeWorkspaceId || 'ws-synthos-primary';
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -62,6 +70,59 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
   const [activeVoiceResponse, setActiveVoiceResponse] = useState<string>(
     "All neural mesh systems, Obsidian vaults, and autonomous agents are operating normally. Ready for directives."
   );
+
+  // Real Jarvis session history — see lib/jarvis-sessions.ts. A modest
+  // surface only: New Chat + a list of recent real sessions + a real
+  // transcript viewer for one of them. Independent of the live hudLogs
+  // feed above, which stays untouched.
+  interface JarvisSessionSummary {
+    session_id: string;
+    title: string | null;
+    updated_at: string;
+    messageCount: number;
+    lastMessagePreview: string | null;
+  }
+  interface JarvisTranscriptMessage {
+    message_id: string;
+    role: 'user' | 'assistant';
+    content: string;
+    message_type: string;
+    created_at: string;
+  }
+  const [showSessionHistory, setShowSessionHistory] = useState(false);
+  const [recentSessions, setRecentSessions] = useState<JarvisSessionSummary[]>([]);
+  const [isLoadingSessions, setIsLoadingSessions] = useState(false);
+  const [openTranscript, setOpenTranscript] = useState<{ sessionId: string; title: string | null; messages: JarvisTranscriptMessage[] } | null>(null);
+
+  const fetchRecentSessions = useCallback(async () => {
+    setIsLoadingSessions(true);
+    try {
+      const res = await fetch(`/api/jarvis/sessions?workspaceId=${encodeURIComponent(workspaceId)}`);
+      const data = await res.json();
+      setRecentSessions(res.ok && data.success !== false ? (data.sessions || []) : []);
+    } catch {
+      setRecentSessions([]);
+    } finally {
+      setIsLoadingSessions(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (showSessionHistory) fetchRecentSessions();
+  }, [showSessionHistory, fetchRecentSessions]);
+
+  const handleOpenTranscript = async (sessionId: string, title: string | null) => {
+    try {
+      const res = await fetch(`/api/jarvis/sessions/${encodeURIComponent(sessionId)}?workspaceId=${encodeURIComponent(workspaceId)}`);
+      const data = await res.json();
+      if (res.ok && data.success !== false) {
+        setOpenTranscript({ sessionId, title, messages: data.messages || [] });
+      }
+    } catch {
+      // Real network failure — leave the transcript viewer closed rather
+      // than showing a fabricated one.
+    }
+  };
 
   const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [saveToast, setSaveToast] = useState(false);
@@ -307,9 +368,15 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
             <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold uppercase text-[#615EFF] border border-[#615EFF]/30 bg-[#615EFF]/10">
               AI ASSISTANT OS & NEURAL SYNAPSE
             </span>
-            <span className="text-xs font-mono text-[#00D26A]">
-              ●●●● Connected to Fish Audio Plus ({activeVoiceId.slice(0, 8)}...)
-            </span>
+            {activeApiKey && activeApiKey.length > 5 ? (
+              <span className="text-xs font-mono text-[#00D26A]">
+                ●●●● Fish Audio credentials configured ({activeVoiceId.slice(0, 8)}...)
+              </span>
+            ) : (
+              <span className="text-xs font-mono text-[#7E8BB5]">
+                ○○○○ Fish Audio: NOT_CONFIGURED — falls back to browser speech synthesis
+              </span>
+            )}
           </div>
           <h1 className="text-2xl sm:text-4xl font-extrabold text-white tracking-tight font-['Space_Grotesk']">
             Autonomous Voice & Neural Hub
@@ -320,6 +387,28 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
         </div>
 
         <div className="flex items-center gap-3">
+          {onNewJarvisSession && (
+            <button
+              onClick={() => { onNewJarvisSession(); setShowSessionHistory(false); }}
+              title="Start a new Jarvis session"
+              className="px-3.5 py-2 rounded-xl bg-[#14172B] hover:bg-[#1E2342] border border-[#252A4E] text-[#A5A2FF] text-xs font-bold font-mono flex items-center gap-1.5 transition cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>NEW CHAT</span>
+            </button>
+          )}
+
+          <button
+            onClick={() => setShowSessionHistory((v) => !v)}
+            title="Recent Jarvis sessions"
+            className={`px-3.5 py-2 rounded-xl border text-xs font-bold font-mono flex items-center gap-1.5 transition cursor-pointer ${
+              showSessionHistory ? 'bg-[#615EFF]/20 border-[#615EFF] text-white' : 'bg-[#14172B] hover:bg-[#1E2342] border-[#252A4E] text-[#A5A2FF]'
+            }`}
+          >
+            <History className="w-3.5 h-3.5" />
+            <span>HISTORY</span>
+          </button>
+
           <button
             onClick={() => setShowVoiceModal(true)}
             className="px-3.5 py-2 rounded-xl bg-[#14172B] hover:bg-[#1E2342] border border-[#252A4E] text-[#A5A2FF] text-xs font-bold font-mono flex items-center gap-1.5 transition"
@@ -345,6 +434,76 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Real, workspace-scoped session history — see lib/jarvis-sessions.ts */}
+      {showSessionHistory && (
+        <div className="bg-[#0D0E1A] border border-[#1E2238] rounded-2xl p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-mono font-bold text-white flex items-center gap-1.5">
+              <History className="w-3.5 h-3.5 text-[#615EFF]" />
+              Recent Sessions — Workspace: {workspaceId}
+            </span>
+            <button onClick={fetchRecentSessions} className="text-[#8E94B8] hover:text-white cursor-pointer">
+              <RefreshCw className={`w-3.5 h-3.5 ${isLoadingSessions ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
+          {isLoadingSessions ? (
+            <div className="flex items-center gap-2 text-xs text-[#8E94B8] py-6 justify-center">
+              <Loader2 className="w-4 h-4 animate-spin" /> Loading sessions…
+            </div>
+          ) : recentSessions.length === 0 ? (
+            <p className="text-xs text-[#5F6589] text-center py-4">No prior Jarvis sessions exist for this workspace yet.</p>
+          ) : (
+            <div className="space-y-2 max-h-64 overflow-y-auto">
+              {recentSessions.map((s) => (
+                <button
+                  key={s.session_id}
+                  onClick={() => handleOpenTranscript(s.session_id, s.title)}
+                  className="w-full text-left p-3 rounded-xl bg-[#080911] border border-[#161828] hover:border-[#615EFF] transition cursor-pointer"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-white truncate">{s.title || 'Untitled session'}</span>
+                    <span className="text-[10px] text-[#5F6589] shrink-0">{new Date(s.updated_at).toLocaleString()}</span>
+                  </div>
+                  <p className="text-[11px] text-[#8E94B8] mt-1 line-clamp-1">{s.lastMessagePreview || 'No messages yet.'}</p>
+                  <span className="text-[10px] text-[#5F6589]">{s.messageCount} message(s)</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Real session transcript viewer */}
+      {openTranscript && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-[#0B0D18] border border-[#252A4E] rounded-2xl w-full max-w-2xl max-h-[80vh] flex flex-col shadow-2xl">
+            <div className="flex items-center justify-between p-4 border-b border-[#1E2238]">
+              <span className="text-sm font-bold text-white font-mono">{openTranscript.title || 'Untitled session'}</span>
+              <button onClick={() => setOpenTranscript(null)} className="text-[#8E94B8] hover:text-white cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3 overflow-y-auto">
+              {openTranscript.messages.length === 0 ? (
+                <p className="text-xs text-[#5F6589] text-center py-6">No messages recorded in this session.</p>
+              ) : (
+                openTranscript.messages.map((m) => (
+                  <div key={m.message_id} className={`p-3 rounded-xl text-xs ${m.role === 'user' ? 'bg-[#14172B] border border-[#252A4E]' : 'bg-[#615EFF]/10 border border-[#615EFF]/30'}`}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className={`font-bold font-mono ${m.role === 'user' ? 'text-[#A5A2FF]' : 'text-[#615EFF]'}`}>
+                        {m.role === 'user' ? 'USER' : 'JARVIS'}{m.message_type === 'voice_transcript' ? ' (voice)' : ''}
+                      </span>
+                      <span className="text-[10px] text-[#5F6589]">{new Date(m.created_at).toLocaleTimeString()}</span>
+                    </div>
+                    <p className="text-[#E2E8F0] whitespace-pre-wrap leading-relaxed">{m.content}</p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 3-Step Setup Wizard for Jarvis Voice & Fish Audio */}
       <SetupWizardCard

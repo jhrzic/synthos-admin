@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { 
-  ActiveTab, AIModelInfo, AgentInfo, KanbanTask, ObsidianNote, 
-  SystemAuditCheck, SkillDefinition, VoiceConfig 
+import {
+  ActiveTab, AIModelInfo, AgentInfo, KanbanTask, ObsidianNote,
+  SystemAuditCheck, VoiceConfig
 } from '../types';
 import { 
   Shield, ShieldCheck, CheckCircle2, AlertTriangle, XCircle, 
@@ -20,7 +20,7 @@ interface MasterAdminViewProps {
   models: Record<string, AIModelInfo>;
   tasks: KanbanTask[];
   notes: ObsidianNote[];
-  skills: SkillDefinition[];
+  activeWorkspaceId?: string;
   auditChecks: SystemAuditCheck[];
   voiceConfig: VoiceConfig;
   onUpdateVoiceConfig: (config: VoiceConfig) => void;
@@ -46,6 +46,7 @@ export type MasterAdminSection =
   | 'updates'
   | 'health'
   | 'audit'
+  | 'backup'
   | 'walkthrough';
 
 interface LiveDiagnostics {
@@ -133,7 +134,7 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
   models,
   tasks,
   notes,
-  skills,
+  activeWorkspaceId,
   auditChecks,
   voiceConfig,
   onUpdateVoiceConfig,
@@ -141,6 +142,94 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
   onRunAudit,
   onExecutePrompt
 }) => {
+  const workspaceId = activeWorkspaceId || 'ws-synthos-primary';
+
+  // Real, workspace-scoped skill registry summary — see lib/skills.ts /
+  // GET /api/skills. No fabricated "installed"/"READY" claims: enabled and
+  // status come straight from the real record.
+  interface MasterAdminSkillRow {
+    skill_id: string;
+    name: string;
+    description: string;
+    category: string;
+    enabled: boolean;
+    status: string;
+  }
+  const [skills, setSkills] = useState<MasterAdminSkillRow[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/skills?workspaceId=${encodeURIComponent(workspaceId)}`)
+      .then((res) => res.json())
+      .then((data) => { if (!cancelled) setSkills(data.success !== false ? (data.skills || []) : []); })
+      .catch(() => { if (!cancelled) setSkills([]); });
+    return () => { cancelled = true; };
+  }, [workspaceId]);
+
+  // Real local backup/restore — see lib/backup.ts / /api/backup/*.
+  interface BackupSummaryRow { backup_id: string; file_name: string; size_bytes: number; created_at: string | null }
+  interface BackupValidationRow { valid: boolean; issues: string[]; manifest: any }
+  const [backups, setBackups] = useState<BackupSummaryRow[]>([]);
+  const [isLoadingBackups, setIsLoadingBackups] = useState(false);
+  const [isCreatingBackup, setIsCreatingBackup] = useState(false);
+  const [validationResults, setValidationResults] = useState<Record<string, BackupValidationRow>>({});
+  const [validatingId, setValidatingId] = useState<string | null>(null);
+  const [restorePlan, setRestorePlan] = useState<{ backupId: string; result: any } | null>(null);
+  const [restoreConfirmId, setRestoreConfirmId] = useState<string | null>(null);
+
+  const fetchBackups = useCallback(async () => {
+    setIsLoadingBackups(true);
+    try {
+      const res = await fetch('/api/backup/list');
+      const data = await res.json();
+      setBackups(res.ok && data.success !== false ? (data.backups || []) : []);
+    } catch {
+      setBackups([]);
+    } finally {
+      setIsLoadingBackups(false);
+    }
+  }, []);
+
+  useEffect(() => { fetchBackups(); }, [fetchBackups]);
+
+  const handleCreateBackup = async () => {
+    setIsCreatingBackup(true);
+    try {
+      await fetch('/api/backup/create', { method: 'POST' });
+      await fetchBackups();
+    } finally {
+      setIsCreatingBackup(false);
+    }
+  };
+
+  const handleValidateBackup = async (backupId: string) => {
+    setValidatingId(backupId);
+    try {
+      const res = await fetch(`/api/backup/${encodeURIComponent(backupId)}/validate`, { method: 'POST' });
+      const data = await res.json();
+      if (res.ok && data.success !== false) {
+        setValidationResults((prev) => ({ ...prev, [backupId]: data.validation }));
+      }
+    } finally {
+      setValidatingId(null);
+    }
+  };
+
+  const handleStageRestore = async (backupId: string) => {
+    try {
+      const res = await fetch(`/api/backup/${encodeURIComponent(backupId)}/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmed: true }),
+      });
+      const data = await res.json();
+      setRestorePlan({ backupId, result: data });
+    } catch (err: any) {
+      setRestorePlan({ backupId, result: { success: false, error: err?.message || 'Network error' } });
+    } finally {
+      setRestoreConfirmId(null);
+    }
+  };
+
   const normalizeMasterAdminSection = (subTab?: string): MasterAdminSection => {
     if (!subTab || subTab === 'overview' || subTab === 'master-admin') return 'overview';
 
@@ -525,7 +614,7 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
       title: 'MCPs & Sandbox Tool Grants',
       required: true,
       status: skills.length > 0 ? 'PASS' : 'PARTIAL',
-      missing: `${skills.length} sandbox tools registered. Remote MCP daemons not connected.`,
+      missing: `${skills.length} skill(s) registered for this workspace. No execution runtime (sandbox/MCP daemon) is wired into this deployment.`,
       setupAction: 'Register MCP tools and assign risk tiers',
       testAction: 'Execute isolated tool ping via MCP registry',
       section: 'mcps'
@@ -729,6 +818,7 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
           { id: 'updates' as MasterAdminSection, label: 'Updates', icon: RefreshCw },
           { id: 'health' as MasterAdminSection, label: 'Health & Ping', icon: BarChart3 },
           { id: 'audit' as MasterAdminSection, label: 'Audit', icon: FileText },
+          { id: 'backup' as MasterAdminSection, label: 'Backup & Restore', icon: HardDrive },
         ].map((tab) => {
           const Icon = tab.icon;
           const isActive = activeSection === tab.id;
@@ -1420,25 +1510,28 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
           </div>
 
           <div className="space-y-3 font-mono text-xs">
+            {skills.length === 0 && (
+              <div className="p-4 text-center text-slate-500 text-xs bg-[#06070E] border border-[#181B30] rounded-xl">
+                No skills are registered for this workspace.
+              </div>
+            )}
             {skills.map((tool) => (
-              <div key={tool.id} className="p-3.5 bg-[#06070E] border border-[#181B30] rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-3">
+              <div key={tool.skill_id} className="p-3.5 bg-[#06070E] border border-[#181B30] rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-3">
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-bold text-white">{tool.name}</span>
                     <span className="text-[10px] px-2 py-0.5 bg-[#615EFF]/20 text-[#A5A2FF] rounded font-bold">
                       {tool.category}
                     </span>
-                    <span className="text-[10px] px-2 py-0.5 bg-[#00D26A]/10 text-[#00D26A] rounded font-bold">
-                      {tool.installed ? 'INSTALLED' : 'AVAILABLE'}
+                    <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${tool.enabled ? 'bg-[#00D26A]/10 text-[#00D26A]' : 'bg-[#FF5E8E]/10 text-[#FF5E8E]'}`}>
+                      {tool.enabled ? 'ENABLED' : 'DISABLED'}
                     </span>
                   </div>
-                  <p className="text-slate-400 text-xs mt-1">{tool.description}</p>
+                  <p className="text-slate-400 text-xs mt-1">{tool.description || 'No description.'}</p>
                 </div>
 
                 <div className="flex items-center gap-3 shrink-0">
-                  <span className="text-[10px] text-slate-400">Risk: <strong className="text-emerald-400">LOW</strong></span>
-                  <span className="text-[10px] text-slate-400">Scope: <strong className="text-slate-200">Sandbox WASM</strong></span>
-                  <span className="text-[#00D26A] font-bold text-[10px]">● READY</span>
+                  <span className="text-[#7E8BB5] font-bold text-[10px]">● {tool.status}</span>
                 </div>
               </div>
             ))}
@@ -1784,6 +1877,121 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {activeSection === 'backup' && (
+        <div className="bg-[#090A16] border border-[#1C203E] p-6 rounded-2xl space-y-6 shadow-xl">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#181B34] pb-4">
+            <div>
+              <h2 className="text-lg font-bold text-white font-mono flex items-center gap-2">
+                <HardDrive className="w-5 h-5 text-[#A5A2FF]" />
+                Backup & Restore
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Real local backups of the database and Vault. Restore is always staged, never a live swap — a restart is required to actually apply one.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={fetchBackups}
+                disabled={isLoadingBackups}
+                className="p-2 bg-[#14172B] hover:bg-[#1C203C] text-white rounded-lg border border-[#282F52] cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingBackups ? 'animate-spin' : ''}`} />
+              </button>
+              <button
+                onClick={handleCreateBackup}
+                disabled={isCreatingBackup}
+                className="px-3.5 py-1.5 bg-[#615EFF] hover:bg-[#524EFA] disabled:opacity-50 text-xs font-mono font-bold text-white rounded-lg flex items-center gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isCreatingBackup ? 'animate-spin' : ''}`} /> {isCreatingBackup ? 'Creating...' : 'Create Backup'}
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-2 font-mono text-xs">
+            {backups.length === 0 && (
+              <div className="p-6 text-center bg-[#06070E] border border-[#181B30] rounded-xl text-slate-500">
+                No backups exist yet.
+              </div>
+            )}
+            {backups.map((b) => {
+              const validation = validationResults[b.backup_id];
+              return (
+                <div key={b.backup_id} className="p-3.5 bg-[#06070E] border border-[#181B30] rounded-xl space-y-2">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div>
+                      <span className="font-bold text-white">{b.backup_id}</span>
+                      <span className="text-slate-500 ml-2">{(b.size_bytes / 1024).toFixed(1)} KB</span>
+                      <span className="text-slate-500 ml-2">{b.created_at ? new Date(b.created_at).toLocaleString() : 'Unknown time'}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleValidateBackup(b.backup_id)}
+                        disabled={validatingId === b.backup_id}
+                        className="px-2.5 py-1 bg-[#14172B] hover:bg-[#1C203C] text-[#A5A2FF] rounded-lg border border-[#282F52] cursor-pointer disabled:opacity-50"
+                      >
+                        {validatingId === b.backup_id ? 'Validating...' : 'Validate'}
+                      </button>
+                      <button
+                        onClick={() => setRestoreConfirmId(b.backup_id)}
+                        className="px-2.5 py-1 bg-[#F59E0B]/15 hover:bg-[#F59E0B]/25 text-[#F59E0B] rounded-lg border border-[#F59E0B]/30 cursor-pointer"
+                      >
+                        Stage Restore
+                      </button>
+                    </div>
+                  </div>
+                  {validation && (
+                    <div className={`text-[11px] p-2 rounded-lg ${validation.valid ? 'bg-[#00D26A]/10 text-[#00D26A]' : 'bg-[#FF5E8E]/10 text-[#FF5E8E]'}`}>
+                      {validation.valid ? 'VALID — checksums verified.' : `INVALID: ${validation.issues.join('; ')}`}
+                      {validation.manifest && (
+                        <span className="block text-slate-400 mt-1">
+                          Database: {validation.manifest.database_included ? 'included' : 'not included'} · Vault files: {validation.manifest.vault_file_count}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {restoreConfirmId && (
+            <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+              <div className="bg-[#0B0D18] border border-[#F59E0B]/50 rounded-2xl w-full max-w-md p-6 space-y-4 shadow-2xl font-mono text-white">
+                <h3 className="text-sm font-bold text-[#F59E0B] flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4" /> Confirm Staged Restore
+                </h3>
+                <p className="text-xs text-slate-300">
+                  This validates <strong>{restoreConfirmId}</strong> and stages its real contents on disk. It does NOT touch the live database or Vault — a manual restart step is required afterward to actually apply it.
+                </p>
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => setRestoreConfirmId(null)} className="px-3 py-1.5 bg-[#1E2238] text-slate-300 rounded-lg text-xs cursor-pointer">Cancel</button>
+                  <button onClick={() => handleStageRestore(restoreConfirmId)} className="px-4 py-1.5 bg-[#F59E0B] text-black font-bold rounded-lg text-xs cursor-pointer">Confirm & Stage</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {restorePlan && (
+            <div className="p-4 bg-[#06070E] border border-[#181B30] rounded-xl space-y-2 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-white">Restore Plan — {restorePlan.backupId}</span>
+                <button onClick={() => setRestorePlan(null)} className="text-slate-500 hover:text-white cursor-pointer">✕</button>
+              </div>
+              {restorePlan.result?.success === false ? (
+                <p className="text-[#FF5E8E]">{restorePlan.result.error}</p>
+              ) : (
+                <>
+                  <p className="text-[#F59E0B] font-bold">{restorePlan.result.status}</p>
+                  <ol className="list-decimal list-inside text-slate-300 space-y-1">
+                    {(restorePlan.result.instructions || []).map((line: string, i: number) => <li key={i}>{line}</li>)}
+                  </ol>
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

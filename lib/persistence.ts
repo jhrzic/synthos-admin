@@ -385,6 +385,76 @@ export function getDatabase(): any {
         tokenize = 'porter unicode61'
       );
     `);
+
+    // Real, workspace-scoped skill registry. No secrets — a skill record is
+    // metadata (name/description/source reference) plus enabled/status, never
+    // a credential. `status` starts NOT_CONFIGURED and stays there: no
+    // execution runtime is wired into this deployment (see lib/skills.ts),
+    // so nothing here ever claims READY/LIVE without real evidence.
+    dbInstance.exec(`
+      CREATE TABLE IF NOT EXISTS skills (
+        skill_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        category TEXT NOT NULL DEFAULT 'custom',
+        version TEXT NOT NULL DEFAULT '0.1.0',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'NOT_CONFIGURED',
+        source_type TEXT NOT NULL DEFAULT 'manual',
+        source_ref TEXT,
+        markdown_spec TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_skills_workspace ON skills(workspace_id);
+    `);
+
+    // Every real test-invocation attempt against a skill, workspace-scoped.
+    // This is what a skill's derived call count / outcome history is
+    // computed from at read time — never a stored, hand-set counter that
+    // could silently drift from what actually happened.
+    dbInstance.exec(`
+      CREATE TABLE IF NOT EXISTS skill_test_events (
+        event_id TEXT PRIMARY KEY,
+        skill_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        message TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_skill_test_events_skill ON skill_test_events(skill_id);
+    `);
+
+    // Real, workspace-scoped Jarvis conversation history. Jarvis itself is
+    // a global UI surface, but its history is scoped by the caller's active
+    // workspace, same as every admin query it can run (see
+    // /api/jarvis/command). No hidden chain-of-thought or secrets are ever
+    // stored — only the visible directive text and the visible reply text,
+    // the same content already shown on screen.
+    dbInstance.exec(`
+      CREATE TABLE IF NOT EXISTS jarvis_sessions (
+        session_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        title TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_jarvis_sessions_workspace ON jarvis_sessions(workspace_id);
+
+      CREATE TABLE IF NOT EXISTS jarvis_messages (
+        message_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        message_type TEXT NOT NULL DEFAULT 'text',
+        provider TEXT,
+        model TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_jarvis_messages_session ON jarvis_messages(session_id);
+    `);
   }
   return dbInstance;
 }

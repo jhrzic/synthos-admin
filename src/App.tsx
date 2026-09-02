@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { 
   ActiveTab, AIModelInfo, ObsidianNote, ObsidianVault, 
   BotTask, JarvisSettings, AgentInfo, KanbanTask, ModelRouterRule, AgentRole,
-  TelegramMessage, CronScheduleJob, IntakeItem, IdeaItem, SkillDefinition, SystemAuditCheck, SynthOSRun,
+  TelegramMessage, CronScheduleJob, IntakeItem, IdeaItem, SystemAuditCheck, SynthOSRun,
   KanbanColumnId
 } from './types';
 import { 
@@ -10,7 +10,7 @@ import {
   INITIAL_BOT_TASKS, INITIAL_JARVIS_SETTINGS,
   INITIAL_AGENTS, INITIAL_KANBAN_TASKS, INITIAL_ROUTER_RULES,
   INITIAL_TELEGRAM_MESSAGES, INITIAL_CRON_JOBS, INITIAL_GUIDE_STEPS,
-  INITIAL_INTAKE_ITEMS, INITIAL_IDEAS, INITIAL_SKILLS, INITIAL_SYSTEM_AUDIT_CHECKS,
+  INITIAL_INTAKE_ITEMS, INITIAL_IDEAS, INITIAL_SYSTEM_AUDIT_CHECKS,
   GuideStep
 } from './data/mockData';
 import { AGENT_DEFINITIONS } from './data/agentDefinitions';
@@ -236,7 +236,6 @@ export default function App() {
   // Hermes AgentOS Specialized Modules State
   const [intakeItems, setIntakeItems] = useState<IntakeItem[]>(INITIAL_INTAKE_ITEMS);
   const [ideaItems, setIdeaItems] = useState<IdeaItem[]>(INITIAL_IDEAS);
-  const [skills, setSkills] = useState<SkillDefinition[]>(INITIAL_SKILLS);
   const [systemAuditChecks, setSystemAuditChecks] = useState<SystemAuditCheck[]>(INITIAL_SYSTEM_AUDIT_CHECKS);
 
   // Voice Feedback Streamer Helper (Fish Audio with Web Speech Fallback)
@@ -301,13 +300,54 @@ export default function App() {
     }
   };
 
+  // Real, workspace-scoped Jarvis conversation session. Lazily created on
+  // the first directive of a session and reset whenever the active
+  // workspace changes (a session belongs to one workspace, same as every
+  // other Jarvis admin query) or the user explicitly starts a new chat.
+  const [jarvisSessionId, setJarvisSessionId] = useState<string | null>(null);
+  useEffect(() => { setJarvisSessionId(null); }, [activeWorkspaceId]);
+  const handleNewJarvisSession = () => setJarvisSessionId(null);
+
   // Real, workspace-scoped Jarvis admin-command dispatcher. Jarvis's own
   // text/voice submission uses this instead of handleSendQuery — the
   // backend route itself decides whether the directive is a supported admin
   // query (tasks/graphs/receipts) or ordinary conversation, and answers
   // accordingly. Only Jarvis calls this; every other onSendQuery consumer
   // (Hermes chat, Twins, Skills test, etc.) is unaffected.
-  const handleJarvisCommand = async (command: string): Promise<string> => {
+  //
+  // Every real directive and its real reply is also persisted to a
+  // workspace-scoped Jarvis session (lib/jarvis-sessions.ts) — a real
+  // conversation history that survives reload, not just React state. A
+  // persistence failure here never blocks the directive itself from
+  // returning a reply.
+  const handleJarvisCommand = async (command: string, messageType: 'text' | 'voice_transcript' = 'text'): Promise<string> => {
+    let sessionId = jarvisSessionId;
+    try {
+      if (!sessionId) {
+        const sessionRes = await fetch('/api/jarvis/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId: activeWorkspaceId }),
+        });
+        const sessionData = await sessionRes.json();
+        if (sessionRes.ok && sessionData.success !== false) {
+          sessionId = sessionData.session.session_id;
+          setJarvisSessionId(sessionId);
+        }
+      }
+      if (sessionId) {
+        fetch(`/api/jarvis/sessions/${encodeURIComponent(sessionId)}/messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId: activeWorkspaceId, role: 'user', content: command, messageType }),
+        }).catch(() => { /* real network failure — the directive below still runs */ });
+      }
+    } catch {
+      // Session bootstrap failed — proceed without persistence rather than
+      // blocking the directive itself.
+    }
+
+    let reply: string;
     try {
       const res = await fetch('/api/jarvis/command', {
         method: 'POST',
@@ -316,12 +356,23 @@ export default function App() {
       });
       const data = await res.json();
       if (!res.ok || data.success === false) {
-        return `[STATUS: DEGRADED - JARVIS_COMMAND_UNAVAILABLE]\n${data.error || `HTTP ${res.status}`}`;
+        reply = `[STATUS: DEGRADED - JARVIS_COMMAND_UNAVAILABLE]\n${data.error || `HTTP ${res.status}`}`;
+      } else {
+        reply = data.reply || 'Directive acknowledged.';
       }
-      return data.reply || 'Directive acknowledged.';
     } catch (err: any) {
-      return `[STATUS: DEGRADED - JARVIS_COMMAND_UNAVAILABLE]\nReason: ${err?.message || 'Network error / API gateway unreachable'}`;
+      reply = `[STATUS: DEGRADED - JARVIS_COMMAND_UNAVAILABLE]\nReason: ${err?.message || 'Network error / API gateway unreachable'}`;
     }
+
+    if (sessionId) {
+      fetch(`/api/jarvis/sessions/${encodeURIComponent(sessionId)}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId: activeWorkspaceId, role: 'assistant', content: reply }),
+      }).catch(() => { /* real network failure — the reply is still returned to the caller */ });
+    }
+
+    return reply;
   };
 
   // Add Note to Obsidian Vault with full Workspace Memory Provenance
@@ -1185,44 +1236,9 @@ Output your audit in markdown with your exact decision at the very top.`;
     setIdeaItems(prev => prev.filter(i => i.id !== id));
   };
 
-  // Skill Registry Handlers
-  const handleToggleSkill = (id: string, enabled: boolean) => {
-    setSkills(prev => prev.map(s => s.id === id ? { ...s, enabled } : s));
-  };
-
-  const handleAddSkill = (skill: Omit<SkillDefinition, 'id' | 'callCount' | 'successRate'>) => {
-    const newSkill: SkillDefinition = {
-      ...skill,
-      id: `skill-${Date.now()}`,
-      callCount: 0,
-      successRate: 100,
-      lastExecuted: 'Never'
-    };
-    setSkills(prev => [newSkill, ...prev]);
-  };
-
-  const handleTestSkill = async (skillId: string, params: Record<string, any>): Promise<string> => {
-    const skill = skills.find(s => s.id === skillId);
-    if (!skill) return 'Skill not found';
-
-    try {
-      const response = await handleSendQuery(
-        `Execute MCP Skill Tool "${skill.name}" with arguments:\n${JSON.stringify(params, null, 2)}`,
-        'claude',
-        `You are the executing runner for tool "${skill.name}". Markdown Specification: ${skill.markdownSpec}. Return a valid JSON response.`
-      );
-
-      setSkills(prev => prev.map(s => s.id === skillId ? { 
-        ...s, 
-        callCount: s.callCount + 1, 
-        lastExecuted: 'Just now' 
-      } : s));
-
-      return response;
-    } catch (err) {
-      return `Execution error: ${String(err)}`;
-    }
-  };
+  // Skill Registry: SkillRegistryView is now fully self-contained against
+  // the real /api/skills backend (see lib/skills.ts) — no App.tsx-level
+  // state or handlers needed here any more.
 
   // System Audit & Diagnostics Handlers
   const handleRunAudit = async (): Promise<void> => {
@@ -1372,12 +1388,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
 
           {/* Skill Registry & Model Context Protocol (MCP) Manager */}
           {activeTab === 'skill-registry' && (
-            <SkillRegistryView
-              skills={skills}
-              onToggleSkill={handleToggleSkill}
-              onAddSkill={handleAddSkill}
-              onTestSkill={handleTestSkill}
-            />
+            <SkillRegistryView activeWorkspaceId={activeWorkspaceId} />
           )}
 
           {/* System Audit & Diagnostics Telemetry */}
@@ -1525,6 +1536,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               onSelectTab={setActiveTab}
               onExecutePrompt={handleSendQuery}
               onAddNoteToVault={(title, content, tags, folder) => handleAddNoteToVault(title, content, tags, folder || 'Pipeline-Runs')}
+              activeWorkspaceId={activeWorkspaceId}
             />
           )}
 
@@ -1532,6 +1544,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           {activeTab === 'graph-runs' && (
             <GraphRunsView
               onSelectTab={setActiveTab}
+              activeWorkspaceId={activeWorkspaceId}
             />
           )}
 
@@ -1715,12 +1728,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           )}
 
           {(activeTab === 'hermes-skills' || activeTab === 'hermes-mcps' || activeTab === 'hermes-tools') && (
-            <SkillRegistryView
-              skills={skills}
-              onToggleSkill={handleToggleSkill}
-              onAddSkill={handleAddSkill}
-              onTestSkill={handleTestSkill}
-            />
+            <SkillRegistryView activeWorkspaceId={activeWorkspaceId} />
           )}
 
           {activeTab === 'hermes-cron' && (
@@ -1974,6 +1982,8 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               onAddNoteToVault={(title, content, tags) => handleAddNoteToVault(title, content, tags, 'Jarvis-Directives')}
               onSendQuery={handleSendQuery}
               onJarvisCommand={handleJarvisCommand}
+              activeWorkspaceId={activeWorkspaceId}
+              onNewJarvisSession={handleNewJarvisSession}
             />
           )}
 
@@ -1994,7 +2004,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               models={models}
               tasks={kanbanTasks}
               notes={notes}
-              skills={skills}
+              activeWorkspaceId={activeWorkspaceId}
               auditChecks={systemAuditChecks}
               voiceConfig={voiceConfig}
               onUpdateVoiceConfig={handleUpdateVoiceConfig}
