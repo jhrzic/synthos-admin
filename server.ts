@@ -2817,21 +2817,6 @@ sourceHash: ${packageMetadataResult.sourceHash}
   // HERMES UPSTREAM UPDATE WATCHER & ADMIN CONTROLS (PER SPEC)
   // ============================================================================
 
-  let hermesState = {
-    installedVersion: "v3.0.4",
-    latestVersion: "v3.2.1",
-    releaseDate: "2026-08-28T14:30:00Z",
-    installedCommit: "7f8a92c",
-    latestCommit: "9e41b80",
-    configVersion: "v2.4.0",
-    latestConfigVersion: "v2.5.0",
-    configMigrationRequired: true,
-    lastChecked: new Date().toISOString(),
-    dailyCronActive: true,
-    updateTested: false,
-    updateApproved: false
-  };
-
   app.get("/api/hermes/health", async (req, res) => {
     try {
       const health = await hermesAdapter.health();
@@ -2907,149 +2892,93 @@ sourceHash: ${packageMetadataResult.sourceHash}
     });
   });
 
+  // ----------------------------------------------------------------------------
+  // NOT_IMPLEMENTED: no real upstream Hermes version-check, sandbox-test, update-
+  // approval, or config-migration mechanism exists. These previously returned a
+  // hardcoded in-memory `hermesState` object (fake versions, fake commit hashes,
+  // fake config state) as if it were real. They now report their true status
+  // instead of fabricating one. The canonical Hermes runtime status source
+  // remains GET /api/hermes/health -> hermesAdapter (ADR-001) — unaffected here.
+  // ----------------------------------------------------------------------------
+
   app.post("/api/hermes/check", (req, res) => {
-    hermesState.lastChecked = new Date().toISOString();
     return res.json({
-      success: true,
-      message: "Upstream Hermes repository checked successfully.",
-      installedVersion: hermesState.installedVersion,
-      latestVersion: hermesState.latestVersion,
-      updateAvailable: hermesState.installedVersion !== hermesState.latestVersion,
-      lastChecked: hermesState.lastChecked,
+      success: false,
+      status: "NOT_IMPLEMENTED",
+      message: "Upstream Hermes version-check is not implemented. There is no mechanism that queries an upstream Hermes repository for version/commit information. Canonical Hermes runtime status is GET /api/hermes/health.",
       timestamp: new Date().toISOString()
     });
   });
 
   app.post("/api/hermes/test-update", (req, res) => {
-    hermesState.updateTested = true;
     return res.json({
-      success: true,
-      status: "TEST_PASSED",
-      message: "Sandbox test of Hermes v3.2.1 build completed cleanly. 0 regressions detected.",
-      exitCode: 0,
-      dryRunDetails: {
-        dependencyCheck: "PASS",
-        schemaCompat: "PASS",
-        telegramThreadRouting: "PASS",
-        boardDbMigration: "PASS"
-      },
+      success: false,
+      status: "NOT_IMPLEMENTED",
+      message: "Sandbox update testing is not implemented. No update-candidate build exists to test.",
       timestamp: new Date().toISOString()
     });
   });
 
   app.post("/api/hermes/approve-update", (req, res) => {
-    const { approvedBy = "System Administrator", confirmation = true } = req.body || {};
-    if (!confirmation) {
-      return res.status(400).json({ success: false, message: "Human approval confirmation required." });
-    }
-
-    hermesState.installedVersion = hermesState.latestVersion;
-    hermesState.installedCommit = hermesState.latestCommit;
-    hermesState.updateApproved = true;
-    hermesState.lastChecked = new Date().toISOString();
-
     return res.json({
-      success: true,
-      status: "UPGRADED",
-      installedVersion: hermesState.installedVersion,
-      approvedBy,
-      message: `Production Hermes AgentOS successfully upgraded to ${hermesState.installedVersion}.`,
+      success: false,
+      status: "NOT_IMPLEMENTED",
+      message: "Hermes update approval is not implemented. There is no update mechanism to approve or apply.",
       timestamp: new Date().toISOString()
     });
   });
 
   app.post("/api/hermes/config-check", (req, res) => {
     return res.json({
-      success: true,
+      success: false,
+      status: "NOT_IMPLEMENTED",
       command: "hermes config check",
-      status: "VALIDATED",
-      configVersion: hermesState.configVersion,
-      latestConfigVersion: hermesState.latestConfigVersion,
-      migrationRequired: hermesState.configMigrationRequired,
-      checks: [
-        { name: "board.db Schema Integrity", status: "PASS" },
-        { name: "Telegram Bot Tokens & 3-Digit Threads", status: "PASS" },
-        { name: "OpenRouter Arbitration Keys", status: "PASS" },
-        { name: "Obsidian Vault Synapse Mount", status: "PASS" }
-      ],
-      output: "[hermes config check]: Schema v2.4.0 verified. 1 migration available to v2.5.0.",
+      message: "Hermes configuration validation is not implemented. No configuration schema checks are performed.",
+      checks: [],
       timestamp: new Date().toISOString()
     });
   });
 
   app.post("/api/hermes/config-migrate", (req, res) => {
-    hermesState.configVersion = hermesState.latestConfigVersion;
-    hermesState.configMigrationRequired = false;
-
     return res.json({
-      success: true,
+      success: false,
+      status: "NOT_IMPLEMENTED",
       command: "hermes config migrate",
-      status: "MIGRATED",
-      previousConfigVersion: "v2.4.0",
-      newConfigVersion: hermesState.configVersion,
-      migrationRequired: false,
-      details: [
-        "Migrated board.db task schema to include strict priority and verification signature fields.",
-        "Added OpenRouter fallback list to configuration.",
-        "Updated Telegram thread routing table to 3-digit identifiers (101-106)."
-      ],
-      output: "[hermes config migrate]: Successfully migrated configuration to v2.5.0.",
+      message: "Hermes configuration migration is not implemented. No configuration migration is performed.",
       timestamp: new Date().toISOString()
     });
   });
 
+  // ----------------------------------------------------------------------------
+  // NOT_IMPLEMENTED: ADR-001 defines the Hermes runtime as a network boundary
+  // reached only through hermesAdapter (health/capabilities/execute/events).
+  // "No direct filesystem reads across it" (ADR-001 Decision 3) — so a local
+  // ~/.hermes/state.db path is not part of the current architecture, and these
+  // routes previously returned hardcoded table counts and fabricated log
+  // entries as if a local database had actually been queried. Neither route
+  // has a live UI consumer today (only the unused src/lib/hermes-db.ts helpers
+  // called them). They now report their true status instead.
+  // ----------------------------------------------------------------------------
+
   app.get("/api/hermes/db-state", (req, res) => {
-    const stateDbPath = path.join(os.homedir(), ".hermes", "state.db");
-    const logsDbPath = path.join(os.homedir(), "jarvis-mission-control", "agent-logs.db");
-
-    const stateDbExists = fs.existsSync(stateDbPath);
-    const logsDbExists = fs.existsSync(logsDbPath);
-    const isFullyConnected = stateDbExists && logsDbExists;
-
     res.json({
-      version: "4.2.0-hermes-core",
-      connected: isFullyConnected,
-      status: isFullyConnected ? "READONLY_ATTACHED" : "NOT_CONNECTED",
-      classification: isFullyConnected ? "LOCAL_FOUND" : "LOCAL_ONLY_NOT_FOUND",
-      stateDbPath,
-      logsDbPath,
-      stateDbClassification: stateDbExists ? "LOCAL_FOUND" : "LOCAL_ONLY_NOT_FOUND",
-      logsDbClassification: logsDbExists ? "LOCAL_FOUND" : "LOCAL_ONLY_NOT_FOUND",
-      migrationRequired: !isFullyConnected,
-      message: isFullyConnected
-        ? "Local SQLite databases found and attached."
-        : "Local Mac filesystem paths (~/.hermes/state.db, ~/jarvis-mission-control/agent-logs.db) were not found in Cloud Run container runtime. Migration to Cloud SQL or remote storage required.",
-      tableCounts: isFullyConnected
-        ? { agents: 6, tasks: 18, logs: 342, synapses: 7 }
-        : { agents: 0, tasks: 0, logs: 0, synapses: 0 },
+      status: "NOT_IMPLEMENTED",
+      connected: false,
+      source: "NONE",
+      message: "Direct Hermes database access is not implemented. ADR-001 routes all Hermes state through hermesAdapter, which does not expose a local database query surface. Canonical Hermes runtime status is GET /api/hermes/health.",
+      tableCounts: null,
       timestamp: new Date().toISOString(),
     });
   });
 
   app.get("/api/hermes/logs", (req, res) => {
-    const logsDbPath = path.join(os.homedir(), "jarvis-mission-control", "agent-logs.db");
-    const logsDbExists = fs.existsSync(logsDbPath);
-
-    if (!logsDbExists) {
-      return res.json([
-        {
-          id: "sys-1",
-          agent_id: "orchestrator",
-          timestamp: new Date().toISOString(),
-          level: "warn",
-          message: "Local agent-logs.db not found in Cloud Run runtime environment (LOCAL_ONLY_NOT_FOUND).",
-        },
-      ]);
-    }
-
-    res.json([
-      { id: "1", agent_id: "orchestrator", timestamp: new Date(Date.now() - 120000).toISOString(), level: "info", message: "Fleet status synchronized with board.db state machine." },
-      { id: "2", agent_id: "scout", timestamp: new Date(Date.now() - 90000).toISOString(), level: "info", message: "Harvested 18 new trend signals from arXiv and Product Hunt." },
-      { id: "3", agent_id: "scribe", timestamp: new Date(Date.now() - 60000).toISOString(), level: "info", message: "Updated [[Startup-Theses/Agentic-Architecture]] with 12 new wikilinks." },
-      { id: "4", agent_id: "reach", timestamp: new Date(Date.now() - 40000).toISOString(), level: "info", message: "Generated viral distribution hooks for developer launch." },
-      { id: "5", agent_id: "dev", timestamp: new Date(Date.now() - 20000).toISOString(), level: "info", message: "Sandbox execution latency validated at 41ms." },
-      { id: "6", agent_id: "analytics", timestamp: new Date().toISOString(), level: "info", message: "Token inference efficiency measured at +28.4% optimization." },
-    ]);
+    res.json({
+      status: "NOT_IMPLEMENTED",
+      source: "NONE",
+      logs: [],
+      message: "Hermes log streaming is not implemented. hermesAdapter.events() is deferred to ADR-001 Phase 2.",
+      timestamp: new Date().toISOString(),
+    });
   });
 
   app.get("/api/providers/status", (req, res) => {

@@ -37,28 +37,39 @@ export interface AgentLogRecord {
   metadata?: Record<string, any>;
 }
 
-// Client-safe helper to query local Hermes DB tables
+// Client-safe helper to query Hermes admin status.
+// NOTE: /api/hermes/db-state is NOT_IMPLEMENTED (see server.ts) — ADR-001 routes
+// all Hermes state through hermesAdapter, which has no local database query
+// surface. This helper reports that truthfully rather than fabricating a
+// "connected" state or invented table counts on failure.
 export async function queryHermesState(): Promise<HermesDbState> {
   try {
     const res = await fetch('/api/hermes/db-state');
     if (res.ok) {
-      return await res.json();
+      const data = await res.json();
+      return {
+        version: data.version || 'NOT_AVAILABLE',
+        connected: Boolean(data.connected),
+        stateDbPath: data.stateDbPath || 'NOT_AVAILABLE',
+        logsDbPath: data.logsDbPath || 'NOT_AVAILABLE',
+        tableCounts: data.tableCounts || { agents: 0, tasks: 0, logs: 0, synapses: 0 },
+      };
     }
   } catch (err) {
-    console.warn('[Hermes DB] State API query fell back to local cache:', err);
+    console.warn('[Hermes DB] State API query failed:', err);
   }
 
-  // Safe fallback
+  // Truthful fallback — no real data available, not a fabricated "connected" state
   return {
-    version: '4.2.0-hermes-core',
-    connected: true,
-    stateDbPath: '~/.hermes/state.db',
-    logsDbPath: '~/jarvis-mission-control/agent-logs.db',
+    version: 'NOT_AVAILABLE',
+    connected: false,
+    stateDbPath: 'NOT_AVAILABLE',
+    logsDbPath: 'NOT_AVAILABLE',
     tableCounts: {
-      agents: 6,
-      tasks: 18,
-      logs: 240,
-      synapses: 7,
+      agents: 0,
+      tasks: 0,
+      logs: 0,
+      synapses: 0,
     },
   };
 }
@@ -68,7 +79,8 @@ export async function fetchHermesLogs(agentId?: string): Promise<AgentLogRecord[
     const url = agentId ? `/api/hermes/logs?agentId=${encodeURIComponent(agentId)}` : '/api/hermes/logs';
     const res = await fetch(url);
     if (res.ok) {
-      return await res.json();
+      const data = await res.json();
+      return Array.isArray(data) ? data : (data.logs || []);
     }
   } catch (err) {
     console.warn('[Hermes DB] Logs query failed:', err);

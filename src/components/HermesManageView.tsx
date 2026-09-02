@@ -174,22 +174,17 @@ export const HermesManageView: React.FC<HermesManageViewProps> = ({
 
   const handleCheckNow = async () => {
     setIsCheckingUpstream(true);
-    setCliOutput(prev => `\n[hermes check]: Querying upstream repository at https://github.com/NousResearch/hermes-agent...\n` + prev);
+    setCliOutput(prev => `\n[hermes check]: Querying upstream Hermes version-check endpoint...\n` + prev);
     try {
       const res = await fetch('/api/hermes/check', { method: 'POST' });
-      if (res.ok) {
-        const result = await res.json();
-        setUpstreamData(prev => ({
-          ...prev,
-          lastChecked: result.lastChecked,
-          updateAvailable: result.updateAvailable,
-          installedVersion: result.installedVersion,
-          latestVersion: result.latestVersion,
-        }));
+      const result = await res.json();
+      if (result.status === 'NOT_IMPLEMENTED') {
+        setCliOutput(prev => `[hermes check]: NOT_IMPLEMENTED — ${result.message}\n` + prev);
+      } else {
         setCliOutput(prev => `[hermes check]: Upstream checked successfully. Latest commit verified.\n` + prev);
       }
     } catch (err: any) {
-      setCliOutput(prev => `[hermes check]: Check completed with cached local state.\n` + prev);
+      setCliOutput(prev => `[hermes check]: FAILED — ${err?.message || 'network error contacting Hermes admin API.'}\n` + prev);
     } finally {
       setIsCheckingUpstream(false);
     }
@@ -197,15 +192,17 @@ export const HermesManageView: React.FC<HermesManageViewProps> = ({
 
   const handleTestUpdate = async () => {
     setIsTestingUpdate(true);
-    setCliOutput(prev => `\n[hermes test-update]: Executing sandbox dry-run validation on Hermes ${upstreamData.latestVersion}...\n` + prev);
+    setCliOutput(prev => `\n[hermes test-update]: Requesting sandbox dry-run validation...\n` + prev);
     try {
       const res = await fetch('/api/hermes/test-update', { method: 'POST' });
-      if (res.ok) {
-        const result = await res.json();
+      const result = await res.json();
+      if (result.status === 'NOT_IMPLEMENTED') {
+        setCliOutput(prev => `[hermes test-update]: NOT_IMPLEMENTED — ${result.message}\n` + prev);
+      } else {
         setCliOutput(prev => `[hermes test-update]: SUCCESS. ${result.message}\n` + prev);
       }
     } catch (err: any) {
-      setCliOutput(prev => `[hermes test-update]: Sandbox verified locally.\n` + prev);
+      setCliOutput(prev => `[hermes test-update]: FAILED — ${err?.message || 'network error contacting Hermes admin API.'}\n` + prev);
     } finally {
       setIsTestingUpdate(false);
     }
@@ -214,61 +211,54 @@ export const HermesManageView: React.FC<HermesManageViewProps> = ({
   const handleApproveUpdate = async () => {
     setIsUpgrading(true);
     setShowApprovalModal(false);
-    setCliOutput(prev => `\n[hermes update]: Human authorization confirmed. Applying upgrade to ${upstreamData.latestVersion}...\n` + prev);
+    setCliOutput(prev => `\n[hermes update]: Human authorization confirmed. Requesting update...\n` + prev);
     try {
       const res = await fetch('/api/hermes/approve-update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ approvedBy: 'Lead Operator', confirmation: true })
       });
-      if (res.ok) {
-        const result = await res.json();
-        setUpstreamData(prev => ({
-          ...prev,
-          installedVersion: result.installedVersion,
-          updateAvailable: false,
-          lastChecked: new Date().toISOString()
-        }));
+      const result = await res.json();
+      if (result.status === 'NOT_IMPLEMENTED') {
+        setCliOutput(prev => `[hermes update]: NOT_IMPLEMENTED — ${result.message}\n` + prev);
+      } else {
         setCliOutput(prev => `[hermes update]: SUCCESS. ${result.message}\n` + prev);
       }
     } catch (err: any) {
-      setUpstreamData(prev => ({ ...prev, installedVersion: prev.latestVersion, updateAvailable: false }));
-      setCliOutput(prev => `[hermes update]: Production successfully upgraded to latest.\n` + prev);
+      setCliOutput(prev => `[hermes update]: FAILED — ${err?.message || 'network error contacting Hermes admin API.'}\n` + prev);
     } finally {
       setIsUpgrading(false);
     }
   };
 
   const handleConfigCheck = async () => {
-    setCliOutput(prev => `\n[hermes config check]: Validating hermes.config.json and environment variables...\n` + prev);
+    setCliOutput(prev => `\n[hermes config check]: Validating Hermes configuration...\n` + prev);
     try {
       const res = await fetch('/api/hermes/config-check', { method: 'POST' });
-      if (res.ok) {
-        const result = await res.json();
+      const result = await res.json();
+      if (result.status === 'NOT_IMPLEMENTED') {
+        setCliOutput(prev => `[hermes config check]: NOT_IMPLEMENTED — ${result.message}\n` + prev);
+      } else {
         setCliOutput(prev => `${result.output}\n` + prev);
       }
-    } catch (err) {
-      setCliOutput(prev => `[hermes config check]: Schema v2.4.0 verified. 1 migration available.\n` + prev);
+    } catch (err: any) {
+      setCliOutput(prev => `[hermes config check]: FAILED — ${err?.message || 'network error contacting Hermes admin API.'}\n` + prev);
     }
   };
 
   const handleConfigMigrate = async () => {
     setIsMigratingConfig(true);
-    setCliOutput(prev => `\n[hermes config migrate]: Executing configuration migration to ${upstreamData.latestConfigVersion}...\n` + prev);
+    setCliOutput(prev => `\n[hermes config migrate]: Requesting configuration migration...\n` + prev);
     try {
       const res = await fetch('/api/hermes/config-migrate', { method: 'POST' });
-      if (res.ok) {
-        const result = await res.json();
-        setUpstreamData(prev => ({
-          ...prev,
-          configVersion: result.newConfigVersion,
-          configMigrationRequired: false
-        }));
+      const result = await res.json();
+      if (result.status === 'NOT_IMPLEMENTED') {
+        setCliOutput(prev => `[hermes config migrate]: NOT_IMPLEMENTED — ${result.message}\n` + prev);
+      } else {
         setCliOutput(prev => `${result.output}\n` + prev);
       }
-    } catch (err) {
-      setUpstreamData(prev => ({ ...prev, configVersion: prev.latestConfigVersion, configMigrationRequired: false }));
-      setCliOutput(prev => `[hermes config migrate]: Configuration schema successfully migrated to v2.5.0.\n` + prev);
+    } catch (err: any) {
+      setCliOutput(prev => `[hermes config migrate]: FAILED — ${err?.message || 'network error contacting Hermes admin API.'}\n` + prev);
     } finally {
       setIsMigratingConfig(false);
     }
