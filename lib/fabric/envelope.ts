@@ -49,6 +49,7 @@ import {
   acquireExecutionClaim,
   resolveExecutionClaim,
   type ExecutionClaimRecord,
+  type ScheduleRecord,
 } from '../persistence';
 import { verifyTaskAtGate } from '../kil-gate';
 import { indexVaultArtifact, searchWorkspaceMemory } from '../memory-index';
@@ -90,6 +91,8 @@ export interface ExecutionEnvelopeResult {
   aegis?: { decision: string; score: number | null } | null;
   receipt?: { receiptId: string; verified: boolean } | null;
   toolsInvoked?: string[];
+  /** STEP 7 — present only for capability 'schedule': the real, persisted schedule this call created (or attempted to). Never fabricated when creation was refused. */
+  schedule?: ScheduleRecord;
 }
 
 // EXTERNAL_ACTION capabilities Jarvis (or any envelope caller) may still
@@ -165,6 +168,8 @@ export async function executeEnvelope(input: ExecutionEnvelopeInput): Promise<Ex
       return executeVaultWrite(input);
     case 'research':
       return executeResearch(input);
+    case 'schedule':
+      return executeSchedule(input);
     default:
       // A registered, AVAILABLE capability with no wired executor here —
       // honest, never a fabricated attempt.
@@ -639,4 +644,28 @@ async function commitEvidencedArtifact(params: {
     receipt: { receiptId, verified: true },
     toolsInvoked: params.toolsInvoked,
   };
+}
+
+/**
+ * STEP 7 — creates a real, persisted schedule from natural language. This
+ * is the ONLY place envelope.ts imports lib/fabric/scheduler.ts, and it
+ * does so lazily (dynamic import, resolved at call time, not module-load
+ * time) specifically to avoid a static circular import: scheduler.ts
+ * itself imports executeEnvelope from this file to actually FIRE a due
+ * occurrence. The cycle is real in the dependency graph but never a
+ * load-order problem, because by the time this function is ever called,
+ * both modules have already fully loaded.
+ *
+ * Deliberately does NOT call a provider, write a Vault artifact, or sign a
+ * receipt — creating a schedule is a CONTROL action; the real work happens
+ * later, through this exact same executeEnvelope() dispatcher, when
+ * lib/fabric/scheduler.ts's tick loop calls it again for the due occurrence.
+ */
+async function executeSchedule(input: ExecutionEnvelopeInput): Promise<ExecutionEnvelopeResult> {
+  const { executeScheduleFromNaturalLanguage } = await import('./scheduler');
+  return executeScheduleFromNaturalLanguage({
+    workspaceId: input.workspaceId,
+    actorUserId: input.actorUserId,
+    rawText: input.rawText,
+  });
 }

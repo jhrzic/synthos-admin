@@ -84,7 +84,7 @@ describe('"what are the latest transformer repos?" -> requiresLiveData, BLOCKED 
   });
 });
 
-describe('"schedule this for tomorrow" -> ACTION_REQUEST mapped to schedule (NOT_CONFIGURED until Step 7)', () => {
+describe('"schedule this for tomorrow" -> ACTION_REQUEST mapped to schedule (real as of Step 7)', () => {
   it('classifies as an action request against the schedule capability', async () => {
     const result = await classifyIntent('schedule this for tomorrow');
     expect(result.intentType).toBe('ACTION_REQUEST');

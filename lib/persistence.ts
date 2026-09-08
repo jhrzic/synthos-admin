@@ -251,6 +251,56 @@ export function getDatabase(): any {
 
       CREATE INDEX IF NOT EXISTS idx_execution_claims_task ON execution_claims(task_id);
 
+      -- STEP 7 — the canonical schedule model. The scheduler only decides
+      -- WHEN to invoke; capability/action/parameters/raw_text are handed
+      -- verbatim to executeEnvelope() (lib/fabric/scheduler.ts) exactly as
+      -- Jarvis's own direct path builds one — this table stores what to run
+      -- later, never how to run it.
+      CREATE TABLE IF NOT EXISTS schedules (
+        schedule_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        actor_user_id TEXT NOT NULL,
+        capability TEXT NOT NULL,
+        action TEXT NOT NULL,
+        parameters_json TEXT NOT NULL DEFAULT '{}',
+        raw_text TEXT NOT NULL,
+        recurrence_type TEXT NOT NULL CHECK (recurrence_type IN ('ONCE', 'INTERVAL')),
+        interval_seconds INTEGER,
+        next_run_at TEXT,
+        last_run_at TEXT,
+        status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'PAUSED', 'COMPLETED', 'FAILED', 'BLOCKED', 'NOT_CONFIGURED', 'CANCELLED')),
+        status_reason TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_schedules_workspace ON schedules(workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(status, next_run_at);
+
+      -- One row per real, resolved occurrence (never a duplicate — see
+      -- recordScheduleOccurrence's upsert-by-(schedule_id,due_at)). This is
+      -- pure bookkeeping/history, not a second idempotency mechanism: the
+      -- actual duplicate-execution guard is execution_claims, reached via
+      -- the identical idempotency_key stored here for traceability.
+      CREATE TABLE IF NOT EXISTS schedule_occurrences (
+        occurrence_id TEXT PRIMARY KEY,
+        schedule_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        due_at TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('SUCCEEDED', 'FAILED', 'BLOCKED', 'NOT_CONFIGURED')),
+        outcome TEXT NOT NULL,
+        reason TEXT,
+        task_id TEXT,
+        artifact_id TEXT,
+        receipt_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (schedule_id, due_at)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_schedule_occurrences_schedule ON schedule_occurrences(schedule_id);
+
       CREATE TABLE IF NOT EXISTS graphs (
         graph_id TEXT PRIMARY KEY,
         workspace_id TEXT,
@@ -1031,6 +1081,171 @@ export function reconcileStaleExecutionClaims(): number {
     WHERE status = 'CLAIMED'
   `).run(new Date().toISOString());
   return result.changes;
+}
+
+// ---------------------------------------------------------------------------
+// STEP 7 — schedule persistence. Pure storage/CRUD only; deciding WHAT a
+// schedule may do (capability gating, Guardian/approval eligibility) lives
+// in lib/fabric/scheduler.ts, and actually DOING it always goes through
+// executeEnvelope() — nothing here calls a provider or writes an artifact.
+// ---------------------------------------------------------------------------
+
+export type ScheduleStatus = 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'FAILED' | 'BLOCKED' | 'NOT_CONFIGURED' | 'CANCELLED';
+export type ScheduleRecurrenceType = 'ONCE' | 'INTERVAL';
+
+export interface ScheduleRecord {
+  schedule_id: string;
+  workspace_id: string;
+  actor_user_id: string;
+  capability: string;
+  action: string;
+  parameters_json: string;
+  raw_text: string;
+  recurrence_type: ScheduleRecurrenceType;
+  interval_seconds: number | null;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  status: ScheduleStatus;
+  status_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export function createSchedule(params: {
+  scheduleId: string;
+  workspaceId: string;
+  actorUserId: string;
+  capability: string;
+  action: string;
+  parameters: Record<string, unknown>;
+  rawText: string;
+  recurrenceType: ScheduleRecurrenceType;
+  intervalSeconds?: number | null;
+  nextRunAt: string | null;
+  status: ScheduleStatus;
+  statusReason?: string | null;
+}): ScheduleRecord {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO schedules (schedule_id, workspace_id, actor_user_id, capability, action, parameters_json, raw_text, recurrence_type, interval_seconds, next_run_at, last_run_at, status, status_reason, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+  `).run(
+    params.scheduleId, params.workspaceId, params.actorUserId, params.capability, params.action,
+    JSON.stringify(params.parameters ?? {}), params.rawText, params.recurrenceType, params.intervalSeconds ?? null,
+    params.nextRunAt, params.status, params.statusReason ?? null, now, now
+  );
+  return getSchedule(params.scheduleId)!;
+}
+
+export function getSchedule(scheduleId: string): ScheduleRecord | null {
+  const db = getDatabase();
+  const row = db.prepare('SELECT * FROM schedules WHERE schedule_id = ?').get(scheduleId) as ScheduleRecord | undefined;
+  return row ?? null;
+}
+
+export function getScheduleWorkspaceId(scheduleId: string): string | null {
+  const db = getDatabase();
+  const row = db.prepare('SELECT workspace_id FROM schedules WHERE schedule_id = ?').get(scheduleId) as { workspace_id: string } | undefined;
+  return row?.workspace_id ?? null;
+}
+
+/** Mirrors isTaskInWorkspace: unknown id and mismatch are both false, indistinguishable to the caller (404, never a distinct 403 — no existence leak across workspaces). */
+export function isScheduleInWorkspace(scheduleId: string, workspaceId: string): boolean {
+  return getScheduleWorkspaceId(scheduleId) === workspaceId;
+}
+
+export function listWorkspaceSchedules(workspaceId: string, limit = 50): ScheduleRecord[] {
+  const db = getDatabase();
+  return db.prepare('SELECT * FROM schedules WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?').all(workspaceId, limit) as ScheduleRecord[];
+}
+
+/** Schedules the tick loop must actually fire right now — status ACTIVE and genuinely due. PAUSED/terminal schedules are structurally excluded, which is what makes pause airtight (a paused schedule is never even considered, not merely skipped after being read). */
+export function listDueSchedules(nowIso: string): ScheduleRecord[] {
+  const db = getDatabase();
+  return db.prepare(
+    "SELECT * FROM schedules WHERE status = 'ACTIVE' AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at ASC"
+  ).all(nowIso) as ScheduleRecord[];
+}
+
+export function setScheduleStatus(scheduleId: string, status: ScheduleStatus, statusReason?: string | null): void {
+  const db = getDatabase();
+  db.prepare('UPDATE schedules SET status = ?, status_reason = ?, updated_at = ? WHERE schedule_id = ?')
+    .run(status, statusReason ?? null, new Date().toISOString(), scheduleId);
+}
+
+/** Applied after every real occurrence resolves (never for an IN_PROGRESS duplicate, which contributes nothing — the owning call already does this). */
+export function updateScheduleAfterOccurrence(scheduleId: string, params: {
+  status: ScheduleStatus;
+  statusReason?: string | null;
+  nextRunAt: string | null;
+  lastRunAt: string;
+}): void {
+  const db = getDatabase();
+  db.prepare('UPDATE schedules SET status = ?, status_reason = ?, next_run_at = ?, last_run_at = ?, updated_at = ? WHERE schedule_id = ?')
+    .run(params.status, params.statusReason ?? null, params.nextRunAt, params.lastRunAt, new Date().toISOString(), scheduleId);
+}
+
+export interface ScheduleOccurrenceRecord {
+  occurrence_id: string;
+  schedule_id: string;
+  workspace_id: string;
+  due_at: string;
+  idempotency_key: string;
+  status: 'SUCCEEDED' | 'FAILED' | 'BLOCKED' | 'NOT_CONFIGURED';
+  outcome: string;
+  reason: string | null;
+  task_id: string | null;
+  artifact_id: string | null;
+  receipt_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Upsert by (schedule_id, due_at) — pure bookkeeping, not a race gate (see
+ * the schema comment). Safe to call more than once with identical content:
+ * every concurrent caller for the same occurrence already received the
+ * SAME real executeEnvelope() result before reaching here (execution_claims
+ * guarantees that), so a redundant write here is a harmless no-op, never a
+ * conflicting one.
+ */
+export function recordScheduleOccurrence(params: {
+  scheduleId: string;
+  workspaceId: string;
+  dueAt: string;
+  idempotencyKey: string;
+  status: 'SUCCEEDED' | 'FAILED' | 'BLOCKED' | 'NOT_CONFIGURED';
+  outcome: string;
+  reason?: string | null;
+  taskId?: string | null;
+  artifactId?: string | null;
+  receiptId?: string | null;
+}): ScheduleOccurrenceRecord {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  const existing = db.prepare('SELECT occurrence_id FROM schedule_occurrences WHERE schedule_id = ? AND due_at = ?')
+    .get(params.scheduleId, params.dueAt) as { occurrence_id: string } | undefined;
+
+  if (existing) {
+    db.prepare(`
+      UPDATE schedule_occurrences SET status = ?, outcome = ?, reason = ?, task_id = ?, artifact_id = ?, receipt_id = ?, updated_at = ?
+      WHERE occurrence_id = ?
+    `).run(params.status, params.outcome, params.reason ?? null, params.taskId ?? null, params.artifactId ?? null, params.receiptId ?? null, now, existing.occurrence_id);
+    return db.prepare('SELECT * FROM schedule_occurrences WHERE occurrence_id = ?').get(existing.occurrence_id) as ScheduleOccurrenceRecord;
+  }
+
+  const occurrenceId = `occ-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  db.prepare(`
+    INSERT INTO schedule_occurrences (occurrence_id, schedule_id, workspace_id, due_at, idempotency_key, status, outcome, reason, task_id, artifact_id, receipt_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(occurrenceId, params.scheduleId, params.workspaceId, params.dueAt, params.idempotencyKey, params.status, params.outcome, params.reason ?? null, params.taskId ?? null, params.artifactId ?? null, params.receiptId ?? null, now, now);
+  return db.prepare('SELECT * FROM schedule_occurrences WHERE occurrence_id = ?').get(occurrenceId) as ScheduleOccurrenceRecord;
+}
+
+export function getScheduleOccurrences(scheduleId: string): ScheduleOccurrenceRecord[] {
+  const db = getDatabase();
+  return db.prepare('SELECT * FROM schedule_occurrences WHERE schedule_id = ? ORDER BY due_at ASC').all(scheduleId) as ScheduleOccurrenceRecord[];
 }
 
 // PHASE 0b — thrown by updateTaskStatus/recordActivityEvent when an

@@ -65,6 +65,19 @@ const PUBLISH_PATTERN = /\b(publish|broadcast|post (this|it) (live|publicly)|go 
 
 const SCHEDULE_PATTERN = /\b(schedule|set up a recurring|remind me|run (this|it) (every|daily|weekly|tomorrow|on)|automate this)\b/i;
 
+// STEP 7 — a bare temporal-scheduling phrase (no "schedule"/"run it" prefix
+// required) is itself the signal that this is a scheduling request, not an
+// immediate one: "research X tomorrow at 9am" and "run the X research once
+// in 1 minute" both name a real action verb (research/run) AND a real
+// future time — the WHEN must win the classification here, or the WHAT
+// (research) would hijack it and the request would execute immediately
+// instead of being scheduled. lib/fabric/scheduler.ts re-derives the WHAT
+// from the remaining text after stripping this matched phrase, so this
+// pattern only needs to detect "some real future time is named," not parse
+// it — that parsing (and the honest ambiguous/ "no time attached" refusal)
+// lives in scheduler.ts's parseSchedulePhrase, not duplicated here.
+const SCHEDULE_TIME_PHRASE_PATTERN = /\b(tomorrow|tonight)\b|\bin\s+\d+\s+(minute|hour|day)s?\b|\bevery\s+\d*\s*(minute|hour|day)s?\b/i;
+
 // Destructive verb + a high-stakes target — mirrors the same BLOCKED-vs-
 // APPROVAL_REQUIRED distinction lib/kil-gate.ts's checkGuardianRules already
 // applies to shell commands, applied here to natural-language intent
@@ -149,6 +162,28 @@ function classifyBase(text: string): BaseClassification {
     };
   }
 
+  // STEP 7 — checked BEFORE any action-verb pattern (research, vault.write,
+  // etc.): a real future-time phrase means this is a request to schedule
+  // the action, not perform it now. "research X tomorrow at 9am" contains
+  // both a research verb AND a real future time — the WHEN must win, or
+  // RESEARCH_VERB_PATTERN below would hijack it into an immediate research
+  // call and "tomorrow at 9am" would become inert trailing text. Ordered
+  // ahead of RESEARCH_VERB_PATTERN specifically for this reason; it stays
+  // BEHIND the destructive/publish checks above, which already return
+  // their own correct BLOCKED/APPROVAL_REQUIRED result independent of
+  // timing ("publish this every Monday" is approval-shaped regardless of
+  // "every Monday" — Section 7's rule, not this classifier, decides that).
+  if (SCHEDULE_PATTERN.test(text) || SCHEDULE_TIME_PHRASE_PATTERN.test(text)) {
+    return {
+      intentType: 'ACTION_REQUEST',
+      capability: 'schedule',
+      action: 'schedule',
+      riskTier: 'LOW',
+      reason: 'Scheduling imperative or a real future-time phrase — classified as an action request against the "schedule" capability; lib/fabric/scheduler.ts resolves the underlying WHAT from the remaining text.',
+      confidence: 'HIGH',
+    };
+  }
+
   // Explicit "research X" / "investigate X" imperative — an action verb,
   // so ACTION_REQUEST regardless of whether the research capability
   // currently exists (rule 1: imperative wording is evidence of
@@ -162,17 +197,6 @@ function classifyBase(text: string): BaseClassification {
       action: 'research',
       riskTier: 'LOW',
       reason: 'Explicit research/investigate imperative — classified as an action request against the "research" capability.',
-      confidence: 'HIGH',
-    };
-  }
-
-  if (SCHEDULE_PATTERN.test(text)) {
-    return {
-      intentType: 'ACTION_REQUEST',
-      capability: 'schedule',
-      action: 'schedule',
-      riskTier: 'LOW',
-      reason: 'Scheduling imperative — classified as an action request against the "schedule" capability.',
       confidence: 'HIGH',
     };
   }

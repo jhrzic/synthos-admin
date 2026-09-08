@@ -125,10 +125,11 @@ describe('terminal.exec: APPROVAL_REQUIRED per existing Guardian policy (outside
   });
 });
 
-describe('schedule / browser / research: honestly NOT_CONFIGURED — no code exists for any of them', () => {
-  it('schedule is NOT_CONFIGURED (no scheduler exists in this repo)', async () => {
+describe('browser / research: honestly NOT_CONFIGURED — no code exists for either', () => {
+  it('STEP 7: schedule is now AVAILABLE — a real in-process scheduler exists (lib/fabric/scheduler.ts)', async () => {
     const cap = await resolveCapability('schedule');
-    expect(cap?.status).toBe('NOT_CONFIGURED');
+    expect(cap?.status).toBe('AVAILABLE');
+    expect(cap?.reference).toBe('lib/fabric/scheduler.ts');
   });
 
   it('browser is NOT_CONFIGURED (no browser capability exists)', async () => {

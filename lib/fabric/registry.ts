@@ -331,16 +331,22 @@ function hermesExecuteCapability(report: RuntimeStatusReport): CapabilityDescrip
 }
 
 function scheduleCapability(): CapabilityDescriptor {
+  // STEP 7 — real in-process scheduler now exists (lib/fabric/scheduler.ts:
+  // a real setInterval poll loop, persisted schedules/schedule_occurrences,
+  // every occurrence dispatched through this same envelope). Superseded
+  // the prior NOT_CONFIGURED audit finding: the CLAUDE.md-described
+  // upstream dispatcher still doesn't exist here, but this deployment now
+  // has its own, real, minimal one.
   return {
     key: 'schedule',
     runtime: 'scheduler',
-    status: 'NOT_CONFIGURED',
+    status: 'AVAILABLE',
     effectClass: 'CONTROL',
     riskTier: 'NONE',
     approvalPolicy: 'NONE',
-    workspaceScope: 'none',
-    reference: 'none',
-    reason: 'No scheduler exists in this repository (no cron/timer/dispatch-loop code found). CLAUDE.md\'s description of a timer-armed dispatcher describes the upstream Builderz Labs Mission Control reference project, not code present here.',
+    workspaceScope: 'member',
+    reference: 'lib/fabric/scheduler.ts',
+    reason: 'Real in-process scheduler: persisted schedules, a real poll loop, every due occurrence dispatched through executeEnvelope() — the same canonical path Jarvis/graphs/actions use.',
   };
 }
 

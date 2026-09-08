@@ -29,9 +29,12 @@ describe('STEP 6 Section 9: NOT_CONFIGURED/UNSUPPORTED capabilities refuse hones
     expect(result.outcome).toBe('NOT_CONFIGURED');
   });
 
-  it('schedule refuses — no scheduler exists', async () => {
+  it('STEP 7: schedule is real now — a bare, time-ambiguous phrase is honestly BLOCKED with a clarification, never a silently-guessed time', async () => {
+    // "schedule this tomorrow" has no explicit time attached ("tomorrow at
+    // 9am" would succeed) — refused rather than inventing an hour.
     const result = await executeEnvelope({ workspaceId: WS, actorUserId: 'u1', capability: 'schedule', action: 'schedule', parameters: {}, rawText: 'schedule this tomorrow' });
-    expect(result.outcome).toBe('NOT_CONFIGURED');
+    expect(result.outcome).toBe('BLOCKED');
+    expect(result.reason).toMatch(/no time attached/i);
   });
 
   it('research refuses without GEMINI_API_KEY — never falls back to model memory', async () => {

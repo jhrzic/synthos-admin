@@ -169,12 +169,13 @@ describe('"save this to the Vault" -> canonical vault.write, real artifact', () 
   });
 });
 
-describe('"schedule this tomorrow" -> honest NOT_CONFIGURED, never a fabricated schedule', () => {
-  it('returns NOT_CONFIGURED with the canonical spoken line, no fake success', async () => {
+describe('STEP 7: "schedule this tomorrow" -> honest BLOCKED clarification (time-ambiguous), never a fabricated/guessed schedule', () => {
+  it('a bare "tomorrow" with no time is refused with a clarification, not silently scheduled', async () => {
     const { status, json } = await jarvisCommand('schedule this for tomorrow');
     expect(status).toBe(200);
     expect(json.evidence.capability).toBe('schedule');
-    expect(json.evidence.outcome).toBe('NOT_CONFIGURED');
+    expect(json.evidence.outcome).toBe('BLOCKED');
+    expect(json.evidence.reason).toMatch(/no time attached/i);
     expect(json.reply).not.toMatch(/scheduled|created|set up/i);
     expect(json.spokenSummary).toBe("I can't run that yet because the required capability isn't configured.");
   });

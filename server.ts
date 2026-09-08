@@ -41,7 +41,13 @@ import {
   DEFAULT_WORKSPACE_ID,
   listWorkspaceTasks,
   listWorkspaceReceipts,
-  projectKnowledgeCandidate
+  projectKnowledgeCandidate,
+  getSchedule,
+  isScheduleInWorkspace,
+  listWorkspaceSchedules,
+  setScheduleStatus,
+  getScheduleOccurrences,
+  type ScheduleStatus
 } from "./lib/persistence";
 import { hermesAdapter } from "./src/services/hermesAdapter";
 import { classifyModelRequest, generateWithFailover, type FailoverResult, DEFAULT_CANDIDATE_MODELS } from "./lib/model-router";
@@ -93,6 +99,13 @@ import { createExecutionContext } from "./lib/fabric/context";
 import { generateViaGemini } from "./lib/fabric/model-gemini";
 import { classifyIntent } from "./lib/fabric/intent";
 import { executeEnvelope } from "./lib/fabric/envelope";
+import {
+  startScheduler,
+  createValidatedSchedule,
+  parseSchedulePhrase,
+  computeResumeNextRunAt,
+  fireScheduleOccurrence,
+} from "./lib/fabric/scheduler";
 
 dotenv.config();
 
@@ -2545,6 +2558,15 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         } else if (envelopeResult.outcome === "SUCCESS" && classification.capability === "vault.write") {
           reply = `Saved to the Vault at ${envelopeResult.artifact?.path}.`;
           spokenSummary = "Saved to the Vault.";
+        } else if (envelopeResult.outcome === "SUCCESS" && classification.capability === "schedule" && envelopeResult.schedule) {
+          // STEP 7 — describes what was actually PERSISTED, never claims the
+          // future occurrence itself already succeeded (schedule creation
+          // success != capability execution success).
+          const sched = envelopeResult.schedule;
+          reply = sched.recurrence_type === "ONCE"
+            ? `Scheduled: "${sched.capability}" will run once at ${sched.next_run_at} (UTC).`
+            : `Scheduled: "${sched.capability}" will run every ${sched.interval_seconds}s, starting at ${sched.next_run_at} (UTC).`;
+          spokenSummary = "Scheduled. I'll run that and let you know.";
         } else if (envelopeResult.outcome === "READ_OK") {
           reply = JSON.stringify(envelopeResult.data ?? {}, null, 2);
           spokenSummary = `${classification.capability} lookup complete.`;
@@ -3985,6 +4007,124 @@ Rules for spokenSummary specifically:
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to test skill" });
     }
+  });
+
+  // ===========================================================================
+  // STEP 7 — Scheduling API. Every route here only creates/reads/pauses/
+  // resumes/cancels a persisted schedule row — none of them call a
+  // provider, write a Vault artifact, or sign a receipt. Real execution
+  // happens exclusively via lib/fabric/scheduler.ts's poll loop (or
+  // run-now below, which is the identical single-occurrence call, just
+  // triggered on demand) calling executeEnvelope() — the same canonical
+  // dispatcher Jarvis/graphs/actions use.
+  // ===========================================================================
+
+  app.get("/api/schedules", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.query.workspaceId);
+      if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
+      return res.json({ success: true, schedules: listWorkspaceSchedules(resolved.workspaceId) });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list schedules" });
+    }
+  });
+
+  app.post("/api/schedules", requireWorkspaceMember(fromBody), async (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.body?.workspaceId);
+      if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
+      const { capability, action, parameters, rawText, when } = req.body || {};
+      if (!capability || typeof capability !== "string") {
+        return res.status(400).json({ success: false, error: "capability is required." });
+      }
+      if (!when || typeof when !== "string") {
+        return res.status(400).json({ success: false, error: 'when is required (e.g. "in 10 minutes", "tomorrow at 9am", "every 2 hours").' });
+      }
+      const parsed = parseSchedulePhrase(when, new Date().toISOString());
+      if ("ambiguous" in parsed) {
+        return res.status(400).json({ success: false, error: parsed.reason });
+      }
+      const actorUserId = (req as AuthedRequest).authUser!.user_id;
+      const schedule = await createValidatedSchedule({
+        workspaceId: resolved.workspaceId,
+        actorUserId,
+        capability,
+        action: typeof action === "string" ? action : capability,
+        parameters: parameters && typeof parameters === "object" ? parameters : {},
+        rawText: typeof rawText === "string" ? rawText : capability,
+        parsed,
+      });
+      return res.json({ success: true, schedule });
+    } catch (err: any) {
+      return res.status(400).json({ success: false, error: err?.message || "Failed to create schedule" });
+    }
+  });
+
+  // 404, never a distinct 403 — a schedule_id in another workspace must not
+  // be distinguishable from one that doesn't exist at all (same posture as
+  // enforceTaskWorkspaceAccess above).
+  function enforceScheduleWorkspaceAccess(req: express.Request, res: express.Response, scheduleId: string): boolean {
+    const resolved = resolveWorkspaceId(req.query.workspaceId ?? req.body?.workspaceId);
+    if ("error" in resolved) {
+      res.status(400).json({ success: false, error: resolved.error });
+      return false;
+    }
+    if (!isScheduleInWorkspace(scheduleId, resolved.workspaceId)) {
+      res.status(404).json({ success: false, error: "Schedule not found", scheduleId });
+      return false;
+    }
+    return true;
+  }
+
+  app.get("/api/schedules/:id", requireWorkspaceMember(fromQuery), (req, res) => {
+    if (!enforceScheduleWorkspaceAccess(req, res, req.params.id)) return;
+    const schedule = getSchedule(req.params.id);
+    return res.json({ success: true, schedule, occurrences: getScheduleOccurrences(req.params.id) });
+  });
+
+  app.post("/api/schedules/:id/pause", requireWorkspaceMember(fromBody), (req, res) => {
+    if (!enforceScheduleWorkspaceAccess(req, res, req.params.id)) return;
+    const schedule = getSchedule(req.params.id)!;
+    if (schedule.status !== "ACTIVE") {
+      return res.status(400).json({ success: false, error: `Cannot pause a schedule in status ${schedule.status} (only ACTIVE schedules can be paused).` });
+    }
+    setScheduleStatus(req.params.id, "PAUSED");
+    return res.json({ success: true, schedule: getSchedule(req.params.id) });
+  });
+
+  app.post("/api/schedules/:id/resume", requireWorkspaceMember(fromBody), (req, res) => {
+    if (!enforceScheduleWorkspaceAccess(req, res, req.params.id)) return;
+    const schedule = getSchedule(req.params.id)!;
+    if (schedule.status !== "PAUSED") {
+      return res.status(400).json({ success: false, error: `Cannot resume a schedule in status ${schedule.status} (only PAUSED schedules can be resumed).` });
+    }
+    const nextRunAt = computeResumeNextRunAt(schedule, new Date().toISOString());
+    const db = getDatabase();
+    db.prepare("UPDATE schedules SET status = 'ACTIVE', status_reason = NULL, next_run_at = ?, updated_at = ? WHERE schedule_id = ?")
+      .run(nextRunAt, new Date().toISOString(), req.params.id);
+    return res.json({ success: true, schedule: getSchedule(req.params.id) });
+  });
+
+  app.delete("/api/schedules/:id", requireWorkspaceMember(fromQuery), (req, res) => {
+    if (!enforceScheduleWorkspaceAccess(req, res, req.params.id)) return;
+    // Soft delete — CANCELLED preserves occurrence history rather than
+    // destroying the audit trail a real hard delete would.
+    setScheduleStatus(req.params.id, "CANCELLED");
+    return res.json({ success: true, schedule: getSchedule(req.params.id) });
+  });
+
+  app.post("/api/schedules/:id/run-now", requireWorkspaceMember(fromBody), async (req, res) => {
+    if (!enforceScheduleWorkspaceAccess(req, res, req.params.id)) return;
+    const schedule = getSchedule(req.params.id)!;
+    if (schedule.status !== "ACTIVE") {
+      return res.status(400).json({ success: false, error: `Cannot run-now a schedule in status ${schedule.status} (only ACTIVE schedules can be run now — resume a PAUSED schedule first).` });
+    }
+    // Fires through the identical single-occurrence path the poll loop
+    // uses — "run now" is "treat this schedule as due right now", not a
+    // separate execution pipeline.
+    const dueAtIso = new Date().toISOString();
+    await fireScheduleOccurrence(schedule, dueAtIso);
+    return res.json({ success: true, schedule: getSchedule(req.params.id), occurrences: getScheduleOccurrences(req.params.id) });
   });
 
   // ===========================================================================
@@ -5484,6 +5624,11 @@ Rules for spokenSummary specifically:
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://0.0.0.0:${PORT}`);
   });
+
+  // STEP 7 — the one real in-process scheduler, started once per server
+  // process. Ticks call runDueSchedules(), which only ever dispatches
+  // through executeEnvelope() — never a second execution pipeline.
+  startScheduler();
 }
 
 startServer();
