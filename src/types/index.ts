@@ -1,4 +1,9 @@
-export type ActiveTab = 
+// Pass XI nav consolidation: 'agent-wireframe' (duplicate of 'overview'),
+// 'hermes-knowledge' (duplicate of 'obsidian'), 'hermes-models' (duplicate
+// of 'model-router'), and 'policies' (duplicate of 'guardian-aegis') were
+// removed — each rendered a byte-for-byte identical component with
+// identical props under a second tab id. See docs/UI-IA-AUDIT.md.
+export type ActiveTab =
   | 'overview'
   | 'overview-office'
   | 'intake-triage'
@@ -83,9 +88,7 @@ export type ActiveTab =
   | 'hermes-cron'
   | 'hermes-channels'
   | 'hermes-memory'
-  | 'hermes-knowledge'
   | 'hermes-files'
-  | 'hermes-models'
   | 'hermes-usage'
   | 'hermes-approvals'
   | 'hermes-activity'
@@ -125,9 +128,7 @@ export type ActiveTab =
   | 'master-admin-health'
   | 'master-admin-audit'
   | 'master-admin-walkthrough'
-  | 'agent-wireframe'
   | 'users-roles'
-  | 'policies'
   | 'settings';
 
 export type TerminalCommandStatus = 

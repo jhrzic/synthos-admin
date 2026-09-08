@@ -1645,36 +1645,9 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
             />
           )}
 
-          {activeTab === 'hermes-knowledge' && (
-            <ObsidianView
-              vaults={vaults}
-              notes={notes}
-              models={models}
-              onAddNote={(title, content, tags, folder) => handleAddNoteToVault(title, content, tags, folder)}
-              onUpdateNote={handleUpdateNote}
-              onDeleteNote={handleDeleteNote}
-              onSendToModel={(content, modelId) => {
-                setActiveTab(modelId as ActiveTab);
-              }}
-              activeWorkspaceId={activeWorkspaceId}
-            />
-          )}
-
           {activeTab === 'hermes-files' && (
             <ClaudeArtifactsView
               models={models}
-              onSendQuery={handleSendQuery}
-            />
-          )}
-
-          {activeTab === 'hermes-models' && (
-            <ModelRouterView
-              rules={routerRules}
-              models={models}
-              onAddRule={handleAddRouterRule}
-              onUpdateRule={handleUpdateRouterRule}
-              onDeleteRule={handleDeleteRouterRule}
-              onSelectTab={setActiveTab}
               onSendQuery={handleSendQuery}
             />
           )}
@@ -1897,26 +1870,6 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               onRunAudit={handleRunAudit}
               onExecutePrompt={handleSendQuery}
             />
-          )}
-
-          {/* Agent Wireframe View */}
-          {activeTab === 'agent-wireframe' && (
-            <OverviewOfficeView
-              agents={agents}
-              tasks={kanbanTasks}
-              notes={notes}
-              models={models}
-              activeWorkspaceId={activeWorkspaceId}
-              onSelectTab={setActiveTab}
-              onOpenAgentDrawer={(role) => setDrawerAgentRole(role as AgentRole)}
-              onOpenGraphBuilder={() => setActiveTab('graph-builder')}
-              onOpenHermesChat={() => setActiveTab('hermes-chat')}
-            />
-          )}
-
-          {/* Policies View */}
-          {activeTab === 'policies' && (
-            <GuardianAegisControlView />
           )}
 
           {/* Users & Roles View */}

@@ -6,7 +6,7 @@ import {
   HardDrive, Terminal, ShieldCheck, CheckCircle2, FileCheck, 
   Building2, Server, HelpCircle, Command, Sparkles, Network, Code2, Crown,
   Volume2, Radio, MessageSquare, Clock, BarChart2, RefreshCw, Cpu,
-  Shield, CheckSquare, Lock, Key, Zap, Flame, Compass, Box, UserCheck
+  Shield, CheckSquare, Key, Zap, Flame, Compass, Box, UserCheck
 } from 'lucide-react';
 
 interface SidebarNavProps {
@@ -98,10 +98,9 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
         { id: 'overview' as ActiveTab, label: 'Overview', icon: LayoutDashboard, color: '#A5A2FF' },
         { id: 'kanban' as ActiveTab, label: 'Kanban', icon: Kanban, badge: '6 Stg', color: '#00D26A' },
         { id: 'graph-runs' as ActiveTab, label: 'Active Runs', icon: Activity, color: '#EC4899' },
-        { id: 'agent-wireframe' as ActiveTab, label: 'Agent Wireframe', icon: Network, color: '#615EFF' },
         { id: 'agent-fleet' as ActiveTab, label: 'Agent Fleet', icon: Bot, color: '#EAB308' },
         { id: 'guardian-aegis' as ActiveTab, label: 'Approvals', icon: ShieldCheck, color: '#F59E0B' },
-        { id: 'receipts' as ActiveTab, label: 'Results & Receipts', icon: FileCheck, color: '#38BDF8' },
+        { id: 'receipts' as ActiveTab, label: 'Receipts', icon: FileCheck, color: '#38BDF8' },
       ]
     },
     {
@@ -147,11 +146,10 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
     {
       category: 'GOVERNANCE',
       items: [
-        { id: 'guardian-aegis' as ActiveTab, navId: 'guardian-aegis-governance', label: 'Guardian Gate', icon: Shield, color: '#F59E0B' },
+        { id: 'guardian-aegis' as ActiveTab, navId: 'guardian-aegis-governance', label: 'Approvals', icon: Shield, color: '#F59E0B' },
         { id: 'system-audit' as ActiveTab, label: 'Aegis Verifier', icon: ShieldCheck, color: '#00D26A' },
-        { id: 'receipts' as ActiveTab, navId: 'receipts-governance', label: 'Cryptographic Receipts', icon: FileCheck, color: '#38BDF8' },
+        { id: 'receipts' as ActiveTab, navId: 'receipts-governance', label: 'Receipts', icon: FileCheck, color: '#38BDF8' },
         { id: 'activity-ledger' as ActiveTab, label: 'Activity Ledger', icon: Activity, color: '#A5A2FF' },
-        { id: 'policies' as ActiveTab, label: 'Operating Policies', icon: Lock, color: '#EC4899' },
       ]
     },
     {
