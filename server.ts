@@ -72,7 +72,7 @@ import {
 } from "./lib/external-executions";
 
 const VALID_EXECUTION_TARGET_TYPES = new Set<ExecutionTargetType>(["model", "deterministic", "mcp_tool", "hermes_runtime", "windmill"]);
-import { createJarvisSession, listUserJarvisSessions, getOwnedJarvisSession, listSessionMessages, appendJarvisMessage } from "./lib/jarvis-sessions";
+import { createJarvisSession, listUserJarvisSessions, getOwnedJarvisSession, listSessionMessages, appendJarvisMessage, selectBoundedContext, type JarvisMessageRecord } from "./lib/jarvis-sessions";
 import { createBackup, listBackups, readManifestFromArchive, validateBackupArchive, stageRestore } from "./lib/backup";
 import {
   anyUserExists, createUser, login, resolveSessionUser, revokeSessionByToken, parseCookies,
@@ -2837,7 +2837,14 @@ sourceHash: ${packageMetadataResult.sourceHash}
 
   app.post("/api/jarvis/command", requireWorkspaceMember(fromBody), async (req, res) => {
     try {
-      const { command = "", sessionId = "jarvis-global-session" } = req.body || {};
+      // Jarvis conversation memory task — `sessionId` used to be destructured
+      // here with a hardcoded single-string fallback that never
+      // corresponded to any real row, and then never referenced again
+      // anywhere in this route: Jarvis persisted every session's transcript
+      // (lib/jarvis-sessions.ts) but never read it back into its own
+      // reasoning request. That gap is what this fixes — see the natural-
+      // language branch below.
+      const { command = "", sessionId = null } = req.body || {};
       const trimmed = command.trim();
       if (!trimmed) {
         return res.status(400).json({ success: false, error: "Empty command received." });
@@ -2853,6 +2860,10 @@ sourceHash: ${packageMetadataResult.sourceHash}
         return res.status(400).json({ success: false, error: workspaceResolution.error });
       }
       const jarvisWorkspaceId = workspaceResolution.workspaceId;
+      // Same authority the sibling /api/jarvis/sessions* routes already use
+      // (requireWorkspaceMember populates this) — never trust a caller-
+      // supplied user id, and never read another user's conversation.
+      const jarvisUserId = (req as AuthedRequest).authUser?.user_id ?? null;
 
       const lower = trimmed.toLowerCase();
       let reply = "";
@@ -2864,6 +2875,27 @@ sourceHash: ${packageMetadataResult.sourceHash}
       // return an honest DEGRADED response instead of a fabricated success.
       let degraded: { reason: string; error: string; attempts?: unknown } | null = null;
       let jarvisFailover: FailoverResult | null = null;
+      // Conversation-context provenance (Jarvis memory task) — populated
+      // only by the natural-language branch below; real either way, never
+      // fabricated. contextInjected stays false whenever no session was
+      // supplied, the session isn't owned by this exact user+workspace, or
+      // it has no prior turns yet — a brand-new/unknown conversation is a
+      // normal, expected state, not an error.
+      let contextProvenance: {
+        sessionId: string | null;
+        contextInjected: boolean;
+        priorMessageCount: number;
+        contextSizeChars: number;
+        retrievalStrategy: "bounded_recent_history" | "none";
+        truncated: boolean;
+      } = {
+        sessionId: sessionId || null,
+        contextInjected: false,
+        priorMessageCount: 0,
+        contextSizeChars: 0,
+        retrievalStrategy: "none",
+        truncated: false,
+      };
 
       // Administrative Dispatch Routing
       if (lower.includes("task") || lower.includes("show all agent tasks") || lower.includes("list tasks")) {
@@ -2935,6 +2967,42 @@ sourceHash: ${packageMetadataResult.sourceHash}
         // router resolves to if that ever changes, with no Jarvis-specific
         // edit required.
         const jarvisClassification = classifyModelRequest("gemini-3.7-flash");
+
+        // Conversation memory (Jarvis context-retrieval task) — real,
+        // bounded, workspace+user-scoped prior turns from the same real
+        // store /api/jarvis/sessions*/messages already writes to
+        // (lib/jarvis-sessions.ts). No new storage, no new authority model:
+        // listSessionMessages() already performs the exact same ownership
+        // check (getOwnedJarvisSession) the sibling session routes use
+        // internally — calling it a second time here would just be a
+        // redundant query, not extra safety, so it isn't — a session
+        // belongs to this exact user in this exact workspace, or
+        // listSessionMessages returns null, contextProvenance stays at its
+        // "none" default, and the request proceeds with no history, never
+        // an error and never a silent cross-tenant read.
+        //
+        // Deliberately resolved BEFORE the API-key/classification checks
+        // below: retrieval is independent of whether the model call itself
+        // can succeed, so contextProvenance stays truthful even on a
+        // DEGRADED response — it answers "did we find and would we inject
+        // real prior turns," not "did the model call also succeed."
+        let priorTurns: JarvisMessageRecord[] = [];
+        if (jarvisUserId && sessionId && typeof sessionId === "string") {
+          const history = listSessionMessages(jarvisWorkspaceId, jarvisUserId, sessionId);
+          if (history !== null) {
+            const selection = selectBoundedContext(history, trimmed);
+            priorTurns = selection.turns;
+            contextProvenance = {
+              sessionId,
+              contextInjected: priorTurns.length > 0,
+              priorMessageCount: selection.priorMessageCount,
+              contextSizeChars: selection.contextSizeChars,
+              retrievalStrategy: "bounded_recent_history",
+              truncated: selection.truncated,
+            };
+          }
+        }
+
         if (!apiKey) {
           degraded = {
             reason: "API_KEY_NOT_CONFIGURED",
@@ -2957,10 +3025,27 @@ sourceHash: ${packageMetadataResult.sourceHash}
           const jarvisSystemInstruction = "You are Jarvis, the SynthOS Global System Service and Administrative Assistant. Answer concisely and factually based on SynthOS architecture, agent coordination, and system governance.";
           const candidateModels = [jarvisClassification.resolvedModel, ...DEFAULT_CANDIDATE_MODELS].filter((v, i, a) => a.indexOf(v) === i);
 
+          // Native chat-role turns, never flattened into the system prompt.
+          // Historical user content stays role:"user"; historical assistant
+          // content stays role:"model" (Gemini's own name for it) — never
+          // elevated to system authority. This is the structural prompt-
+          // injection guard: no keyword/pattern scanner exists anywhere in
+          // this codebase to "reuse" (verified — promptInjectionDefense is
+          // a UI-only settings field, never read server-side), so the
+          // guard here is the API's own role separation, not an invented
+          // security subsystem.
+          const conversationContents = [
+            ...priorTurns.map((m) => ({
+              role: m.role === "assistant" ? "model" : "user",
+              parts: [{ text: m.content }],
+            })),
+            { role: "user", parts: [{ text: trimmed }] },
+          ];
+
           jarvisFailover = await generateWithFailover(candidateModels, async (candidateModel) => {
             const response = await ai.models.generateContent({
               model: candidateModel,
-              contents: trimmed,
+              contents: conversationContents,
               config: { systemInstruction: jarvisSystemInstruction },
             });
             if (!response.text) {
@@ -2985,7 +3070,10 @@ sourceHash: ${packageMetadataResult.sourceHash}
 
       // Record activity event in SQLite ledger — real outcome either way,
       // including a real failure (Phase E: honest observability). Never
-      // recorded as a success when the request degraded.
+      // recorded as a success when the request degraded. contextProvenance
+      // is metadata only (counts/sizes/flags) — never the retrieved prior
+      // message text itself, which stays only in jarvis_messages under its
+      // own real ownership check.
       const jarvisTaskId = `jarvis-cmd-${Date.now()}`;
       try {
         recordActivityEvent({
@@ -2993,7 +3081,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
           agentId: "jarvis",
           eventType: degraded ? "JARVIS_COMMAND_DEGRADED" : "JARVIS_COMMAND_EXECUTED",
           payload: degraded
-            ? { command: trimmed, intent, reason: degraded.reason, error: degraded.error, attempts: degraded.attempts }
+            ? { command: trimmed, intent, reason: degraded.reason, error: degraded.error, attempts: degraded.attempts, context: contextProvenance }
             : {
                 command: trimmed,
                 intent,
@@ -3001,6 +3089,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
                 requestedModel: jarvisFailover?.requestedModel,
                 modelUsed: jarvisFailover?.modelUsed,
                 fallbackUsed: jarvisFailover?.fallbackUsed ?? false,
+                context: contextProvenance,
               }
         });
       } catch (e) {
@@ -3016,6 +3105,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
           command: trimmed,
           attempts: degraded.attempts,
           taskId: jarvisTaskId,
+          context: contextProvenance,
           timestamp: new Date().toISOString(),
         });
       }
@@ -3029,6 +3119,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
         taskId: jarvisTaskId,
         modelUsed: jarvisFailover?.modelUsed,
         fallbackUsed: jarvisFailover?.fallbackUsed ?? false,
+        context: contextProvenance,
         timestamp: new Date().toISOString()
       });
     } catch (err: any) {

@@ -396,10 +396,16 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
 
     let reply: string;
     try {
+      // Jarvis conversation memory task — sessionId is now passed through
+      // so the server can retrieve this exact conversation's own real,
+      // bounded prior history (lib/jarvis-sessions.ts) and inject it into
+      // reasoning. Previously omitted entirely — every request reasoned
+      // with zero awareness of what was said earlier in the same session,
+      // even though that history was already being persisted above.
       const res = await fetch('/api/jarvis/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command, workspaceId: activeWorkspaceId }),
+        body: JSON.stringify({ command, workspaceId: activeWorkspaceId, sessionId: sessionId || null }),
       });
       const data = await res.json();
       if (!res.ok || data.success === false) {

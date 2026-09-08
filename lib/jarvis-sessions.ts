@@ -201,3 +201,96 @@ export function appendJarvisMessage(params: {
     created_at: now,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Bounded conversation context for reasoning (Jarvis memory-retrieval task).
+//
+// listSessionMessages() above already existed as a real, workspace+user-
+// scoped, chronological retrieval primitive — /api/jarvis/command simply
+// never called it before this. This file adds no new storage and no new
+// authority model: selectBoundedContext() is a pure, DB-free function over
+// whatever listSessionMessages() already returned, so it's fully testable
+// with plain arrays and carries zero risk of its own isolation bugs (all
+// isolation is enforced once, in getOwnedJarvisSession(), before this ever
+// runs).
+//
+// No embeddings/semantic search — none exists anywhere in this codebase to
+// reuse, and building one is out of scope for a first version. This is
+// bounded *recent* history: newest turns preferred, oldest dropped first
+// when either bound is exceeded.
+// ---------------------------------------------------------------------------
+
+/** Maximum prior turns considered, before the character budget is applied. */
+export const MAX_PRIOR_TURNS = 10;
+
+/** Maximum total characters across all included prior turns. Reserves room
+ *  for the system instruction and the current user message, which are
+ *  never counted against this budget. */
+export const MAX_CONTEXT_CHARS = 6000;
+
+export interface BoundedContextResult {
+  /** Chronological (oldest first), ready to map into provider-native chat roles. Never includes the current message. */
+  turns: JarvisMessageRecord[];
+  priorMessageCount: number;
+  contextSizeChars: number;
+  /** True if real history existed beyond what fit inside the turn/char budget. */
+  truncated: boolean;
+}
+
+/**
+ * Selects a bounded, chronological slice of real prior conversation turns
+ * to inject alongside the current message. Never mutates or reorders its
+ * input; never includes the current message (explicit dedup guard below);
+ * skips malformed/empty rows defensively rather than crashing or silently
+ * degrading the whole request.
+ */
+export function selectBoundedContext(
+  history: JarvisMessageRecord[],
+  currentMessage: string,
+  opts?: { maxTurns?: number; maxChars?: number }
+): BoundedContextResult {
+  const maxTurns = opts?.maxTurns ?? MAX_PRIOR_TURNS;
+  const maxChars = opts?.maxChars ?? MAX_CONTEXT_CHARS;
+
+  // Malformed/empty rows are skipped, not fatal — a single corrupted row
+  // must never take down context construction for the whole request.
+  const clean = history.filter(
+    (m) => m && typeof m.content === 'string' && m.content.trim().length > 0 && (m.role === 'user' || m.role === 'assistant')
+  );
+
+  // Dedup guard: the caller persists the current user turn via a separate,
+  // un-awaited request that may or may not have landed in the DB yet by
+  // the time this runs (a real race, not a bug to "fix" by reordering
+  // existing client persistence). If the most recent retrieved row is
+  // exactly this same user turn, drop it here — the current message is
+  // always appended once, explicitly, by the caller.
+  const trimmedCurrent = currentMessage.trim();
+  const last = clean[clean.length - 1];
+  const withoutCurrentTurn =
+    last && last.role === 'user' && last.content.trim() === trimmedCurrent
+      ? clean.slice(0, -1)
+      : clean;
+
+  const truncatedByTurnCount = withoutCurrentTurn.length > maxTurns;
+  const turnWindowed = withoutCurrentTurn.slice(-maxTurns); // newest maxTurns, still chronological
+
+  // Character-budget from the newest end backward, so the most recent
+  // turns always survive and the oldest are dropped first. Always keeps
+  // at least the single most recent message, even if it alone exceeds the
+  // budget — an empty context is worse than one slightly-over-budget turn.
+  const bounded: JarvisMessageRecord[] = [];
+  let totalChars = 0;
+  for (let i = turnWindowed.length - 1; i >= 0; i--) {
+    const len = turnWindowed[i].content.length;
+    if (totalChars + len > maxChars && bounded.length > 0) break;
+    bounded.unshift(turnWindowed[i]);
+    totalChars += len;
+  }
+
+  return {
+    turns: bounded,
+    priorMessageCount: bounded.length,
+    contextSizeChars: totalChars,
+    truncated: truncatedByTurnCount || bounded.length < turnWindowed.length,
+  };
+}
