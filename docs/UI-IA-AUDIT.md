@@ -45,21 +45,28 @@ confirmed by reading `src/components/SidebarNav.tsx`, `src/components/WorkspaceT
 
 ## Findings that affect placement decisions (not fixed this pass unless noted)
 
-1. **`agent-wireframe` tab is a byte-for-byte duplicate of `overview`** — both render the exact
-   same `OverviewOfficeView` component. Confirmed via `grep`, four files reference the tab id
-   (`src/types/index.ts`, `src/App.tsx`, `src/components/SidebarNav.tsx`,
-   `src/components/WorkspaceTopNav.tsx`, the last of which labels it **"Delegation"** while
-   `SidebarNav` labels it **"Agent Wireframe"** — two different names for one tab). Not removed
-   this pass (real risk to touch four files for a cosmetic dedupe under time pressure); both now
-   render the real, rewritten Overview so the duplicate at least tells the truth. Recommend
-   removing the `agent-wireframe` entry entirely in Pass XI.
-2. **`guardian-aegis` and `receipts` each have two different sidebar labels for the same tab.**
-   Both use a `navId` override in one of their two sidebar appearances specifically to avoid a
-   duplicate-DOM-id collision — meaning the underlying code already knows these are the same
-   tab shown twice. Worth collapsing to one entry with one label in Pass XI.
-3. **`hermes-knowledge` and `obsidian` are the same tab; `hermes-models` and `model-router` are
-   the same tab.** Both pairs render identical components. Not a truth problem (both paths are
-   now real), but a navigation-clutter one.
+1. ~~**`agent-wireframe` tab is a byte-for-byte duplicate of `overview`**~~ — **RESOLVED in Pass
+   XI.** `agent-wireframe`'s `ActiveTab` type entry, its `App.tsx` render block, and its
+   now-redundant `SidebarNav` entry were removed (Overview already existed in the same nav
+   section); `WorkspaceTopNav`'s "Delegation" quick-link was repointed to `overview` instead of
+   duplicating it.
+2. ~~**`guardian-aegis` and `receipts` each have two different sidebar labels for the same tab.**~~
+   — **RESOLVED in Pass XI.** Both nav entries kept (legitimate dual discoverability from
+   OPERATIONS and GOVERNANCE) — labels unified to "Approvals" and "Receipts" respectively,
+   matching the name already used consistently everywhere else in the app (header, command
+   palette, guided tour, workspace nav).
+3. ~~**`hermes-knowledge` and `obsidian` are the same tab; `hermes-models` and `model-router` are
+   the same tab.**~~ — **RESOLVED in Pass XI.** Both duplicate `ActiveTab` entries and their
+   `App.tsx` render blocks removed; `WorkspaceTopNav`/`HermesTopNav`'s "Knowledge"/"Models"
+   quick-links (their only reachability path — neither was in the main `SidebarNav`) repointed to
+   the canonical `obsidian`/`model-router` tab ids, keeping their contextual labels.
+
+   **A sixth true duplicate was found during Pass XI verification, not in the original five:**
+   `policies` (SidebarNav, GOVERNANCE, "Operating Policies") rendered the exact same
+   `GuardianAegisControlView()` with zero props as `guardian-aegis` — worse than the pairs above,
+   since both lived in the *same* GOVERNANCE section of the *same* sidebar. Removed (type entry,
+   render block, and nav entry) rather than relabeled, since `guardian-aegis`/"Approvals" already
+   covered the function in that exact section.
 4. **Seven fictional-provider "agent" tabs live under the WORKSPACES sidebar category**
    (`agent-orchestrator`, `hermes-core`, `agent-claude`, `agent-gemini`, `agent-codex`,
    `agent-cursor`, `agent-antigravity`, `agent-openclaw`). Their sidebar `statusTag` badges
@@ -118,12 +125,17 @@ revisited if either screen's purpose changes materially in a future pass — rig
 serve the same conceptual role (an idea-brainstorming tool and an agent-roster/Hermes-health view,
 respectively), just with honest data underneath instead of fabricated telemetry.
 
-## What Pass XI should do with this document
+## What Pass XI did with this document
 
-Treat every `RECOMMENDED_DOMAIN` above as a proposal, not a decision. The two changes that look
-cheapest and least risky going in: (a) collapsing the four confirmed duplicate tab pairs
-(`agent-wireframe`/`overview`, `guardian-aegis` double-label, `receipts` double-label,
-`hermes-knowledge`/`obsidian`, `hermes-models`/`model-router` — five pairs, not four, correcting
-the earlier count) into one entry each, and (b) resolving finding #6 (the Knowledge/Vault
-screenshot mismatch) before deciding whether a Knowledge Graph screen needs to be built, fixed, or
-was never real to begin with.
+Both of the two changes flagged above as cheapest and least risky are now done: the six confirmed
+duplicate tab pairs (`agent-wireframe`/`overview`, `guardian-aegis` double-label,
+`receipts` double-label, `hermes-knowledge`/`obsidian`, `hermes-models`/`model-router`, and the
+newly-found `policies`/`guardian-aegis`) are collapsed to one real destination each — see findings
+1–3 above. Finding #6 (the Knowledge/Vault screenshot mismatch) was deliberately left untouched
+per this pass's own instruction, still pending your confirmation of which representation is
+intended before anyone builds or fixes anything there.
+
+Treat every `RECOMMENDED_DOMAIN` in the inventory table above as a still-open proposal, not a
+decision — that part of this document is unchanged by Pass XI. Findings #4, #5, #7, and #8 above
+also remain open, as does Workstream H (task → graph run → execution cross-linking), which this
+pass did not reach.
