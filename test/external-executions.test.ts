@@ -15,8 +15,9 @@ import {
   refreshExternalExecutionStatus, ingestExternalExecutionResult, cancelExternalExecution,
   retryExternalExecution, listAllExternalExecutions,
 } from '../lib/external-executions';
-import { getTaskReceipts, getTaskQualityReviews, verifyReceipt } from '../lib/persistence';
+import { getTaskReceipts, getTaskQualityReviews, verifyReceipt, getTaskArtifacts, getDatabase } from '../lib/persistence';
 import { listRecentRuntimeEvents } from '../lib/runtime-events';
+import { VAULT_ROOT } from '../lib/vault';
 
 // ---------------------------------------------------------------------------
 // ADR-006 — end-to-end orchestration tests against a real local mock
@@ -118,6 +119,11 @@ beforeAll(async () => {
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
   try { fs.unlinkSync(TEST_DB_PATH); } catch { /* best effort */ }
+  // STEP 3 — real artifacts now land under vault/workspaces/<id>/ (the
+  // canonical writer), not the old flat vault/External-Executions/ folder.
+  for (const ws of [WS_A, WS_B]) {
+    try { fs.rmSync(path.join(VAULT_ROOT, 'workspaces', ws), { recursive: true, force: true }); } catch { /* best effort */ }
+  }
 });
 
 function setJobState(jobId: string, state: 'queued' | 'running' | 'success' | 'failure' | 'canceled', result?: unknown) {
@@ -328,5 +334,114 @@ describe('master-admin cross-workspace view (listAllExternalExecutions)', () => 
     const workspaces = new Set(all.map((e) => e.workspace_id));
     expect(workspaces.has(WS_A)).toBe(true);
     expect(workspaces.has(WS_B)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// STEP 3 — external-executions.ts migrated onto the canonical fabric.
+// Everything above this line is the pre-existing ADR-006 suite, unmodified
+// and still green. Everything below proves the new, additional behavior:
+// real Windmill network calls now flow through the one canonical
+// ExecutionContext, and the SUCCESS artifact write now goes through the one
+// canonical Vault writer instead of a second, unscoped fs.writeFileSync.
+// ---------------------------------------------------------------------------
+
+const EXTERNAL_EXECUTIONS_SOURCE = fs.readFileSync(path.resolve(process.cwd(), 'lib/external-executions.ts'), 'utf-8');
+
+describe('STEP 3 static proof: real Windmill calls are wrapped in the canonical ExecutionContext, not called bare', () => {
+  it('imports the one existing ExecutionContext factory — no second one is defined here', () => {
+    expect(EXTERNAL_EXECUTIONS_SOURCE).toContain("import { createExecutionContext } from './fabric/context';");
+    expect(EXTERNAL_EXECUTIONS_SOURCE).not.toMatch(/function\s+createExecutionContext/);
+  });
+
+  it('every real Windmill client call (submitJob/getJobStatus/getJobResult/cancelJob) appears exactly once, and only inside ctx.invoke(\'windmill.job\', ...)', () => {
+    for (const fn of ['submitJob', 'getJobStatus', 'getJobResult', 'cancelJob']) {
+      const needle = `windmillClient.${fn}(`;
+      const occurrences = EXTERNAL_EXECUTIONS_SOURCE.split(needle).length - 1;
+      expect(occurrences, `expected exactly one call to windmillClient.${fn}(`).toBe(1);
+
+      const idx = EXTERNAL_EXECUTIONS_SOURCE.indexOf(needle);
+      const preceding = EXTERNAL_EXECUTIONS_SOURCE.slice(Math.max(0, idx - 80), idx);
+      expect(preceding, `windmillClient.${fn}( must be reached through ctx.invoke('windmill.job', ...)`).toContain("ctx.invoke('windmill.job'");
+    }
+  });
+});
+
+describe('STEP 3 static proof: the canonical Vault writer replaced the direct filesystem write — no second artifact writer', () => {
+  it('writeWorkspaceArtifact() is imported from the one canonical owner (lib/vault.ts) and used for the SUCCESS artifact', () => {
+    expect(EXTERNAL_EXECUTIONS_SOURCE).toContain("import { writeWorkspaceArtifact } from './vault';");
+    expect(EXTERNAL_EXECUTIONS_SOURCE).toMatch(/const persistedArtifact = writeWorkspaceArtifact\(\{/);
+  });
+
+  it('no direct fs.writeFileSync/fs.mkdirSync remains in this file — the old flat, non-workspace-scoped vault write is gone', () => {
+    expect(EXTERNAL_EXECUTIONS_SOURCE).not.toContain('fs.writeFileSync');
+    expect(EXTERNAL_EXECUTIONS_SOURCE).not.toContain('fs.mkdirSync');
+    expect(EXTERNAL_EXECUTIONS_SOURCE).not.toContain("import fs from 'node:fs'");
+    expect(EXTERNAL_EXECUTIONS_SOURCE).not.toContain("import path from 'node:path'");
+  });
+
+  it('recordArtifact() is no longer called directly from this file (the canonical writer is the only path to it)', () => {
+    expect(EXTERNAL_EXECUTIONS_SOURCE).not.toMatch(/\brecordArtifact\(/);
+  });
+});
+
+describe('STEP 3 live proof: a real successful ingestion writes through the canonical, workspace-scoped Vault path', () => {
+  it('the persisted artifact lives under vault/workspaces/<workspaceId>/External-Executions/, not the old flat vault/External-Executions/ path', async () => {
+    const { execution: submitted } = await submitExternalExecution({ workspaceId: WS_A, createdByUserId: ACTOR, targetId: scriptTargetId, input: { probe: 'step3' } });
+    setJobState(submitted.remote_job_id!, 'success', { finding: 'step 3 canonical writer proof' });
+    await refreshExternalExecutionStatus(WS_A, submitted.id);
+    const { execution } = await ingestExternalExecutionResult(WS_A, submitted.id);
+
+    const artifacts = getTaskArtifacts(execution.task_id!);
+    expect(artifacts.length).toBe(1);
+    const artifact = artifacts[0];
+    const expectedDir = path.join(VAULT_ROOT, 'workspaces', WS_A, 'External-Executions') + path.sep;
+    expect(artifact.disk_path.startsWith(expectedDir)).toBe(true);
+    expect(artifact.relative_path.startsWith(`workspaces/${WS_A}/External-Executions/`)).toBe(true);
+    expect(fs.existsSync(artifact.disk_path)).toBe(true);
+    expect(fs.readFileSync(artifact.disk_path, 'utf8')).toContain('step 3 canonical writer proof');
+
+    // Real memory indexing (same canonical indexer kernel.ts's SUCCESS path uses).
+    const db = getDatabase();
+    const memRow = db.prepare('SELECT * FROM memory_index WHERE artifact_id = ?').get(artifact.artifact_id);
+    expect(memRow).toBeDefined();
+  });
+});
+
+describe('STEP 3 receipt contract (Rule 12 superseded — see project notes): FAILED/BLOCKED/NOT_CONFIGURED stay receiptless, SUCCESS is unaffected', () => {
+  it('a submission that fails because Windmill is NOT_CONFIGURED ends FAILED, receiptless, with only a runtime_event as evidence', async () => {
+    const savedBaseUrl = process.env.WINDMILL_BASE_URL;
+    const savedToken = process.env.WINDMILL_TOKEN;
+    const savedWorkspace = process.env.WINDMILL_WORKSPACE;
+    delete process.env.WINDMILL_BASE_URL;
+    delete process.env.WINDMILL_TOKEN;
+    delete process.env.WINDMILL_WORKSPACE;
+    try {
+      const { execution } = await submitExternalExecution({ workspaceId: WS_A, createdByUserId: ACTOR, targetId: scriptTargetId, input: {} });
+      expect(execution.status).toBe('FAILED');
+      expect(execution.error_code).toBe('SUBMISSION_FAILED');
+      expect(execution.result_receipt_id).toBeFalsy();
+      expect(execution.result_artifact_id).toBeFalsy();
+      expect(execution.task_id).toBeFalsy(); // no task/Aegis pipeline ever ran for an unsubmitted job
+
+      const events = listRecentRuntimeEvents({ workspaceId: WS_A, targetType: 'external_execution', limit: 200 })
+        .filter((e) => e.target_id === execution.id);
+      expect(events.some((e) => e.status === 'FAILED')).toBe(true);
+    } finally {
+      if (savedBaseUrl !== undefined) process.env.WINDMILL_BASE_URL = savedBaseUrl;
+      if (savedToken !== undefined) process.env.WINDMILL_TOKEN = savedToken;
+      if (savedWorkspace !== undefined) process.env.WINDMILL_WORKSPACE = savedWorkspace;
+    }
+  });
+
+  it('a genuinely successful ingestion still produces exactly one signed, verifiable receipt (SUCCESS path is unchanged by the FAILED-receipt decision)', async () => {
+    const { execution: submitted } = await submitExternalExecution({ workspaceId: WS_A, createdByUserId: ACTOR, targetId: scriptTargetId, input: {} });
+    setJobState(submitted.remote_job_id!, 'success');
+    await refreshExternalExecutionStatus(WS_A, submitted.id);
+    const { execution, verified } = await ingestExternalExecutionResult(WS_A, submitted.id);
+    expect(verified).toBe(true);
+    const receipts = getTaskReceipts(execution.task_id!);
+    expect(receipts.length).toBe(1);
+    expect(verifyReceipt(receipts[0])).toBe(true);
   });
 });

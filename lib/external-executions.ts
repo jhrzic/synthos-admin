@@ -1,12 +1,9 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import crypto from 'node:crypto';
 import { getDatabase } from './persistence';
 import {
   createInitialTask,
   updateTaskStatus,
   recordActivityEvent,
-  recordArtifact,
   runDeterministicAegisVerification,
   recordQualityReview,
   recordReceipt,
@@ -18,7 +15,19 @@ import {
 } from './persistence';
 import { verifyTaskAtGate } from './kil-gate';
 import { indexVaultArtifact } from './memory-index';
-import { VAULT_ROOT } from './vault';
+// STEP 3 — the canonical Vault writer (lib/vault.ts), the same one
+// lib/fabric/kernel.ts uses. Replaces this file's own former direct
+// filesystem-write-plus-artifact-record pair (a real, unscoped duplicate:
+// the old path was a flat vault/External-Executions/ folder with no
+// workspace_id segment at all, unlike every other artifact in the vault).
+import { writeWorkspaceArtifact } from './vault';
+// STEP 3 — real Windmill network calls (submit/status/result/cancel) are
+// wrapped in ctx.invoke("windmill.job", ...) so the invocation trace is a
+// truthful, observed record rather than an implicit direct call, matching
+// lib/fabric/kernel.ts's ctx.invoke("model.gemini", ...) pattern. This is
+// the one existing ExecutionContext factory (lib/fabric/context.ts) — no
+// second one is created here.
+import { createExecutionContext } from './fabric/context';
 import { recordRuntimeEvent } from './runtime-events';
 import { resolveWindmillTarget, validateAgainstInputSchema, WindmillTargetRecord } from './windmill-targets';
 import * as windmillClient from './windmill-client';
@@ -146,6 +155,21 @@ function patchRow(id: string, patch: Record<string, unknown>): ExternalExecution
 }
 
 /** M2 — only emits a runtime event when status genuinely changed; polling the same terminal state repeatedly must never spam the ledger. */
+// STEP 3 — the one real dispatch call site. Both a first submission
+// (submitExternalExecution) and a retry's resubmission (retryExternalExecution)
+// go through this single wrapper rather than each independently repeating
+// the ctx.invoke('windmill.job', ...) wrap — the underlying client call is
+// made from exactly one place in this file, not two.
+async function dispatchWindmillJob(
+  workspaceId: string,
+  remotePath: string,
+  kind: 'script' | 'flow',
+  input: Record<string, unknown>
+): Promise<windmillClient.WindmillSubmitResult> {
+  const ctx = createExecutionContext({ workspaceId });
+  return ctx.invoke('windmill.job', () => windmillClient.submitJob({ remotePath, kind, input }));
+}
+
 function recordTransition(execution: ExternalExecutionRecord, previousStatus: string | null, eventStatus: 'SUBMITTED' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'CANCELLED') {
   if (previousStatus === execution.status) return;
   recordRuntimeEvent({
@@ -216,7 +240,7 @@ export async function submitExternalExecution(params: SubmitExternalExecutionPar
     correlationId, input: params.input || {}, createdByUserId: params.createdByUserId, attemptNumber: 1,
   });
 
-  const submission = await windmillClient.submitJob({ remotePath: target.remote_path, kind: target.kind, input: params.input || {} });
+  const submission = await dispatchWindmillJob(params.workspaceId, target.remote_path, target.kind, params.input || {});
   if (!submission.ok) {
     execution = patchRow(execution.id, { status: 'FAILED', error_code: 'SUBMISSION_FAILED', error_message_safe: sanitizeError(submission.error) });
     recordTransition(execution, 'PENDING', 'FAILED');
@@ -238,7 +262,8 @@ export async function refreshExternalExecutionStatus(workspaceId: string, id: st
   }
 
   const previousStatus = existing.status;
-  const statusResult = await windmillClient.getJobStatus(existing.remote_job_id);
+  const ctx = createExecutionContext({ workspaceId });
+  const statusResult = await ctx.invoke('windmill.job', () => windmillClient.getJobStatus(existing.remote_job_id));
   const now = new Date().toISOString();
 
   if (!statusResult.ok) {
@@ -305,7 +330,8 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
     throw Object.assign(new Error(`Cannot ingest a result for status "${existing.status}" — only a confirmed SUCCEEDED remote job may be ingested.`), { code: 'NOT_SUCCEEDED' });
   }
 
-  const resultCall = await windmillClient.getJobResult(existing.remote_job_id);
+  const ctx = createExecutionContext({ workspaceId });
+  const resultCall = await ctx.invoke('windmill.job', () => windmillClient.getJobResult(existing.remote_job_id));
   if (!resultCall.ok) {
     throw Object.assign(new Error(sanitizeError(resultCall.error)), { code: 'RESULT_FETCH_FAILED' });
   }
@@ -325,16 +351,26 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
   const resultText = typeof resultCall.result === 'string' ? resultCall.result : JSON.stringify(resultCall.result, null, 2);
   recordActivityEvent({ taskId, eventType: 'PROVIDER_COMPLETED', agentId: 'windmill', payload: { model: `windmill:${existing.remote_path}`, outputLength: resultText.length, truncated: !!resultCall.truncated } });
 
-  const sanitizedPath = existing.remote_path.replace(/[^a-zA-Z0-9_-]/g, '-');
-  const vaultRelPath = `External-Executions/${sanitizedPath}-${existing.id}.md`;
-  const vaultDiskDir = path.join(VAULT_ROOT, 'External-Executions');
-  if (!fs.existsSync(vaultDiskDir)) fs.mkdirSync(vaultDiskDir, { recursive: true });
-  const vaultDiskPath = path.join(vaultDiskDir, `${sanitizedPath}-${existing.id}.md`);
-  const artifactContent = `# ${title}\n\n**Runtime**: Windmill\n**Remote job**: ${existing.remote_job_id}\n**Timestamp**: ${nowIso}\n**Vault Path**: \`${vaultRelPath}\`\n\n---\n\n\`\`\`\n${resultText}\n\`\`\`\n`;
-  fs.writeFileSync(vaultDiskPath, artifactContent, 'utf8');
-
-  const artifactId = `art-${Date.now()}`;
-  const persistedArtifact = recordArtifact({ artifactId, taskId, relativePath: vaultRelPath, diskPath: vaultDiskPath, content: artifactContent, createdAt: nowIso });
+  // STEP 3 — the canonical Vault writer (lib/vault.ts), the same one
+  // lib/fabric/kernel.ts's SUCCESS path uses. This replaces a direct
+  // filesystem write into a flat, non-workspace-scoped
+  // vault/External-Executions/ folder (no workspace_id segment anywhere in
+  // that path) with the real workspace-scoped, traversal/symlink-checked
+  // write every other artifact in the vault now goes through. As in
+  // kernel.ts's Step 2 change, the real relative_path is only known once
+  // writeWorkspaceArtifact() generates it, so the old "**Vault Path**:
+  // `...`" header line (which had to guess the path before writing) is
+  // dropped rather than filled with a placeholder baked into the saved
+  // document.
+  const artifactContent = `# ${title}\n\n**Runtime**: Windmill\n**Remote job**: ${existing.remote_job_id}\n**Timestamp**: ${nowIso}\n\n---\n\n\`\`\`\n${resultText}\n\`\`\`\n`;
+  const persistedArtifact = writeWorkspaceArtifact({
+    workspaceId,
+    taskId,
+    content: artifactContent,
+    folder: 'External-Executions',
+    extension: 'md',
+    createdAt: nowIso,
+  });
   recordActivityEvent({
     taskId, eventType: 'ARTIFACT_SAVED', agentId: 'windmill',
     payload: { artifactId: persistedArtifact.artifact_id, relativePath: persistedArtifact.relative_path, diskPath: persistedArtifact.disk_path, contentHash: persistedArtifact.content_hash, sizeBytes: persistedArtifact.size_bytes },
@@ -427,7 +463,8 @@ export async function cancelExternalExecution(workspaceId: string, id: string): 
   }
 
   const previousStatus = existing.status;
-  const result = await windmillClient.cancelJob(existing.remote_job_id);
+  const ctx = createExecutionContext({ workspaceId });
+  const result = await ctx.invoke('windmill.job', () => windmillClient.cancelJob(existing.remote_job_id));
   if (!result.ok) {
     return { execution: existing, confirmed: false, error: sanitizeError(result.error) };
   }
@@ -466,7 +503,7 @@ export async function retryExternalExecution(workspaceId: string, actorUserId: s
     correlationId, input, createdByUserId: actorUserId, attemptNumber: prior.attempt_number + 1, parentExecutionId: prior.id,
   });
 
-  const submission = await windmillClient.submitJob({ remotePath: target.remote_path, kind: target.kind, input });
+  const submission = await dispatchWindmillJob(workspaceId, target.remote_path, target.kind, input);
   if (!submission.ok) {
     execution = patchRow(execution.id, { status: 'FAILED', error_code: 'SUBMISSION_FAILED', error_message_safe: sanitizeError(submission.error) });
     recordTransition(execution, 'PENDING', 'FAILED');
