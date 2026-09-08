@@ -43,7 +43,7 @@ import {
   projectKnowledgeCandidate
 } from "./lib/persistence";
 import { hermesAdapter } from "./src/services/hermesAdapter";
-import { classifyModelRequest } from "./lib/model-router";
+import { classifyModelRequest, generateWithFailover, type FailoverResult } from "./lib/model-router";
 import { verifyTaskAtGate } from "./lib/kil-gate";
 import { buildTonReadiness } from "./lib/ton-readiness";
 import { probeTonReadiness } from "./lib/ton-probe";
@@ -452,36 +452,32 @@ async function startServer() {
       const targetModel = classification.resolvedModel;
       const enhancedPrompt = `[Model: ${targetModel.toUpperCase()}]\n${systemInstruction ? `System Prompt: ${systemInstruction}\n` : ""}\nUser Query: ${prompt}`;
 
+      // Pass X follow-up (Jarvis routing stabilization) — unified onto the
+      // same real retry/failover helper as /api/jarvis/command rather than
+      // keeping a second, divergent candidate-loop implementation here.
+      // This route's own loop previously retried every error identically
+      // (no retryable/non-retryable distinction, no backoff, no circuit
+      // breaker) — now shares one tested implementation.
       const candidateModels = [targetModel, ...DEFAULT_CANDIDATE_MODELS].filter((v, i, a) => a.indexOf(v) === i);
-      let generatedText = "";
-      let modelUsed = candidateModels[0];
-      let lastError: any = null;
-
-      const modelQueue = candidateModels;
-
       let usageMetadata: any = null;
-      for (const candidate of modelQueue) {
-        try {
-          const response = await ai.models.generateContent({
-            model: candidate,
-            contents: enhancedPrompt,
-            config: {
-              temperature: Number(temperature),
-            },
-          });
 
-          if (response.text) {
-            generatedText = response.text;
-            modelUsed = candidate;
-            usageMetadata = response.usageMetadata || null;
-            break;
-          }
-        } catch (candidateErr: any) {
-          lastError = candidateErr;
-          console.warn(`Model candidate ${candidate} temporary error:`, candidateErr?.message || candidateErr?.status);
-          await new Promise((r) => setTimeout(r, 200));
+      const failoverResult = await generateWithFailover(candidateModels, async (candidate) => {
+        const response = await ai.models.generateContent({
+          model: candidate,
+          contents: enhancedPrompt,
+          config: {
+            temperature: Number(temperature),
+          },
+        });
+        if (!response.text) {
+          throw new Error("Model returned an empty response.");
         }
-      }
+        usageMetadata = response.usageMetadata || null;
+        return response.text;
+      });
+
+      const generatedText = failoverResult.success ? failoverResult.text! : "";
+      const modelUsed = failoverResult.modelUsed || candidateModels[0];
 
       if (generatedText) {
         const taskId = req.body?.taskId || `chat-${Date.now()}`;
@@ -494,7 +490,9 @@ async function startServer() {
             eventType: "PROMPT_COMPLETED",
             payload: {
               promptLength: prompt.length,
+              requestedModel: targetModel,
               modelUsed,
+              fallbackUsed: failoverResult.fallbackUsed,
               provider: "google-genai",
               replyLength: generatedText.length,
               usageMetadata,
@@ -513,6 +511,7 @@ async function startServer() {
           status: "SUCCESS",
           reply: generatedText,
           modelUsed,
+          fallbackUsed: failoverResult.fallbackUsed,
           taskId,
           eventId,
           usageMetadata,
@@ -527,8 +526,9 @@ async function startServer() {
         success: false,
         status: "DEGRADED",
         reason: "MODEL_PROVIDER_UNAVAILABLE",
-        error: lastError?.message || "Upstream model provider is currently unavailable or rate limited.",
+        error: failoverResult.finalError || "Upstream model provider is currently unavailable or rate limited.",
         modelUsed: model,
+        attempts: failoverResult.attempts,
         timestamp: new Date().toISOString(),
       });
     } catch (err: any) {
@@ -2858,6 +2858,12 @@ sourceHash: ${packageMetadataResult.sourceHash}
       let reply = "";
       let intent = "GENERAL_DIRECTIVE";
       let evidence: any = null;
+      // Pass X follow-up (Jarvis routing) — set only by the natural-language
+      // branch below. When non-null, the request degraded honestly instead
+      // of producing a reply; used both to log the real failure and to
+      // return an honest DEGRADED response instead of a fabricated success.
+      let degraded: { reason: string; error: string; attempts?: unknown } | null = null;
+      let jarvisFailover: FailoverResult | null = null;
 
       // Administrative Dispatch Routing
       if (lower.includes("task") || lower.includes("show all agent tasks") || lower.includes("list tasks")) {
@@ -2900,37 +2906,96 @@ sourceHash: ${packageMetadataResult.sourceHash}
           : `${executions.length} recent external execution(s) in workspace ${jarvisWorkspaceId}:\n` +
             executions.map((e) => `• [${e.status}] ${e.remote_path} — ${e.id}`).join("\n");
       } else {
-        // Natural Language Directive via Live Model
+        // Natural Language Directive via Live Model — Pass X follow-up
+        // (Jarvis routing stabilization). Real bounded retry + real
+        // model-level failover via generateWithFailover(); no cross-
+        // provider fallback exists because no second provider is
+        // configured in this deployment (see lib/model-router.ts header —
+        // Claude/DeepSeek/Hermes/OpenAI are recognized by name but have no
+        // configured execution mapping here, so a "provider fallback"
+        // would be fictitious).
+        //
+        // Two real fabrications fixed here, not just a missing retry:
+        // (1) this branch used to return success:true with a hand-authored
+        // acknowledgment claiming a directive was dispatched, when
+        // GEMINI_API_KEY was unset and nothing was ever called. (2) an
+        // empty model response used to silently fall back to a similarly
+        // fabricated acknowledgment string. Both now fail honestly instead.
         const apiKey = process.env.GEMINI_API_KEY || "";
-        if (apiKey) {
+        if (!apiKey) {
+          degraded = {
+            reason: "API_KEY_NOT_CONFIGURED",
+            error: "GEMINI_API_KEY is not configured in this deployment. No directive was processed.",
+          };
+        } else {
           const ai = new GoogleGenAI({
             apiKey,
             httpOptions: { headers: { "User-Agent": "aistudio-build" } }
           });
-          const response = await ai.models.generateContent({
-            model: "gemini-3.7-flash",
-            contents: trimmed,
-            config: {
-              systemInstruction: "You are Jarvis, the SynthOS Global System Service and Administrative Assistant. Answer concisely and factually based on SynthOS architecture, agent coordination, and system governance."
+          const jarvisSystemInstruction = "You are Jarvis, the SynthOS Global System Service and Administrative Assistant. Answer concisely and factually based on SynthOS architecture, agent coordination, and system governance.";
+          const candidateModels = ["gemini-3.7-flash", ...DEFAULT_CANDIDATE_MODELS].filter((v, i, a) => a.indexOf(v) === i);
+
+          jarvisFailover = await generateWithFailover(candidateModels, async (candidateModel) => {
+            const response = await ai.models.generateContent({
+              model: candidateModel,
+              contents: trimmed,
+              config: { systemInstruction: jarvisSystemInstruction },
+            });
+            if (!response.text) {
+              // A real failure of this candidate, not a fabricated success — lets
+              // failover try the next candidate model instead of faking a reply.
+              throw new Error("Model returned an empty response.");
             }
+            return response.text;
           });
-          reply = response.text || "Directive acknowledged and dispatched to system mesh.";
-        } else {
-          reply = `[JARVIS GLOBAL ENGINE]: Directive acknowledged: "${trimmed}". Processing through SynthOS execution mesh.`;
+
+          if (jarvisFailover.success) {
+            reply = jarvisFailover.text!;
+          } else {
+            degraded = {
+              reason: "MODEL_PROVIDER_UNAVAILABLE",
+              error: jarvisFailover.finalError || "Upstream model provider is currently unavailable or rate limited.",
+              attempts: jarvisFailover.attempts,
+            };
+          }
         }
       }
 
-      // Record activity event in SQLite ledger
+      // Record activity event in SQLite ledger — real outcome either way,
+      // including a real failure (Phase E: honest observability). Never
+      // recorded as a success when the request degraded.
       const jarvisTaskId = `jarvis-cmd-${Date.now()}`;
       try {
         recordActivityEvent({
           taskId: jarvisTaskId,
           agentId: "jarvis",
-          eventType: "JARVIS_COMMAND_EXECUTED",
-          payload: { command: trimmed, intent, replyPreview: reply.slice(0, 100) }
+          eventType: degraded ? "JARVIS_COMMAND_DEGRADED" : "JARVIS_COMMAND_EXECUTED",
+          payload: degraded
+            ? { command: trimmed, intent, reason: degraded.reason, error: degraded.error, attempts: degraded.attempts }
+            : {
+                command: trimmed,
+                intent,
+                replyPreview: reply.slice(0, 100),
+                requestedModel: jarvisFailover?.requestedModel,
+                modelUsed: jarvisFailover?.modelUsed,
+                fallbackUsed: jarvisFailover?.fallbackUsed ?? false,
+              }
         });
       } catch (e) {
         console.warn("[Jarvis Event Record Warning]:", e);
+      }
+
+      if (degraded) {
+        return res.status(200).json({
+          success: false,
+          status: "DEGRADED",
+          reason: degraded.reason,
+          error: degraded.error,
+          command: trimmed,
+          attempts: degraded.attempts,
+          taskId: jarvisTaskId,
+          timestamp: new Date().toISOString(),
+        });
       }
 
       return res.json({
@@ -2940,6 +3005,8 @@ sourceHash: ${packageMetadataResult.sourceHash}
         reply,
         evidence,
         taskId: jarvisTaskId,
+        modelUsed: jarvisFailover?.modelUsed,
+        fallbackUsed: jarvisFailover?.fallbackUsed ?? false,
         timestamp: new Date().toISOString()
       });
     } catch (err: any) {

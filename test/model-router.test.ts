@@ -125,6 +125,9 @@ describe('SYNTHOS PROVIDER IDENTITY RULE: non-Gemini requests must never silentl
   });
 
   it('server.ts no longer defines its own permissive model resolution — it imports the shared classifier', () => {
-    expect(serverContent).toContain('import { classifyModelRequest } from "./lib/model-router"');
+    // Jarvis routing stabilization added generateWithFailover to the same
+    // import line, so this now matches classifyModelRequest being imported
+    // from lib/model-router without pinning the exact full import list.
+    expect(serverContent).toMatch(/import \{[^}]*\bclassifyModelRequest\b[^}]*\} from "\.\/lib\/model-router"/);
   });
 });
