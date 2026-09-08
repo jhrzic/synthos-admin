@@ -17,8 +17,8 @@ interface GlobalVoiceOverlayProps {
   settings: JarvisSettings;
   onUpdateSettings?: (newSettings: Partial<JarvisSettings>) => void;
   onSendQuery: (query: string, targetModel: string) => Promise<string>;
-  /** Real, workspace-scoped /api/jarvis/command dispatcher — see JarvisView for the same contract. */
-  onJarvisCommand: (command: string, messageType?: 'text' | 'voice_transcript') => Promise<string>;
+  /** Real, workspace-scoped /api/jarvis/command dispatcher — see JarvisView for the same contract. `reply` is the full text (transcript/vault); `spokenSummary` is the concise, spoken-safe text (TTS) — never the same string used for both (P3). */
+  onJarvisCommand: (command: string, messageType?: 'text' | 'voice_transcript') => Promise<{ reply: string; spokenSummary: string | null }>;
   onAddKanbanTask?: (task: Omit<KanbanTask, 'id' | 'createdAt' | 'updatedAt' | 'subtasks'>) => void;
   onAddNoteToVault?: (title: string, content: string, tags: string[], folder?: string) => void;
   onOpenFullJarvis?: () => void;
@@ -161,7 +161,7 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
       // classification (task/graph/receipt keywords) sees exactly what the
       // user said rather than a system-prompt wrapper that could shift or
       // mask those keywords.
-      const reply = await onJarvisCommand(directiveText, 'voice_transcript');
+      const { reply, spokenSummary } = await onJarvisCommand(directiveText, 'voice_transcript');
       
       setPipelineTrace({
         workspace: workspaceContext,
@@ -198,20 +198,20 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
       setIsProcessing(false);
       setActiveStage(8); // Complete
 
-      // TTS playback — speaks the same real text just logged above (line
-      // 193's honest fallback), never a separate fabricated completion
-      // claim of its own. Jarvis routing audit fix: this previously spoke a
-      // hand-authored success acknowledgment whenever `reply` were falsy —
-      // dead in practice (see the comment above), but a real risk if
-      // handleJarvisCommand()'s contract ever changes; removed rather than
-      // left as a landmine.
+      // TTS playback (P3) — speaks spokenSummary, the concise spoken-safe
+      // text, never the full `reply` logged above: `reply` can be long
+      // narration, a raw diagnostic, or (on a JSON-contract miss) unparsed
+      // raw model output — none of that belongs in the speech stream.
+      // spokenSummary is only ever null when the caller has nothing safe to
+      // say automatically, which gets an honest generic line here rather
+      // than falling back to reading `reply` aloud.
       setIsSpeaking(true);
       try {
         const voiceConfig: VoiceConfig = {
           provider: 'web_speech',
           speed: settings.voiceRate || 1.0,
         };
-        await speakText(reply || `No response was returned for the ${target.toUpperCase()} directive.`, voiceConfig);
+        await speakText(spokenSummary || `${target.toUpperCase()} directive complete — see the response log.`, voiceConfig);
       } catch (err) {
         console.warn("TTS playback fallback:", err);
       } finally {

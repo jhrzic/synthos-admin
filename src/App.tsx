@@ -367,7 +367,7 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
   // conversation history that survives reload, not just React state. A
   // persistence failure here never blocks the directive itself from
   // returning a reply.
-  const handleJarvisCommand = async (command: string, messageType: 'text' | 'voice_transcript' = 'text'): Promise<string> => {
+  const handleJarvisCommand = async (command: string, messageType: 'text' | 'voice_transcript' = 'text'): Promise<{ reply: string; spokenSummary: string | null }> => {
     let sessionId = jarvisSessionId;
     try {
       if (!sessionId) {
@@ -395,6 +395,12 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
     }
 
     let reply: string;
+    // TTS/speech separation (P3) — the concise, spoken-safe text, distinct
+    // from `reply` (the full text that goes to the transcript and vault).
+    // /api/jarvis/command now returns this alongside `reply`; a network-
+    // level failure (never reaches the server) gets a short honest
+    // client-side one instead of the raw error text.
+    let spokenSummary: string | null;
     try {
       // Jarvis conversation memory task — sessionId is now passed through
       // so the server can retrieve this exact conversation's own real,
@@ -410,11 +416,18 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
       const data = await res.json();
       if (!res.ok || data.success === false) {
         reply = `[STATUS: DEGRADED - JARVIS_COMMAND_UNAVAILABLE]\n${data.error || `HTTP ${res.status}`}`;
+        spokenSummary = typeof data.spokenSummary === 'string' && data.spokenSummary.trim()
+          ? data.spokenSummary.trim()
+          : "I can't process that right now.";
       } else {
         reply = data.reply || 'Directive acknowledged.';
+        spokenSummary = typeof data.spokenSummary === 'string' && data.spokenSummary.trim()
+          ? data.spokenSummary.trim()
+          : null;
       }
     } catch (err: any) {
       reply = `[STATUS: DEGRADED - JARVIS_COMMAND_UNAVAILABLE]\nReason: ${err?.message || 'Network error / API gateway unreachable'}`;
+      spokenSummary = "I can't reach SynthOS right now.";
     }
 
     if (sessionId) {
@@ -425,7 +438,7 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
       }).catch(() => { /* real network failure — the reply is still returned to the caller */ });
     }
 
-    return reply;
+    return { reply, spokenSummary };
   };
 
   // Add Note to Obsidian Vault with full Workspace Memory Provenance

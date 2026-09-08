@@ -2867,6 +2867,13 @@ sourceHash: ${packageMetadataResult.sourceHash}
 
       const lower = trimmed.toLowerCase();
       let reply = "";
+      // TTS/speech separation (P3) — the concise, spoken-safe version of the
+      // outcome. Never internal planning narration, never raw error/JSON/
+      // markdown text. Set per-branch below; null means "say nothing
+      // automatic," never "read `reply` instead" — `reply` can be long,
+      // deterministic-list-shaped, or (on the LLM branch) an unparsed raw
+      // JSON blob if the model ever fails to honor the response contract.
+      let spokenSummary: string | null = null;
       let intent = "GENERAL_DIRECTIVE";
       let evidence: any = null;
       // Pass X follow-up (Jarvis routing) — set only by the natural-language
@@ -2904,18 +2911,21 @@ sourceHash: ${packageMetadataResult.sourceHash}
         evidence = tasks;
         reply = `Found ${tasks.length} active agent tasks in workspace ${jarvisWorkspaceId}:\n` +
           tasks.map((t: any, idx: number) => `${idx + 1}. [${t.status}] ${t.title} (${t.assigned_agent} / ${t.assigned_model}) - ID: ${t.task_id}`).join("\n");
+        spokenSummary = `Found ${tasks.length} active agent task${tasks.length === 1 ? "" : "s"}.`;
       } else if (lower.includes("graph") || lower.includes("pipeline") || lower.includes("dag")) {
         intent = "ADMIN_GRAPH_QUERY";
         const graphs = listGraphs(jarvisWorkspaceId);
         const runs = listGraphRuns(jarvisWorkspaceId);
         evidence = { graphsCount: graphs.length, runsCount: runs.length, latestRun: runs[0] };
         reply = `SynthOS Graph Control Plane for workspace ${jarvisWorkspaceId}:\n- Total Graph DAGs: ${graphs.length}\n- Total Graph Execution Runs: ${runs.length}\n- Latest Run: ${runs[0]?.run_id || 'None'} [${runs[0]?.status || 'IDLE'}]`;
+        spokenSummary = `${graphs.length} graph${graphs.length === 1 ? "" : "s"} tracked, ${runs.length} execution run${runs.length === 1 ? "" : "s"} total.`;
       } else if (lower.includes("receipt") || lower.includes("signature") || lower.includes("aegis")) {
         intent = "ADMIN_RECEIPT_QUERY";
         const receipts = listWorkspaceReceipts(jarvisWorkspaceId, 5);
         evidence = receipts;
         reply = `Verified Cryptographic Receipts Ledger for workspace ${jarvisWorkspaceId} (${receipts.length} recent):\n` +
           receipts.map((r: any) => `• Receipt ${r.receipt_id} (Task: ${r.task_id}) - Algorithm: ${r.algorithm}`).join("\n");
+        spokenSummary = `${receipts.length} verified receipt${receipts.length === 1 ? "" : "s"} found.`;
       } else if (lower.includes("windmill") && (lower.includes("status") || lower.includes("connect") || lower.includes("health"))) {
         // ADR-006 / U1/U2 — read-only, workspace-scoped. Jarvis never
         // triggers a real Windmill job from natural language (U3, deferred).
@@ -2927,6 +2937,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
           : health.status === "CONNECTED"
             ? `Windmill is CONNECTED — authenticated as "${health.identity}"${health.version ? ` (version ${health.version})` : ""}.`
             : `Windmill is ${health.status}: ${health.error || "no further detail."}`;
+        spokenSummary = reply;
       } else if (lower.includes("windmill") || lower.includes("external job") || lower.includes("external execution")) {
         intent = "ADMIN_EXTERNAL_EXECUTIONS_QUERY";
         const executions = listWorkspaceExternalExecutions(jarvisWorkspaceId, 10);
@@ -2937,6 +2948,9 @@ sourceHash: ${packageMetadataResult.sourceHash}
             executions.filter((e) => e.status === "FAILED").map((e) => `• ${e.id} (${e.remote_path}) — ${e.error_message_safe || "no error detail recorded"}`).join("\n")
           : `${executions.length} recent external execution(s) in workspace ${jarvisWorkspaceId}:\n` +
             executions.map((e) => `• [${e.status}] ${e.remote_path} — ${e.id}`).join("\n");
+        spokenSummary = lower.includes("fail")
+          ? `${failedCount} of ${executions.length} recent external executions failed.`
+          : `${executions.length} recent external execution${executions.length === 1 ? "" : "s"} found.`;
       } else {
         // Natural Language Directive via Live Model — Pass X follow-up
         // (Jarvis routing stabilization). Real bounded retry + real
@@ -3022,7 +3036,23 @@ sourceHash: ${packageMetadataResult.sourceHash}
             apiKey,
             httpOptions: { headers: { "User-Agent": "aistudio-build" } }
           });
-          const jarvisSystemInstruction = "You are Jarvis, the SynthOS Global System Service and Administrative Assistant. Answer concisely and factually based on SynthOS architecture, agent coordination, and system governance.";
+          // TTS/speech separation (P3) — Jarvis's full answer and what gets
+          // read aloud are not the same text. Asking the model for both in
+          // one structured response (rather than deriving spokenSummary
+          // with a second call, or a client-side heuristic over prose that
+          // was never written to be truncated) keeps it to the one call
+          // this route already made, and lets the model itself distinguish
+          // "the outcome" from "the method" — a truncation heuristic can't.
+          const jarvisSystemInstruction = `You are Jarvis, the SynthOS Global System Service and Administrative Assistant. Answer concisely and factually based on SynthOS architecture, agent coordination, and system governance.
+
+Respond with ONLY a JSON object of this exact shape, no other text before or after it:
+{"reply": "<the full answer>", "spokenSummary": "<a 1-2 sentence spoken-safe summary of the outcome>"}
+
+Rules for spokenSummary specifically:
+- Describe the OUTCOME, never the method. Never phrases like "To accomplish this, I will..." or "Here is how you could..." — that is planning narration, not an outcome.
+- Never include raw error text, stack traces, JSON, markdown, or code.
+- The user already gave a command if this is a directive rather than a question — never end with "Would you like me to...". Say what happened, not what could happen next.
+- If completing the request needs a live capability (web research, file access, an external API) that is not actually available in this call, spokenSummary must say so plainly rather than presenting model-training-era knowledge as current information.`;
           const candidateModels = [jarvisClassification.resolvedModel, ...DEFAULT_CANDIDATE_MODELS].filter((v, i, a) => a.indexOf(v) === i);
 
           // Native chat-role turns, never flattened into the system prompt.
@@ -3046,7 +3076,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
             const response = await ai.models.generateContent({
               model: candidateModel,
               contents: conversationContents,
-              config: { systemInstruction: jarvisSystemInstruction },
+              config: { systemInstruction: jarvisSystemInstruction, responseMimeType: "application/json" },
             });
             if (!response.text) {
               // A real failure of this candidate, not a fabricated success — lets
@@ -3057,7 +3087,26 @@ sourceHash: ${packageMetadataResult.sourceHash}
           });
 
           if (jarvisFailover.success) {
-            reply = jarvisFailover.text!;
+            const rawText = jarvisFailover.text!;
+            try {
+              const parsed = JSON.parse(rawText);
+              if (parsed && typeof parsed.reply === "string" && parsed.reply.trim()) {
+                reply = parsed.reply;
+                spokenSummary = typeof parsed.spokenSummary === "string" && parsed.spokenSummary.trim()
+                  ? parsed.spokenSummary.trim()
+                  : null;
+              } else {
+                throw new Error("Response JSON missing a non-empty 'reply' field.");
+              }
+            } catch {
+              // The model didn't honor the JSON contract. The raw text is
+              // still a real answer and must not be lost — it becomes the
+              // full reply exactly as before this change. spokenSummary
+              // stays null: unparsed raw model output is exactly what P3
+              // exists to keep out of the speech stream.
+              reply = rawText;
+              spokenSummary = null;
+            }
           } else {
             degraded = {
               reason: "MODEL_PROVIDER_UNAVAILABLE",
@@ -3066,6 +3115,16 @@ sourceHash: ${packageMetadataResult.sourceHash}
             };
           }
         }
+      }
+
+      // Honest, human, spoken-safe summary for a degraded outcome — never
+      // the raw diagnostic text set as `degraded.error` below (provider
+      // exception messages, HTTP status text), which is real and useful in
+      // the visible transcript but not something to read aloud verbatim.
+      if (degraded) {
+        spokenSummary = degraded.reason === "API_KEY_NOT_CONFIGURED"
+          ? "I can't process that — the model service isn't configured on this deployment."
+          : "I can't process that right now — the model provider is unavailable.";
       }
 
       // Record activity event in SQLite ledger — real outcome either way,
@@ -3106,6 +3165,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
           attempts: degraded.attempts,
           taskId: jarvisTaskId,
           context: contextProvenance,
+          spokenSummary,
           timestamp: new Date().toISOString(),
         });
       }
@@ -3115,6 +3175,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
         command: trimmed,
         intent,
         reply,
+        spokenSummary,
         evidence,
         taskId: jarvisTaskId,
         modelUsed: jarvisFailover?.modelUsed,

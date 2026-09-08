@@ -50,8 +50,15 @@ describe('Jarvis conversation memory: server-side wiring is real, not decorative
     const slice = jarvisCommandRouteSlice();
     expect(slice).toContain('role: m.role === "assistant" ? "model" : "user"');
     expect(slice).toContain('parts: [{ text: m.content }]');
-    // The system instruction itself is a static literal, never built by concatenating history.
-    expect(slice).toMatch(/const jarvisSystemInstruction = "You are Jarvis[^"]*";/);
+    // The system instruction itself is a static literal, never built by
+    // concatenating history. P3 (TTS/speech separation) turned it into a
+    // multi-line template literal (it now describes a JSON response
+    // contract), but it remains a plain static string — no ${...}
+    // interpolation, still just a literal built once, not from history.
+    expect(slice).toMatch(/const jarvisSystemInstruction = `You are Jarvis[\s\S]*?`;/);
+    const instructionMatch = slice.match(/const jarvisSystemInstruction = `([\s\S]*?)`;/);
+    expect(instructionMatch).not.toBeNull();
+    expect(instructionMatch![1]).not.toContain('${');
   });
 
   it('the current message is appended exactly once, as the final turn, separately from retrieved history', () => {
@@ -99,7 +106,11 @@ describe('Jarvis conversation memory: server-side wiring is real, not decorative
 describe('Jarvis conversation memory: client-side wiring passes the real session id', () => {
   it('handleJarvisCommand sends sessionId to /api/jarvis/command (it did not before this task)', () => {
     const idx = appContent.indexOf('const handleJarvisCommand');
-    const slice = appContent.slice(idx, idx + 2000);
+    // P3 (TTS/speech separation) added real, non-decorative code to this
+    // function (spokenSummary handling) between its start and this fetch
+    // call — widened from 2000 to keep margin rather than chase the exact
+    // byte count on every future real addition here.
+    const slice = appContent.slice(idx, idx + 3000);
     expect(slice).toContain("body: JSON.stringify({ command, workspaceId: activeWorkspaceId, sessionId: sessionId || null })");
   });
 });

@@ -103,14 +103,20 @@ describe('5: Hermes\'s role is not misrepresented anywhere in the Jarvis request
 });
 
 describe('6/7/8: Fish Audio / TTS never fabricates a response and never destroys a real one', () => {
-  it('GlobalVoiceOverlay speaks the real reply text (or an honest "no response" fallback), never a fabricated success claim', () => {
+  it('GlobalVoiceOverlay speaks the concise spokenSummary (or an honest fallback), never the full reply text and never a fabricated success claim', () => {
+    // P3 (TTS/speech separation): the full `reply` (which can be long
+    // narration, a raw diagnostic, or unparsed model output) goes to the
+    // transcript/vault only. Only spokenSummary — the concise, spoken-safe
+    // counterpart /api/jarvis/command now returns alongside reply — ever
+    // reaches speakText.
     expect(globalVoiceOverlayContent).not.toContain('"Directive dispatched successfully."');
-    expect(globalVoiceOverlayContent).toContain('await speakText(reply || `No response was returned for the ${target.toUpperCase()} directive.`, voiceConfig)');
+    expect(globalVoiceOverlayContent).toContain('await speakText(spokenSummary || `${target.toUpperCase()} directive complete — see the response log.`, voiceConfig)');
+    expect(globalVoiceOverlayContent).not.toMatch(/await speakText\(reply\b/);
   });
 
   it('TTS playback happens after the real reply is already logged to the transcript, never before/instead of it', () => {
     const logIdx = globalVoiceOverlayContent.indexOf('setTranscriptLogs(prev => [...prev, {');
-    const ttsIdx = globalVoiceOverlayContent.indexOf('await speakText(reply');
+    const ttsIdx = globalVoiceOverlayContent.indexOf('await speakText(spokenSummary');
     expect(logIdx).toBeGreaterThan(-1);
     expect(ttsIdx).toBeGreaterThan(logIdx);
   });

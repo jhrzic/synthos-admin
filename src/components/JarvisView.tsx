@@ -34,7 +34,7 @@ interface JarvisViewProps {
    * so its "show my tasks"-style directives actually reach that real
    * infrastructure instead of a generic chat call that can't answer them.
    */
-  onJarvisCommand: (command: string, messageType?: 'text' | 'voice_transcript') => Promise<string>;
+  onJarvisCommand: (command: string, messageType?: 'text' | 'voice_transcript') => Promise<{ reply: string; spokenSummary: string | null }>;
   /** Real workspace-scoped session history — see lib/jarvis-sessions.ts. */
   activeWorkspaceId?: string;
   /** Starts a fresh Jarvis session on the next directive. */
@@ -69,6 +69,12 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
 
   const [activeVoiceResponse, setActiveVoiceResponse] = useState<string>(
     "All neural mesh systems, Obsidian vaults, and autonomous agents are operating normally. Ready for directives."
+  );
+  // TTS/speech separation (P3) — the concise, spoken-safe counterpart to
+  // activeVoiceResponse (the full displayed text). Whatever the replay
+  // button re-speaks must be this, never activeVoiceResponse itself.
+  const [activeSpokenSummary, setActiveSpokenSummary] = useState<string>(
+    "Ready for directives."
   );
 
   // Real Jarvis session history — see lib/jarvis-sessions.ts. A modest
@@ -363,13 +369,20 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
     setHudLogs(prev => [`[USER DIRECTIVE]: ${query}`, ...prev]);
 
     try {
-      const reply = await onJarvisCommand(query);
+      const { reply, spokenSummary } = await onJarvisCommand(query);
       setActiveVoiceResponse(reply);
-      showCaptionWithAutoDismiss(reply.slice(0, 120) + (reply.length > 120 ? '...' : ''));
+      // TTS/speech separation (P3) — the caption and the replay button both
+      // key off the concise spoken text, not the full reply; only the
+      // dialogue-bubble display (activeVoiceResponse, above) shows the full
+      // answer. A null spokenSummary means the caller had nothing safe to
+      // say automatically, not "read the full reply instead."
+      const spoken = spokenSummary || 'Response ready — see the transcript.';
+      setActiveSpokenSummary(spoken);
+      showCaptionWithAutoDismiss(spoken);
       setHudLogs(prev => [`[ASSISTANT EXECUTION]: ${reply.slice(0, 80)}...`, ...prev]);
 
       if (settings.voiceEnabled) {
-        speakText(reply);
+        speakText(spoken);
       }
 
       if (settings.autoSyncObsidian) {
@@ -465,7 +478,7 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
           </button>
 
           <button
-            onClick={() => speakText(activeVoiceResponse)}
+            onClick={() => speakText(activeSpokenSummary)}
             className="px-4 py-2 rounded-xl bg-[#14172B] hover:bg-[#1E2342] border border-[#252A4E] text-[#615EFF] text-xs font-bold font-mono flex items-center gap-2 transition"
           >
             <Volume2 className={`w-4 h-4 text-[#615EFF] ${isSpeaking ? 'animate-bounce' : ''}`} />
