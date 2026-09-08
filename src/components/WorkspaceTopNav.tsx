@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ActiveTab } from '../types';
-import { useHermesHealth } from '../hooks/useHermesHealth';
+import { useHermesHealth, deriveHermesDisplayStatus } from '../hooks/useHermesHealth';
 import {
   LayoutDashboard, MessageSquare, Terminal, Radio, Layers, Bot, Zap, Kanban,
   Cpu, Server, Code2, Clock, Globe, HardDrive, Database, FileCheck, Sparkles,
@@ -44,8 +44,13 @@ interface NavItem {
 interface WorkspaceConfig {
   name: string;
   badgeText: string;
-  statusText: 'LIVE' | 'PARTIAL' | 'NOT CONNECTED' | 'MISSING';
-  statusColor: string;
+  // Hermes has real, live health evidence (useHermesHealth) and is
+  // rendered from that instead — see the status-pill JSX below. Every
+  // other workspace still uses this static label, so the field stays
+  // required for them; Hermes simply never sets it (fix(hermes): unify
+  // runtime status across admin UI — a hardcoded 'LIVE' lived here before).
+  statusText?: 'LIVE' | 'PARTIAL' | 'NOT CONNECTED' | 'MISSING';
+  statusColor?: string;
   accentColor: string;
   primaryTabs: NavItem[];
   moreTabs: NavItem[];
@@ -90,12 +95,14 @@ export const WorkspaceTopNav: React.FC<WorkspaceTopNavProps> = ({
     hermes: {
       name: 'HERMES AGENTOS',
       badgeText: 'HERMES OS',
-      statusText: 'LIVE',
-      statusColor: '#00D26A',
+      // No statusText/statusColor: Hermes is rendered from real health
+      // evidence (deriveHermesDisplayStatus), not a static claim.
       accentColor: '#615EFF',
       primaryTabs: [
         { id: 'hermes-core', label: 'Overview', icon: LayoutDashboard, color: '#A5A2FF' },
-        { id: 'hermes-chat', label: 'Chat', icon: MessageSquare, color: '#615EFF', badge: 'LIVE', badgeColor: '#00D26A' },
+        // No hardcoded badge here either — the Chat tab's badge is
+        // computed from the same real hermesHealth below.
+        { id: 'hermes-chat', label: 'Chat', icon: MessageSquare, color: '#615EFF' },
         { id: 'hermes-terminal', label: 'Terminal', icon: Terminal, color: '#00D26A' },
         { id: 'hermes-apollo', label: 'Apollo Voice', shortLabel: 'Apollo', icon: Radio, color: '#FF5E8E' },
         { id: 'hermes-sessions', label: 'Sessions', icon: Layers, color: '#38BDF8' },
@@ -302,6 +309,10 @@ export const WorkspaceTopNav: React.FC<WorkspaceTopNavProps> = ({
   const activeConfig = configs[currentWorkspace] || configs.hermes;
   const isMoreActive = activeConfig.moreTabs.some(t => t.id === activeTab);
   const activeMoreItem = activeConfig.moreTabs.find(t => t.id === activeTab);
+  // fix(hermes): unify runtime status across admin UI — the single
+  // canonical mapping from real health evidence to a display label, shared
+  // with AirbyteHeader's top-bar pill. Never a static claim.
+  const hermesDisplayStatus = deriveHermesDisplayStatus(hermesHealth);
 
   return (
     <div className="w-full bg-[#080A16] border-b border-[#1A1D33] px-3 sm:px-6 py-2 shrink-0 relative z-30">
@@ -326,19 +337,9 @@ export const WorkspaceTopNav: React.FC<WorkspaceTopNavProps> = ({
           <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[#121528] border border-[#222744] text-[10px] font-mono">
             {currentWorkspace === 'hermes' ? (
               <>
-                <span style={{ 
-                  color: hermesHealth.status === 'UP' ? '#00D26A' : 
-                         hermesHealth.status === 'DEGRADED' ? '#F59E0B' :
-                         hermesHealth.status === 'DOWN' ? '#EF4444' :
-                         hermesHealth.status === 'AUTH_ERROR' ? '#EF4444' : '#8E94B8' 
-                }}>●</span>
-                <span className="font-bold tracking-wider" style={{ 
-                  color: hermesHealth.status === 'UP' ? '#00D26A' : 
-                         hermesHealth.status === 'DEGRADED' ? '#F59E0B' :
-                         hermesHealth.status === 'DOWN' ? '#EF4444' :
-                         hermesHealth.status === 'AUTH_ERROR' ? '#EF4444' : '#8E94B8' 
-                }}>
-                  {hermesHealth.status}
+                <span style={{ color: hermesDisplayStatus.color }}>●</span>
+                <span className="font-bold tracking-wider" style={{ color: hermesDisplayStatus.color }}>
+                  {hermesDisplayStatus.label}
                 </span>
                 <span className="text-[#454B72]">|</span>
                 <span className="text-[#8E94B8]">
@@ -367,6 +368,12 @@ export const WorkspaceTopNav: React.FC<WorkspaceTopNavProps> = ({
           {activeConfig.primaryTabs.map((tab, idx) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id || (tab.id === 'hermes-core' && (activeTab === 'hermes' || activeTab === 'hermes-overview'));
+            // fix(hermes): unify runtime status across admin UI — the Chat
+            // sub-tab used to carry its own hardcoded badge: 'LIVE'. It now
+            // shows the same real, canonical status as everything else
+            // Hermes, never a static claim.
+            const badgeText = tab.id === 'hermes-chat' ? hermesDisplayStatus.label : tab.badge;
+            const badgeColor = tab.id === 'hermes-chat' ? hermesDisplayStatus.color : (tab.badgeColor || '#00D26A');
 
             return (
               <button
@@ -385,11 +392,12 @@ export const WorkspaceTopNav: React.FC<WorkspaceTopNavProps> = ({
               >
                 <Icon className="w-3.5 h-3.5" style={{ color: isActive ? '#FFFFFF' : tab.color }} />
                 <span>{tab.shortLabel || tab.label}</span>
-                {tab.badge && (
-                  <span className={`text-[8px] font-mono px-1 py-0.2 rounded font-bold ${
-                    isActive ? 'bg-black/30 text-white' : 'bg-[#00D26A]/20 text-[#00D26A]'
-                  }`}>
-                    {tab.badge}
+                {badgeText && (
+                  <span
+                    className={`text-[8px] font-mono px-1 py-0.2 rounded font-bold ${isActive ? 'bg-black/30 text-white' : ''}`}
+                    style={isActive ? undefined : { backgroundColor: `${badgeColor}33`, color: badgeColor }}
+                  >
+                    {badgeText}
                   </span>
                 )}
               </button>
