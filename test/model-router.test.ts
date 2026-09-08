@@ -118,7 +118,7 @@ describe('SYNTHOS PROVIDER IDENTITY RULE: non-Gemini requests must never silentl
     );
     expect(route).toContain('classifyModelRequest(assignedModel)');
     expect(route).toContain("modelClassification.provider === \"UNSUPPORTED\"");
-    expect(route.indexOf('classifyModelRequest(assignedModel)')).toBeLessThan(route.indexOf('updateTaskStatus(taskId, "RUNNING")'));
+    expect(route.indexOf('classifyModelRequest(assignedModel)')).toBeLessThan(route.indexOf('updateTaskStatus(taskId, "RUNNING"'));
     // The old exclude-list hack (silent Gemini fallback for claude/o3/sonar
     // while leaving deepseek/hermes/perplexity/chatgpt unguarded) must be gone
     expect(route).not.toContain('!v.includes("claude")');

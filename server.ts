@@ -26,6 +26,7 @@ import {
   getTaskActivityEvents, 
   getTaskArtifacts, 
   getDatabasePath,
+  getTaskWorkspaceId,
   read_package_metadata,
   deleteTaskRecords,
   saveGraph,
@@ -1470,10 +1471,44 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       const startTime = Date.now();
       const startTimeIso = new Date(startTime).toISOString();
 
+      // PHASE 0b — single canonical workspace scope for this entire request.
+      // authWorkspaceId (set by requireWorkspaceMember, a real, checked
+      // membership) is authoritative whenever that middleware ran. The
+      // x-internal-service-token bypass (above) skips that middleware
+      // entirely, so authWorkspaceId is unset there — the only path where
+      // the raw request-body value is trusted, matching this route's
+      // existing trust boundary for that bypass. Every write below uses
+      // this one value; nothing re-derives workspace scope independently
+      // (that independent re-derivation, specifically in the receipt
+      // payload, was Phase 0b's second fix).
+      const resolvedWorkspaceId = (req as AuthedRequest).authWorkspaceId ?? workspaceId;
+
+      // PHASE 0b — cross-workspace task hijack fix (characterized live in
+      // e2f0697, LIVE 5). A client-supplied taskId used to be trusted
+      // unconditionally: createInitialTask() UPSERTs, so reusing another
+      // workspace's real taskId silently reassigned that task's
+      // workspace_id/title/description/assigned_agent to the caller's own
+      // workspace, even though requireWorkspaceMember only ever checked
+      // that the caller belongs to the workspace THEY claimed — never
+      // anything about the taskId. If this taskId already exists, its real
+      // workspace_id must match resolvedWorkspaceId before any write
+      // happens; on mismatch, reject before createInitialTask ever runs —
+      // zero writes, not a partial one.
+      const existingTaskWorkspaceId = getTaskWorkspaceId(taskId);
+      if (existingTaskWorkspaceId !== null && existingTaskWorkspaceId !== resolvedWorkspaceId) {
+        return res.status(403).json({
+          success: false,
+          status: "BLOCKED",
+          reason: "WORKSPACE_MISMATCH",
+          error: `Task ${taskId} belongs to a different workspace and cannot be reused here.`,
+          taskId
+        });
+      }
+
       // 1. Persist task as TODO & record TASK_CREATED
       createInitialTask({
         taskId,
-        workspaceId,
+        workspaceId: resolvedWorkspaceId,
         title: taskTitle,
         description,
         assignedAgent,
@@ -1482,6 +1517,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       });
       recordActivityEvent({
         taskId,
+        expectedWorkspaceId: resolvedWorkspaceId,
         eventType: "TASK_CREATED",
         agentId: "orchestrator",
         payload: { title: taskTitle, status: "TODO" },
@@ -1489,9 +1525,10 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       });
 
       // 2. Persist READY status & record AGENT_ASSIGNED
-      updateTaskStatus(taskId, "READY");
+      updateTaskStatus(taskId, "READY", undefined, resolvedWorkspaceId);
       recordActivityEvent({
         taskId,
+        expectedWorkspaceId: resolvedWorkspaceId,
         eventType: "AGENT_ASSIGNED",
         agentId: assignedAgent,
         payload: { agent: assignedAgent, model: assignedModel, status: "READY" }
@@ -1500,9 +1537,10 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       // Check API Key
       const apiKey = process.env.GEMINI_API_KEY || "";
       if (!apiKey) {
-        updateTaskStatus(taskId, "FAILED");
+        updateTaskStatus(taskId, "FAILED", undefined, resolvedWorkspaceId);
         recordActivityEvent({
           taskId,
+          expectedWorkspaceId: resolvedWorkspaceId,
           eventType: "PROVIDER_FAILED",
           agentId: assignedAgent,
           payload: { reason: "BLOCKED_MISSING_CREDENTIAL", error: "GEMINI_API_KEY environment variable is not configured" }
@@ -1521,9 +1559,10 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       // being silently substituted with a Gemini model.
       const modelClassification = classifyModelRequest(assignedModel);
       if (modelClassification.provider === "UNSUPPORTED") {
-        updateTaskStatus(taskId, "FAILED");
+        updateTaskStatus(taskId, "FAILED", undefined, resolvedWorkspaceId);
         recordActivityEvent({
           taskId,
+          expectedWorkspaceId: resolvedWorkspaceId,
           eventType: "PROVIDER_UNSUPPORTED",
           agentId: assignedAgent,
           payload: {
@@ -1543,9 +1582,10 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       }
 
       // 3. Immediately before provider call: RUNNING & EXECUTION_STARTED
-      updateTaskStatus(taskId, "RUNNING");
+      updateTaskStatus(taskId, "RUNNING", undefined, resolvedWorkspaceId);
       recordActivityEvent({
         taskId,
+        expectedWorkspaceId: resolvedWorkspaceId,
         eventType: "EXECUTION_STARTED",
         agentId: assignedAgent,
         payload: { model: assignedModel, status: "RUNNING" }
@@ -1723,9 +1763,10 @@ sourceHash: ${packageMetadataResult.sourceHash}
       // return failure
       // No artifact, No fake verification, No DONE
       if (!executionOutput) {
-        updateTaskStatus(taskId, "FAILED");
+        updateTaskStatus(taskId, "FAILED", undefined, resolvedWorkspaceId);
         recordActivityEvent({
           taskId,
+          expectedWorkspaceId: resolvedWorkspaceId,
           eventType: "PROVIDER_FAILED",
           agentId: assignedAgent,
           payload: { 
@@ -1757,6 +1798,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
       // persist PROVIDER_COMPLETED
       recordActivityEvent({
         taskId,
+        expectedWorkspaceId: resolvedWorkspaceId,
         eventType: "PROVIDER_COMPLETED",
         agentId: assignedAgent,
         payload: { 
@@ -1795,6 +1837,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
 
       recordActivityEvent({
         taskId,
+        expectedWorkspaceId: resolvedWorkspaceId,
         eventType: "ARTIFACT_SAVED",
         agentId: assignedAgent,
         payload: {
@@ -1808,7 +1851,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
       });
 
       // Temporary state: AWAITING_VERIFICATION before Aegis inspection
-      updateTaskStatus(taskId, "AWAITING_VERIFICATION");
+      updateTaskStatus(taskId, "AWAITING_VERIFICATION", undefined, resolvedWorkspaceId);
 
       // Run real deterministic Aegis verification against ledger and persisted disk artifact
       const aegisResult = runDeterministicAegisVerification(taskId, executionOutput);
@@ -1828,9 +1871,10 @@ sourceHash: ${packageMetadataResult.sourceHash}
       // Handle Aegis verification decision according to specification
       if (aegisResult.decision === "VERIFIED") {
         // Transition to AWAITING_RECEIPT
-        updateTaskStatus(taskId, "AWAITING_RECEIPT");
+        updateTaskStatus(taskId, "AWAITING_RECEIPT", undefined, resolvedWorkspaceId);
         recordActivityEvent({
           taskId,
+          expectedWorkspaceId: resolvedWorkspaceId,
           eventType: "AEGIS_REVIEWED",
           agentId: "aegis",
           payload: {
@@ -1850,7 +1894,16 @@ sourceHash: ${packageMetadataResult.sourceHash}
           receiptId,
           taskId,
           reviewId: persistedReview.review_id,
-          workspaceId: req.body?.workspaceId || "ws-synthos-primary",
+          // PHASE 0b — this used to independently re-read the request body's
+          // workspaceId field with its own separate fallback default,
+          // which could disagree with the
+          // workspace the task/artifact/review were actually recorded
+          // under (e.g. an explicitly empty workspaceId would fall through
+          // this `||` but not the top-level destructuring default, which
+          // only applies to `undefined`). The receipt must attest to the
+          // same workspace everything else in this request used — never a
+          // second, independent guess at it.
+          workspaceId: resolvedWorkspaceId,
           assignedAgent,
           provider: "google-genai",
           modelUsed,
@@ -1883,6 +1936,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
           // Persist RECEIPT_CREATED activity event
           recordActivityEvent({
             taskId,
+            expectedWorkspaceId: resolvedWorkspaceId,
             eventType: "RECEIPT_CREATED",
             agentId: "guardian",
             payload: {
@@ -1896,11 +1950,12 @@ sourceHash: ${packageMetadataResult.sourceHash}
           });
 
           // Transition task status to DONE
-          updateTaskStatus(taskId, "DONE");
+          updateTaskStatus(taskId, "DONE", undefined, resolvedWorkspaceId);
 
           // Persist TASK_COMPLETED activity event
           recordActivityEvent({
             taskId,
+            expectedWorkspaceId: resolvedWorkspaceId,
             eventType: "TASK_COMPLETED",
             agentId: assignedAgent,
             payload: {
@@ -1922,7 +1977,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
           try {
             const gate = verifyTaskAtGate({
               taskId,
-              workspaceId,
+              workspaceId: resolvedWorkspaceId,
               title: taskTitle,
               description,
               groundingContext: [taskTitle, description, sourceUrl, inputs].filter(Boolean).join('\n\n'),
@@ -1933,7 +1988,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
             if (gate.observation.promoted) {
               try {
                 projectKnowledgeCandidate({
-                  workspaceId,
+                  workspaceId: resolvedWorkspaceId,
                   taskId,
                   kilObservationId: gate.observation.observation_id,
                   receiptId,
@@ -1957,15 +2012,16 @@ sourceHash: ${packageMetadataResult.sourceHash}
           // affect task completion, the receipt, or this response.
           // ---------------------------------------------------------------
           try {
-            indexVaultArtifact(workspaceId, persistedArtifact.artifact_id);
+            indexVaultArtifact(resolvedWorkspaceId, persistedArtifact.artifact_id);
           } catch (indexErr: any) {
             console.warn("[Memory Index] Indexing skipped:", indexErr?.message || indexErr);
           }
         } else {
           // Signature verification failed
-          updateTaskStatus(taskId, "FAILED");
+          updateTaskStatus(taskId, "FAILED", undefined, resolvedWorkspaceId);
           recordActivityEvent({
             taskId,
+            expectedWorkspaceId: resolvedWorkspaceId,
             eventType: "RECEIPT_VERIFICATION_FAILED",
             agentId: "guardian",
             payload: {
@@ -1977,9 +2033,10 @@ sourceHash: ${packageMetadataResult.sourceHash}
           });
         }
       } else if (aegisResult.decision === "FAILED") {
-        updateTaskStatus(taskId, "FAILED");
+        updateTaskStatus(taskId, "FAILED", undefined, resolvedWorkspaceId);
         recordActivityEvent({
           taskId,
+          expectedWorkspaceId: resolvedWorkspaceId,
           eventType: "AEGIS_FAILED",
           agentId: "aegis",
           payload: {
@@ -1991,9 +2048,10 @@ sourceHash: ${packageMetadataResult.sourceHash}
         });
       } else {
         // INCONCLUSIVE
-        updateTaskStatus(taskId, "AWAITING_VERIFICATION");
+        updateTaskStatus(taskId, "AWAITING_VERIFICATION", undefined, resolvedWorkspaceId);
         recordActivityEvent({
           taskId,
+          expectedWorkspaceId: resolvedWorkspaceId,
           eventType: "AEGIS_INCONCLUSIVE",
           agentId: "aegis",
           payload: {

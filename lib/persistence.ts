@@ -903,12 +903,42 @@ export function createInitialTask(params: {
   };
 }
 
-export function updateTaskStatus(taskId: string, status: string, timestamp?: string): void {
+// PHASE 0b — thrown by updateTaskStatus/recordActivityEvent when an
+// optional expectedWorkspaceId is supplied and does not match the task's
+// real, persisted workspace_id. A distinct name so a caller (or a test)
+// can distinguish "this task belongs to someone else" from any other
+// failure mode, rather than pattern-matching a generic Error's message.
+export class TaskWorkspaceMismatchError extends Error {
+  constructor(taskId: string, expectedWorkspaceId: string, actualWorkspaceId: string | null) {
+    super(`Task ${taskId} belongs to workspace ${actualWorkspaceId ?? '(not found)'}, not ${expectedWorkspaceId}.`);
+    this.name = 'TaskWorkspaceMismatchError';
+  }
+}
+
+/**
+ * expectedWorkspaceId is optional and, when supplied, is a defense-in-depth
+ * backstop, not the primary gate: callers that already reject a workspace
+ * mismatch before ever reaching here (e.g. POST /api/execute-agent-task's
+ * own entry check, Phase 0b) will never actually trigger this throw in
+ * practice. It exists so this helper itself never trusts taskId alone when
+ * a caller chooses to pass workspace context. Omitted (the default),
+ * behavior is byte-for-byte what it was before Phase 0b — every existing
+ * caller (lib/external-executions.ts and others) is unaffected.
+ */
+export function updateTaskStatus(taskId: string, status: string, timestamp?: string, expectedWorkspaceId?: string): void {
   const db = getDatabase();
+
+  if (expectedWorkspaceId !== undefined) {
+    const actual = getTaskWorkspaceId(taskId);
+    if (actual !== expectedWorkspaceId) {
+      throw new TaskWorkspaceMismatchError(taskId, expectedWorkspaceId, actual);
+    }
+  }
+
   const now = timestamp || new Date().toISOString();
 
   db.prepare(`
-    UPDATE tasks 
+    UPDATE tasks
     SET status = ?, updated_at = ?
     WHERE task_id = ?
   `).run(status, now, taskId);
@@ -919,6 +949,7 @@ export function updateTaskStatus(taskId: string, status: string, timestamp?: str
   `).run(taskId, status, now);
 }
 
+/** See updateTaskStatus's doc comment — same optional, backstop-only expectedWorkspaceId contract. */
 export function recordActivityEvent(params: {
   eventId?: string;
   taskId: string;
@@ -926,8 +957,17 @@ export function recordActivityEvent(params: {
   agentId: string;
   payload?: any;
   createdAt?: string;
+  expectedWorkspaceId?: string;
 }): ActivityEventRecord {
   const db = getDatabase();
+
+  if (params.expectedWorkspaceId !== undefined) {
+    const actual = getTaskWorkspaceId(params.taskId);
+    if (actual !== params.expectedWorkspaceId) {
+      throw new TaskWorkspaceMismatchError(params.taskId, params.expectedWorkspaceId, actual);
+    }
+  }
+
   const eventId = params.eventId || `act-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
   const now = params.createdAt || new Date().toISOString();
   const payloadJson = typeof params.payload === 'string' ? params.payload : JSON.stringify(params.payload || {});
