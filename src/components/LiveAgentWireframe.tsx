@@ -19,8 +19,6 @@ export interface WireframeNodeData {
   color: string;
   icon: any;
   currentAction?: string;
-  latency?: number;
-  tokensConsumed?: number;
   activeTaskId?: string;
 }
 
@@ -82,8 +80,6 @@ export const LiveAgentWireframe: React.FC<LiveAgentWireframeProps> = ({
         color: '#EC4899',
         icon: Crown,
         currentAction: getAgentAction('orchestrator'),
-        latency: 28,
-        tokensConsumed: 12400
       },
       // Middle Tier 1: Specialist Agents
       {
@@ -98,8 +94,6 @@ export const LiveAgentWireframe: React.FC<LiveAgentWireframeProps> = ({
         color: '#20B2AA',
         icon: Search,
         currentAction: getAgentAction('scout'),
-        latency: 42,
-        tokensConsumed: 8900
       },
       {
         id: 'dev',
@@ -113,8 +107,6 @@ export const LiveAgentWireframe: React.FC<LiveAgentWireframeProps> = ({
         color: '#00D26A',
         icon: Code2,
         currentAction: getAgentAction('dev'),
-        latency: 35,
-        tokensConsumed: 16500
       },
       {
         id: 'reach',
@@ -128,8 +120,6 @@ export const LiveAgentWireframe: React.FC<LiveAgentWireframeProps> = ({
         color: '#F59E0B',
         icon: Share2,
         currentAction: getAgentAction('reach'),
-        latency: 38,
-        tokensConsumed: 6700
       },
       {
         id: 'analytics',
@@ -143,8 +133,6 @@ export const LiveAgentWireframe: React.FC<LiveAgentWireframeProps> = ({
         color: '#38BDF8',
         icon: BarChart3,
         currentAction: getAgentAction('analytics'),
-        latency: 45,
-        tokensConsumed: 14200
       },
       // Bottom Tier: Scribe, Governance, Memory, Tool Bus
       {
@@ -159,8 +147,6 @@ export const LiveAgentWireframe: React.FC<LiveAgentWireframeProps> = ({
         color: '#8B5CF6',
         icon: PenTool,
         currentAction: getAgentAction('scribe'),
-        latency: 31,
-        tokensConsumed: 9400
       },
       {
         id: 'guardian',
@@ -174,8 +160,6 @@ export const LiveAgentWireframe: React.FC<LiveAgentWireframeProps> = ({
         color: '#F97316',
         icon: ShieldAlert,
         currentAction: 'Enforcing rate limits & RBAC boundaries',
-        latency: 4,
-        tokensConsumed: 1200
       },
       {
         id: 'aegis',
@@ -189,8 +173,6 @@ export const LiveAgentWireframe: React.FC<LiveAgentWireframeProps> = ({
         color: '#10B981',
         icon: ShieldCheck,
         currentAction: 'Emitting cryptographic execution receipts',
-        latency: 6,
-        tokensConsumed: 800
       },
       {
         id: 'memory',
@@ -203,9 +185,7 @@ export const LiveAgentWireframe: React.FC<LiveAgentWireframeProps> = ({
         y: 78,
         color: '#A855F7',
         icon: Database,
-        currentAction: '142 Bidirectional [[wikilinks]] cached in warm memory',
-        latency: 12,
-        tokensConsumed: 3100
+        currentAction: 'Real filesystem-backed Vault + SQLite FTS5 memory index',
       }
     ];
   }, [agents, tasks]);
@@ -289,9 +269,12 @@ export const LiveAgentWireframe: React.FC<LiveAgentWireframeProps> = ({
       <div className="bg-[#0B0D1B] px-4 py-3 border-b border-[#1A1E36] flex flex-wrap items-center justify-between gap-3 text-xs">
         <div className="flex items-center gap-2.5">
           <div className="w-2.5 h-2.5 rounded-full bg-[#00D26A] shadow-[0_0_8px_#00D26A] animate-pulse" />
-          <span className="font-bold text-white tracking-wider">HERMES AGENTOS LIVE WIREFRAME</span>
+          <span className="font-bold text-white tracking-wider">HERMES AGENTOS WIREFRAME</span>
           <span className="text-[10px] bg-[#615EFF]/20 text-[#A5A2FF] border border-[#615EFF]/40 px-2 py-0.5 rounded font-bold uppercase">
             CANONICAL TOPOLOGY
+          </span>
+          <span className="text-[10px] text-[#5D6489] font-normal normal-case">
+            architecture reference — node status derives from real task assignment; per-node model bindings are the target roster, not a live routing table
           </span>
         </div>
 
@@ -577,8 +560,6 @@ export const LiveAgentWireframe: React.FC<LiveAgentWireframeProps> = ({
             </div>
 
             <div className="flex items-center gap-4 text-[10px] text-[#7E85A8] font-mono shrink-0">
-              <div>LATENCY: <strong className="text-white">{selectedNode.latency}ms</strong></div>
-              <div>TOKENS: <strong className="text-[#38BDF8]">{(selectedNode.tokensConsumed || 0).toLocaleString()}</strong></div>
               <button
                 onClick={() => setSelectedNodeId(null)}
                 className="p-1 hover:bg-[#1C2038] rounded text-[#7E85A8] hover:text-white transition"

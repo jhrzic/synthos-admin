@@ -10,7 +10,11 @@ export interface VelocityDataPoint {
   efficiencyScore: number;   // 0-100 token/cache efficiency index
 }
 
-// Generate realistic seed time-series data
+// Pass X / Workstream F — illustrative placeholder data only. Nothing in this app measures a
+// real "Scout signal harvest rate" or "Analytics thesis" cadence; StartupIdeaGeneratorView never
+// passes real `data`, so this generator is what actually renders. Kept as a decorative visual
+// (same precedent as JarvisMindVisualizer's canvas), but the chart's own header/footer text no
+// longer claims it is live-measured telemetry.
 export function generateSeedVelocityData(hours = 24): VelocityDataPoint[] {
   const data: VelocityDataPoint[] = [];
   const now = new Date();
@@ -356,7 +360,7 @@ export const ResearchVelocityChart: React.FC<ResearchVelocityChartProps> = ({
             )}
           </div>
           <p className="text-[11px] font-mono text-[#8E94B8]">
-            Real-time D3 telemetry of signal harvest velocity & agentic unit economics modeling.
+            Illustrative visualization — no live agent telemetry is wired to this chart; values shown are not measured.
           </p>
         </div>
 
@@ -461,7 +465,6 @@ export const ResearchVelocityChart: React.FC<ResearchVelocityChartProps> = ({
             <span className="text-[10px] text-[#6A7097] block">MEAN CYCLE TIME</span>
             <div className="text-[#38BDF8] font-bold text-sm mt-0.5 flex items-center gap-1.5">
               <span>{stats.avgLatency}s</span>
-              <span className="text-[9px] text-[#00D26A]">-48% trend</span>
             </div>
           </div>
           <Clock className="w-3.5 h-3.5 text-[#38BDF8]" />
@@ -533,7 +536,7 @@ export const ResearchVelocityChart: React.FC<ResearchVelocityChartProps> = ({
         </div>
 
         <span className="text-[#4E5478]">
-          Hermes board.db & OpenRouter sync active
+          Illustrative data — not measured from a real pipeline
         </span>
       </div>
     </div>

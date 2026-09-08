@@ -17,13 +17,66 @@ interface AirbyteHeaderProps {
   onToggleSidebar?: () => void;
   onOpenTour?: () => void;
   onToggleVoice?: () => void;
-  freeModelsCount?: number;
   activeAgentsCount?: number;
-  vaultsCount?: number;
-  blockedCount?: number;
-  latencyMs?: number;
   activeWorkspaceId?: string;
 }
+
+interface RuntimeSystemReport {
+  system: string;
+  status: 'HEALTHY' | 'DEGRADED' | 'NOT_CONFIGURED' | 'NOT_IMPLEMENTED' | 'FAILED' | 'UNKNOWN';
+  detail?: string;
+}
+
+// Pass X / Workstream A2 — every chip below now traces to real evidence.
+// Only ORCHESTRATOR (a real, static roster count passed in as a prop) and
+// HERMES (the pre-existing useHermesHealth live poll) need no new source.
+// The rest reuse the same GET /api/overview -> lib/runtime-status.ts
+// evidence this app already shows in Master Admin, fetched here on a slow
+// interval so the header never blocks a page render on a live probe.
+function useHeaderRuntimeSummary(activeWorkspaceId: string, intervalMs = 30000) {
+  const [systems, setSystems] = useState<RuntimeSystemReport[] | null>(null);
+  const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      const start = performance.now();
+      try {
+        const res = await fetch(`/api/overview?workspaceId=${encodeURIComponent(activeWorkspaceId)}`);
+        const elapsed = Math.round(performance.now() - start);
+        if (cancelled) return;
+        if (!res.ok) {
+          setFailed(true);
+          setLatencyMs(elapsed);
+          return;
+        }
+        const json = await res.json();
+        if (cancelled) return;
+        setSystems(json?.runtime?.systems ?? null);
+        setLatencyMs(elapsed);
+        setFailed(false);
+      } catch {
+        if (!cancelled) setFailed(true);
+      }
+    };
+    poll();
+    const interval = setInterval(poll, intervalMs);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [activeWorkspaceId, intervalMs]);
+
+  const find = (name: string) => systems?.find((s) => s.system === name) ?? null;
+  return { find, latencyMs, failed, loaded: systems !== null };
+}
+
+const RUNTIME_COLOR: Record<string, string> = {
+  HEALTHY: '#00D26A',
+  DEGRADED: '#F59E0B',
+  FAILED: '#EF4444',
+  NOT_CONFIGURED: '#64748B',
+  NOT_IMPLEMENTED: '#64748B',
+  UNKNOWN: '#64748B',
+};
 
 export const AirbyteHeader: React.FC<AirbyteHeaderProps> = ({
   activeTab,
@@ -33,11 +86,7 @@ export const AirbyteHeader: React.FC<AirbyteHeaderProps> = ({
   onToggleSidebar,
   onOpenTour,
   onToggleVoice,
-  freeModelsCount = 29,
-  activeAgentsCount = 7,
-  vaultsCount = 4,
-  blockedCount = 0,
-  latencyMs = 34,
+  activeAgentsCount = 0,
   activeWorkspaceId = 'ws-synthos-primary',
 }) => {
   const [currentTime, setCurrentTime] = useState<string>('');
@@ -55,6 +104,7 @@ export const AirbyteHeader: React.FC<AirbyteHeaderProps> = ({
 
   const wsInfo = getWorkspaceDetails();
   const { health: hermesHealth } = useHermesHealth(15000);
+  const runtime = useHeaderRuntimeSummary(activeWorkspaceId);
 
   useEffect(() => {
     const updateClock = () => {
@@ -69,12 +119,23 @@ export const AirbyteHeader: React.FC<AirbyteHeaderProps> = ({
     return () => clearInterval(interval);
   }, []);
 
-  // Top Status Cards (Requirement #3)
+  const geminiSys = runtime.find('Gemini Provider');
+  const memorySys = runtime.find('Memory Index (FTS5)');
+
+  const latencyState = runtime.failed
+    ? 'ERROR'
+    : runtime.latencyMs === null
+      ? '—'
+      : `${runtime.latencyMs} ms`;
+  const latencyColor = runtime.failed ? '#EF4444' : runtime.latencyMs === null ? '#64748B' : runtime.latencyMs < 300 ? '#00D26A' : runtime.latencyMs < 1000 ? '#F59E0B' : '#EF4444';
+  const latencyLabel = runtime.failed ? 'unreachable' : runtime.latencyMs === null ? 'measuring…' : runtime.latencyMs < 300 ? 'Optimal' : runtime.latencyMs < 1000 ? 'Slow' : 'Degraded';
+
+  // Top Status Cards — real evidence only (Workstream A2)
   const statusCards = [
     {
       name: 'ORCHESTRATOR',
-      state: 'ACTIVE',
-      stateColor: '#00D26A',
+      state: 'ROSTER',
+      stateColor: '#7E8BB5',
       metric: `${activeAgentsCount} agents`,
       onClick: () => setActiveTab('overview'),
     },
@@ -105,31 +166,31 @@ export const AirbyteHeader: React.FC<AirbyteHeaderProps> = ({
       onClick: () => setActiveTab('hermes-core'),
     },
     {
-      name: 'MODEL ROUTER',
-      state: 'ONLINE',
-      stateColor: '#38BDF8',
-      metric: `${freeModelsCount} models`,
+      name: 'AI PROVIDER',
+      state: runtime.loaded ? (geminiSys?.status ?? 'UNKNOWN') : '…',
+      stateColor: runtime.loaded ? (RUNTIME_COLOR[geminiSys?.status ?? 'UNKNOWN'] ?? '#64748B') : '#64748B',
+      metric: 'Gemini',
       onClick: () => setActiveTab('model-router'),
     },
     {
       name: 'MEMORY',
-      state: 'SYNCED',
-      stateColor: '#EC4899',
-      metric: `${vaultsCount} vaults`,
+      state: runtime.loaded ? (memorySys?.status ?? 'UNKNOWN') : '…',
+      stateColor: runtime.loaded ? (RUNTIME_COLOR[memorySys?.status ?? 'UNKNOWN'] ?? '#64748B') : '#64748B',
+      metric: runtime.loaded ? (memorySys?.detail ?? '') : 'loading…',
       onClick: () => setActiveTab('obsidian'),
     },
     {
       name: 'GUARDIAN',
-      state: 'ACTIVE',
+      state: 'ENFORCED',
       stateColor: '#F59E0B',
-      metric: `${blockedCount} blocked`,
+      metric: 'origin + isolation checks',
       onClick: () => setActiveTab('guardian-aegis'),
     },
     {
       name: 'LATENCY',
-      state: `${latencyMs} ms`,
-      stateColor: '#00D26A',
-      metric: 'Optimal',
+      state: latencyState,
+      stateColor: latencyColor,
+      metric: latencyLabel,
       onClick: () => setActiveTab('system-diagnostics'),
     },
   ];

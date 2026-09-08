@@ -486,24 +486,29 @@ export const JulianGoldieAuditRunner: React.FC<JulianGoldieAuditRunnerProps> = (
           </div>
         )}
 
-        {/* Status Bar / Honesty Badge Bar */}
+        {/* Status Bar / Honesty Badge Bar — Pass X / Workstream F fix: these four badges
+            previously defaulted to 'LIVE' (three of them) or a hardcoded, always-on
+            'ACTIVE (Dynamic)' (Model Router) before any audit had actually run, with no
+            backing evidence. The server route this screen calls is real (a genuine YouTube
+            RSS fetch with honest BLOCKED/FAILED/NOT_CONNECTED states when GEMINI_API_KEY is
+            unset) — the client just needs to say "not run yet" until it has a real result. */}
         <div className="bg-[#14172B] px-4 py-2 border-b border-[#232845] flex items-center justify-between text-xs font-mono text-[#8E94B8] overflow-x-auto">
           <div className="flex items-center gap-4">
             <span className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-[#00D26A]" />
-              Video Discovery: <strong className="text-white">{auditResults?.honestyStatus.videoDiscovery || 'LIVE'}</strong>
+              <span className={`w-2 h-2 rounded-full ${auditResults?.honestyStatus.videoDiscovery ? 'bg-[#00D26A]' : 'bg-[#565C82]'}`} />
+              Video Discovery: <strong className="text-white">{auditResults?.honestyStatus.videoDiscovery || 'NOT RUN YET'}</strong>
             </span>
             <span className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-[#38BDF8]" />
-              Transcript Ingestion: <strong className="text-white">{auditResults?.honestyStatus.transcriptIngestion || 'LIVE'}</strong>
+              <span className={`w-2 h-2 rounded-full ${auditResults?.honestyStatus.transcriptIngestion ? 'bg-[#38BDF8]' : 'bg-[#565C82]'}`} />
+              Transcript Ingestion: <strong className="text-white">{auditResults?.honestyStatus.transcriptIngestion || 'NOT RUN YET'}</strong>
             </span>
             <span className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-[#EC4899]" />
-              Model Router: <strong className="text-white">ACTIVE (Dynamic)</strong>
+              <span className={`w-2 h-2 rounded-full ${auditResults ? 'bg-[#EC4899]' : 'bg-[#565C82]'}`} />
+              Model Router: <strong className="text-white">{auditResults ? 'USED THIS RUN' : 'NOT RUN YET'}</strong>
             </span>
             <span className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-[#F59E0B]" />
-              Aegis Verification: <strong className="text-white">{auditResults?.honestyStatus.aegisVerification || 'LIVE'}</strong>
+              <span className={`w-2 h-2 rounded-full ${auditResults?.honestyStatus.aegisVerification ? 'bg-[#F59E0B]' : 'bg-[#565C82]'}`} />
+              Aegis Verification: <strong className="text-white">{auditResults?.honestyStatus.aegisVerification || 'NOT RUN YET'}</strong>
             </span>
           </div>
 

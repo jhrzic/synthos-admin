@@ -90,6 +90,15 @@ export function listWorkspaceExternalExecutions(workspaceId: string, limit = 50)
     .all(workspaceId, bounded) as ExternalExecutionRecord[];
 }
 
+// Real total, independent of listWorkspaceExternalExecutions' bounded page —
+// a dashboard count must never silently equal the fetch limit.
+export function countWorkspaceExternalExecutions(workspaceId: string): number {
+  const db = getDatabase();
+  const row = db.prepare('SELECT COUNT(*) AS n FROM external_executions WHERE workspace_id = ?')
+    .get(workspaceId) as { n: number | null } | undefined;
+  return row?.n ?? 0;
+}
+
 /** Platform-wide, unscoped — reachable ONLY from requirePlatformAdmin routes (Master Admin), same posture as listRecentAdminAuditEvents. */
 export function listAllExternalExecutions(limit = 100): ExternalExecutionRecord[] {
   const db = getDatabase();

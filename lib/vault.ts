@@ -99,6 +99,16 @@ export function listWorkspaceVaultEntries(workspaceId: string, limit = 100): Vau
   return rows.map(toEntry);
 }
 
+// Real total, independent of listWorkspaceVaultEntries' bounded page — a
+// dashboard count must never silently equal the fetch limit.
+export function countWorkspaceVaultEntries(workspaceId: string): number {
+  const db = getDatabase();
+  const row = db.prepare(`
+    SELECT COUNT(*) AS n FROM artifacts a JOIN tasks t ON t.task_id = a.task_id WHERE t.workspace_id = ?
+  `).get(workspaceId) as { n: number | null } | undefined;
+  return row?.n ?? 0;
+}
+
 /**
  * A short, safe preview of a Vault entry's content — first N characters,
  * read from the same real file listWorkspaceVaultEntries() indexes. Never

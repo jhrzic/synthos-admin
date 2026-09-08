@@ -192,7 +192,17 @@ class SynthOsControlLayer {
   }
 
   /**
-   * 3. Deterministic Cryptographic Receipt Issuer
+   * 3. Local deterministic verification token issuer.
+   *
+   * Pass X / Workstream I — `signatureHash` below is a client-side rolling
+   * hash (not SHA/Ed25519, no key material, not independently verifiable)
+   * and must never be presented to the user as a "cryptographic signature."
+   * The real, independently re-verifiable Ed25519 receipts come from the
+   * server-side pipeline (lib/persistence.ts signReceiptPayload/
+   * verifyReceipt, exposed at /api/execution/tasks/:taskId/receipts) — this
+   * local token is a separate, lighter-weight UX affordance for the
+   * client-only Kanban demo flow, kept because rewiring it onto the real
+   * server pipeline is a larger integration change than this pass's scope.
    */
   public issueReceipt(
     task: KanbanTask, 

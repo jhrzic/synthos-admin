@@ -108,14 +108,20 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
       category: 'WORKSPACES',
       isWorkspaces: true,
       items: [
-        { id: 'agent-orchestrator' as ActiveTab, label: 'Orchestrator', icon: Crown, statusTag: 'LIVE', color: '#EC4899' },
-        { id: 'hermes-core' as ActiveTab, label: 'Hermes', icon: Cpu, statusTag: 'LIVE', color: '#615EFF' },
-        { id: 'agent-claude' as ActiveTab, label: 'Claude', icon: Sparkles, statusTag: 'PARTIAL', color: '#F97316' },
-        { id: 'agent-gemini' as ActiveTab, label: 'Gemini', icon: Sparkles, statusTag: 'LIVE', color: '#1A73E8' },
-        { id: 'agent-codex' as ActiveTab, label: 'Codex', icon: Code2, statusTag: 'PARTIAL', color: '#00D26A' },
-        { id: 'agent-cursor' as ActiveTab, label: 'Cursor', icon: Terminal, statusTag: 'NOT CONNECTED', color: '#A855F7' },
-        { id: 'agent-antigravity' as ActiveTab, label: 'Antigravity', icon: Compass, statusTag: 'PARTIAL', color: '#8A5CF5' },
-        { id: 'agent-openclaw' as ActiveTab, label: 'OpenClaw', icon: Globe, statusTag: 'PARTIAL', color: '#14B8A6' },
+        // Pass X / Workstream A2/F — statusTag badges (LIVE/PARTIAL/NOT
+        // CONNECTED) removed below: none were derived from any real signal,
+        // and Codex/Cursor/Antigravity/OpenClaw are not in this app's real
+        // stack at all (see CLAUDE.md). Hermes has a real health source
+        // (useHermesHealth, already used by AirbyteHeader) that could wire
+        // a genuine badge here in a future pass.
+        { id: 'agent-orchestrator' as ActiveTab, label: 'Orchestrator', icon: Crown, color: '#EC4899' },
+        { id: 'hermes-core' as ActiveTab, label: 'Hermes', icon: Cpu, color: '#615EFF' },
+        { id: 'agent-claude' as ActiveTab, label: 'Claude', icon: Sparkles, color: '#F97316' },
+        { id: 'agent-gemini' as ActiveTab, label: 'Gemini', icon: Sparkles, color: '#1A73E8' },
+        { id: 'agent-codex' as ActiveTab, label: 'Codex', icon: Code2, color: '#00D26A' },
+        { id: 'agent-cursor' as ActiveTab, label: 'Cursor', icon: Terminal, color: '#A855F7' },
+        { id: 'agent-antigravity' as ActiveTab, label: 'Antigravity', icon: Compass, color: '#8A5CF5' },
+        { id: 'agent-openclaw' as ActiveTab, label: 'OpenClaw', icon: Globe, color: '#14B8A6' },
       ]
     },
     {
@@ -176,7 +182,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
         { id: 'master-admin-walkthrough' as ActiveTab, label: '12-Step Walkthrough', icon: CheckSquare, badge: 'SETUP', color: '#615EFF' },
         { id: 'master-admin-platform' as ActiveTab, label: 'Platform & Port 3000', icon: Server, color: '#38BDF8' },
         { id: 'master-admin-providers' as ActiveTab, label: 'Providers Matrix', icon: Zap, color: '#EAB308' },
-        { id: 'master-admin-hermes' as ActiveTab, label: 'Hermes Admin', icon: Cpu, badge: 'v3.2', color: '#EC4899' },
+        { id: 'master-admin-hermes' as ActiveTab, label: 'Hermes Admin', icon: Cpu, color: '#EC4899' },
         { id: 'master-admin-voice' as ActiveTab, label: 'Voice & Apollo', icon: Radio, color: '#FF5E8E' },
         { id: 'master-admin-mcps' as ActiveTab, label: 'MCPs & Tools', icon: Terminal, color: '#F59E0B' },
         { id: 'master-admin-storage' as ActiveTab, label: 'Storage & Vaults', icon: HardDrive, color: '#8C8AFF' },

@@ -1058,6 +1058,36 @@ export function listWorkspaceTasks(workspaceId: string, limit = 10): WorkspaceTa
   `).all(workspaceId, limit) as WorkspaceTaskSummary[]) || [];
 }
 
+export interface WorkspaceTaskCounts {
+  total: number;
+  active: number;
+  done: number;
+  failed: number;
+}
+
+// Real Workspace Overview backend (Pass X) — one COUNT/SUM query, never a
+// full-table scan counted in JavaScript. "active" is every non-terminal
+// status a task can hold (READY/RUNNING/AWAITING_VERIFICATION/
+// AWAITING_RECEIPT); DONE and FAILED are the two terminal states — see the
+// literal status strings server.ts's updateTaskStatus call sites use.
+export function summariseWorkspaceTasks(workspaceId: string): WorkspaceTaskCounts {
+  const db = getDatabase();
+  const row = db.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN status = 'DONE' THEN 1 ELSE 0 END) AS done,
+      SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN status NOT IN ('DONE', 'FAILED') THEN 1 ELSE 0 END) AS active
+    FROM tasks WHERE workspace_id = ?
+  `).get(workspaceId) as { total: number | null; done: number | null; failed: number | null; active: number | null } | undefined;
+  return {
+    total: row?.total ?? 0,
+    active: row?.active ?? 0,
+    done: row?.done ?? 0,
+    failed: row?.failed ?? 0,
+  };
+}
+
 export interface WorkspaceReceiptSummary {
   receipt_id: string;
   task_id: string;
@@ -1077,6 +1107,16 @@ export function listWorkspaceReceipts(workspaceId: string, limit = 5): Workspace
     ORDER BY r.created_at DESC
     LIMIT ?
   `).all(workspaceId, limit) as WorkspaceReceiptSummary[]) || [];
+}
+
+// Real total, independent of listWorkspaceReceipts' bounded page — a
+// dashboard count must never silently equal the fetch limit.
+export function countWorkspaceReceipts(workspaceId: string): number {
+  const db = getDatabase();
+  const row = db.prepare(`
+    SELECT COUNT(*) AS n FROM receipts r JOIN tasks t ON t.task_id = r.task_id WHERE t.workspace_id = ?
+  `).get(workspaceId) as { n: number | null } | undefined;
+  return row?.n ?? 0;
 }
 
 export function getTaskWithHistory(taskId: string): { task: TaskRecord | null; statusHistory: TaskStatusHistoryRecord[] } {

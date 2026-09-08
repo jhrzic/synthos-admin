@@ -103,10 +103,10 @@ interface LiveDiagnostics {
     model?: string;
   }>;
   guardian: {
-    status: 'LIVE' | 'PARTIAL';
-    policyCount: number;
+    status: 'LIVE' | 'PARTIAL' | 'UNKNOWN';
     mode: string;
-    hitlRequired: boolean;
+    reviewsCount: number;
+    byDecision: Record<string, number>;
   };
   aegis: {
     status: 'LIVE' | 'PARTIAL';
@@ -1306,9 +1306,12 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
               <div className="p-3.5 bg-[#06070E] border border-[#181B30] rounded-xl space-y-1.5">
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-white">Guardian Policy</span>
-                  {getStatusBadge('LIVE')}
+                  {/* Pass X / Workstream A2 — this badge was hardcoded 'LIVE' unconditionally.
+                      diagnostics.guardian.status is real (Pass V derived it from the real
+                      quality_reviews table); use it instead of a claim with no backing. */}
+                  {getStatusBadge(diagnostics?.guardian.status ?? 'PARTIAL')}
                 </div>
-                <p className="text-slate-400 text-[11px]">4 Rules Enforced (HITL Gate Active)</p>
+                <p className="text-slate-400 text-[11px]">{diagnostics?.guardian.reviewsCount ?? 0} Quality Reviews Recorded</p>
               </div>
 
               <div className="p-3.5 bg-[#06070E] border border-[#181B30] rounded-xl space-y-1.5">
@@ -2010,7 +2013,8 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
                 Pre-execution security rules intercepting destructive commands and unapproved actions.
               </p>
             </div>
-            {getStatusBadge('LIVE')}
+            {/* Pass X / Workstream A2 — previously hardcoded 'LIVE' unconditionally. */}
+            {getStatusBadge(diagnostics?.guardian.status ?? 'PARTIAL')}
           </div>
 
           <div className="space-y-3 font-mono text-xs">
@@ -2047,7 +2051,8 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
                 Deterministic post-execution verification and HMAC-SHA256 / SHA-256 cryptographic receipt ledger.
               </p>
             </div>
-            {getStatusBadge('LIVE')}
+            {/* Pass X / Workstream A2 — previously hardcoded 'LIVE' unconditionally. */}
+            {getStatusBadge(diagnostics?.aegis.status ?? 'PARTIAL')}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 font-mono text-xs">

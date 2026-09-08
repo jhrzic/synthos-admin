@@ -25,6 +25,10 @@ The entire authority/verification/receipt spine works end to end without any API
   restored database directly and queries it, not just checks the file exists).
 - **Admin** — Master Admin's real diagnostics, user/workspace management, audit trail, runtime
   status aggregator (every row honestly `NOT_CONFIGURED` for anything actually unconfigured).
+- **Overview (default landing screen)** — Pass X. Real workspace summary (task/graph/receipt/Vault-
+  artifact/skill/external-execution counts, all real SQL `COUNT`/`SUM`), real recent-activity feed,
+  real runtime-status section (same evidence Master Admin uses), an honest empty state for a
+  workspace that hasn't done anything yet. See the finding below for what this replaces.
 - **Rate limiting, terminal dev-only gate, security headers** — all provable by hitting a real
   running instance (see `docs/PRODUCTION-READINESS.md`).
 - **Jarvis and Apollo voice input (microphone)** — real browser-native speech capture (Chromium/
@@ -40,29 +44,54 @@ The entire authority/verification/receipt spine works end to end without any API
 
 ## Requires real credentials to demonstrate live
 
-| Feature | Needs | Current state here |
-|---|---|---|
-| Model-backed skills, `/api/generate`, live graph execution, Jarvis NLU fallback | `GEMINI_API_KEY` | Not configured |
-| Hermes dedicated runtime (`execute`/`events`) | A real, documented Hermes contract at `HERMES_ADAPTER_BASE_URL` | Not configured, and the intended integration target itself is an open question this pass — see `docs/adr-007-launch-security-boundaries.md` and the Hermes row in `docs/PRODUCTION-READINESS.md` |
-| Windmill external execution (submit/status/result/cancel) | `WINDMILL_BASE_URL`/`TOKEN`/`WORKSPACE` pointed at a real instance | Not configured — client and orchestration are real and contract-tested against a local mock server (Pass VI), never verified against production Windmill |
-| MCP-backed skills | At least one real, reachable MCP server | None configured — client is real and tested against local mock servers |
-| Fish Audio TTS / Apollo barge-in | `FISH_AUDIO_API_KEY` | Not configured |
-| Live TON Center / TONAPI probes | `TONCENTER_API_KEY` / `TONAPI_API_KEY` | Not configured |
+Grouped by what each one gates, not exaggerated — every row below is honestly `NOT_CONFIGURED` in
+this environment until the named variable is set.
 
-## A finding from this pass worth knowing before demoing
+**REQUIRES GEMINI** (`GEMINI_API_KEY`): model-backed skills, `/api/generate`, live graph execution,
+Jarvis NLU fallback, Overview's "AI Provider" runtime-status chip.
 
-The application's **default landing screen** ("Overview," and its sibling "Kanban"/"Active
-Runs"/"Agent Wireframe" screens under the OPERATIONS/WORKSPACES sidebar sections) is inherited,
-pre-SynthOS-transformation Mission Control UI showing **entirely fabricated, static demo data** —
-invented agent counts, invented "LIVE" provider rows for products this codebase doesn't integrate
-with (Cursor, Antigravity, OpenClaw), an invented "22% Complete" pipeline. This was discovered via
-a real browser walkthrough in this pass, not assumed.
+**REQUIRES OPENROUTER** (`OPENROUTER_API_KEY`): the Model Router screen's live free-model catalog
+sync (falls back to a real-but-static local catalog without it) — even with a real key, `OPENROUTER`
+itself has **no execution mapping wired** (`classifyModelRequest` reports it `UNSUPPORTED`), so this
+only ever affects what the catalog *displays*, never what SynthOS can actually execute.
 
-The **real, live-data-driven surface** (the one every other section of this document describes) is
-reached via the sidebar's "MASTER ADMIN" section — labeled "Hermes Admin" for the runtime-diagnostics
-sub-tab specifically, which is confusing but does route to the genuine, tested backend. **For any
-demo, navigate directly to Master Admin rather than relying on the default landing view** — the
-Overview screen a stranger sees first is not representative of what the rest of this document
-describes, and showing it in a demo would show fabricated data. Wiring the default Overview screen
-to real data (or replacing/removing it) is this pass's single highest-priority recommended next
-task — see the final section of the Pass VIII report.
+**REQUIRES HERMES RUNTIME** (a real, documented Hermes contract at `HERMES_ADAPTER_BASE_URL`):
+`execute()`/`events()`. Not configured, and the intended integration target itself is an open
+question — see `docs/adr-007-launch-security-boundaries.md` and the Hermes row in
+`docs/PRODUCTION-READINESS.md`.
+
+**REQUIRES WINDMILL** (`WINDMILL_BASE_URL`/`TOKEN`/`WORKSPACE`): external execution
+(submit/status/result/cancel). Not configured — client and orchestration are real and
+contract-tested against a local mock server (Pass VI), never verified against production Windmill.
+
+**REQUIRES EXTERNAL MCP** (at least one real, reachable MCP server): MCP-backed skills. None
+configured — client is real and tested against local mock servers.
+
+**REQUIRES FISH AUDIO** (`FISH_AUDIO_API_KEY`): Jarvis/Apollo TTS output and barge-in. Not
+configured in this environment; when it is, `testFishAudioConnection`'s failure path now honestly
+reports a failed connection instead of a disguised success (Pass X fix — see
+`docs/PRODUCTION-READINESS.md`).
+
+**Also credential-gated, not in the six categories above:** live TON Center/TONAPI probes need
+`TONCENTER_API_KEY`/`TONAPI_API_KEY`.
+
+## A finding from Pass VIII, closed in Pass X
+
+The application's **default landing screen** ("Overview") previously showed entirely fabricated,
+static demo data inherited from the pre-SynthOS Mission Control fork — invented agent counts,
+invented "LIVE"/"PARTIAL" provider badges for products this codebase never integrated with (Cursor,
+Antigravity, OpenClaw, Codex), an invented pipeline-completion percentage, and a global header
+(rendered on every screen) with four of its six status chips hardcoded regardless of real state.
+
+**This is now closed.** Overview is a full rewrite against a real backend
+(`lib/overview.ts` / `GET /api/overview`) — see the entry above and
+`docs/IMPLEMENTATION-STATUS.md`'s Overview row for the complete list of what was fabricated and how
+each piece was fixed. The default landing screen is now representative of the rest of this
+document; there is no longer a need to detour through Master Admin just to see real data.
+
+**One thing surfaced during this pass that needs the user's own input, not a code fix:** a
+Knowledge/Vault-graph screenshot supplied at the start of Pass X does not correspond to any
+reachable screen in this exact repository — its apparent source files have had zero importers
+anywhere in `src/` since the very first commit in this repo's history. See `docs/UI-IA-AUDIT.md`
+finding #6 for the detail; worth confirming whether that screenshot came from a different
+checkout or a stale server before anyone spends effort on it.

@@ -25,12 +25,6 @@ export interface OpenRouterModel {
   };
   description?: string;
   category?: 'Reasoning' | 'Code' | 'Vision' | 'Long Context' | 'Speed' | 'General';
-  speedTps?: number;
-  benchmarks?: {
-    coding?: number;
-    reasoning?: number;
-    math?: number;
-  };
 }
 
 export interface AgentRoleModelMapping {
@@ -52,8 +46,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'DeepSeek' },
     category: 'Reasoning',
-    speedTps: 45,
-    benchmarks: { coding: 92, reasoning: 98, math: 97 },
     description: 'Frontier chain-of-thought open-weight reasoning model matching o1 performance.'
   },
   {
@@ -63,8 +55,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'DeepSeek' },
     category: 'General',
-    speedTps: 88,
-    benchmarks: { coding: 89, reasoning: 91, math: 88 },
     description: 'High-throughput 671B MoE architecture for fast cognitive processing.'
   },
   {
@@ -74,8 +64,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Llama-3' },
     category: 'Reasoning',
-    speedTps: 62,
-    benchmarks: { coding: 88, reasoning: 93, math: 86 },
     description: 'Industry standard 70B parameter instruction-tuned model with 128k context.'
   },
   {
@@ -85,8 +73,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Llama-3' },
     category: 'General',
-    speedTps: 58,
-    benchmarks: { coding: 86, reasoning: 89, math: 84 },
     description: 'Resilient 70B open weight instruction engine with expansive multilingual support.'
   },
   {
@@ -96,8 +82,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Llama-3' },
     category: 'Speed',
-    speedTps: 130,
-    benchmarks: { coding: 78, reasoning: 82, math: 75 },
     description: 'Sub-40ms ultra-low latency model for high-frequency microtasks.'
   },
   {
@@ -107,8 +91,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Llama-3' },
     category: 'Speed',
-    speedTps: 180,
-    benchmarks: { coding: 70, reasoning: 74, math: 68 },
     description: 'Compact edge-optimized model for rapid JSON schema parsing and filtering.'
   },
   {
@@ -118,8 +100,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'multimodal->text', tokenizer: 'Llama-3' },
     category: 'Vision',
-    speedTps: 95,
-    benchmarks: { coding: 79, reasoning: 85, math: 78 },
     description: 'Multimodal vision instruction model for diagrams, charts, and OCR inspection.'
   },
   {
@@ -129,8 +109,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Qwen' },
     category: 'Code',
-    speedTps: 76,
-    benchmarks: { coding: 96, reasoning: 88, math: 90 },
     description: 'State-of-the-art open code generation model with multi-file repo synthesis.'
   },
   {
@@ -140,8 +118,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Qwen' },
     category: 'Reasoning',
-    speedTps: 54,
-    benchmarks: { coding: 90, reasoning: 94, math: 92 },
     description: 'Comprehensive general intelligence flagship matching proprietary GPT-4 tier.'
   },
   {
@@ -151,8 +127,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Qwen' },
     category: 'Speed',
-    speedTps: 145,
-    benchmarks: { coding: 82, reasoning: 80, math: 79 },
     description: 'Fast 7B model for quick unit test execution and code formatting.'
   },
   {
@@ -162,8 +136,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Qwen' },
     category: 'Reasoning',
-    speedTps: 48,
-    benchmarks: { coding: 89, reasoning: 95, math: 96 },
     description: 'Deep thought reasoning model designed for complex logic, competitive math, and physics.'
   },
   {
@@ -173,8 +145,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'multimodal->text', tokenizer: 'Gemini' },
     category: 'Long Context',
-    speedTps: 160,
-    benchmarks: { coding: 91, reasoning: 93, math: 91 },
     description: '1M+ token context window with real-time multimodal capabilities and extreme speed.'
   },
   {
@@ -184,8 +154,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'multimodal->text', tokenizer: 'Gemini' },
     category: 'Speed',
-    speedTps: 190,
-    benchmarks: { coding: 87, reasoning: 89, math: 86 },
     description: 'Ultra-lightweight multimodal engine for sub-30ms reactive agent dispatch.'
   },
   {
@@ -195,8 +163,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'multimodal->text', tokenizer: 'Gemini' },
     category: 'Reasoning',
-    speedTps: 72,
-    benchmarks: { coding: 94, reasoning: 96, math: 94 },
     description: '2M context flagship reasoning engine for complex codebase refactoring and synthesis.'
   },
   {
@@ -206,8 +172,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Gemma' },
     category: 'General',
-    speedTps: 82,
-    benchmarks: { coding: 83, reasoning: 87, math: 82 },
     description: 'High parameter efficiency model with rigorous truthfulness and alignment.'
   },
   {
@@ -217,8 +181,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Gemma' },
     category: 'Speed',
-    speedTps: 125,
-    benchmarks: { coding: 79, reasoning: 81, math: 77 },
     description: 'Compact 9B model with solid reasoning across structured data schemas.'
   },
   {
@@ -228,8 +190,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Mistral' },
     category: 'Reasoning',
-    speedTps: 80,
-    benchmarks: { coding: 87, reasoning: 90, math: 85 },
     description: 'Next-gen enterprise European open weights model with precise function calling.'
   },
   {
@@ -239,8 +199,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Mistral' },
     category: 'Speed',
-    speedTps: 135,
-    benchmarks: { coding: 76, reasoning: 78, math: 74 },
     description: 'Reliable workhorse model for triage classification and tag extraction.'
   },
   {
@@ -250,8 +208,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Tekken' },
     category: 'Long Context',
-    speedTps: 92,
-    benchmarks: { coding: 81, reasoning: 84, math: 80 },
     description: '128k context model built in collaboration with NVIDIA using Tekken tokenizer.'
   },
   {
@@ -261,8 +217,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Nemotron' },
     category: 'Reasoning',
-    speedTps: 85,
-    benchmarks: { coding: 88, reasoning: 92, math: 89 },
     description: 'NVIDIA enterprise optimized LLM for structured analysis and synthetic dataset generation.'
   },
   {
@@ -272,8 +226,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'multimodal->text', tokenizer: 'Nemotron' },
     category: 'Vision',
-    speedTps: 90,
-    benchmarks: { coding: 80, reasoning: 86, math: 82 },
     description: 'High-speed vision-language model for UI screenshot decomposition and spatial triage.'
   },
   {
@@ -283,8 +235,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Phi' },
     category: 'Reasoning',
-    speedTps: 94,
-    benchmarks: { coding: 86, reasoning: 91, math: 93 },
     description: 'Highly concentrated synthetic-data trained reasoning model excelling in math and logic.'
   },
   {
@@ -294,8 +244,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Phi' },
     category: 'Long Context',
-    speedTps: 140,
-    benchmarks: { coding: 79, reasoning: 82, math: 81 },
     description: '3.8B model with 128k context for long doc summarization with minimal resource footprint.'
   },
   {
@@ -305,8 +253,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Poolside' },
     category: 'Code',
-    speedTps: 110,
-    benchmarks: { coding: 94, reasoning: 85, math: 84 },
     description: 'Specialized code completion and synthesis engine optimized for developer environments.'
   },
   {
@@ -316,8 +262,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'o200k' },
     category: 'General',
-    speedTps: 50,
-    benchmarks: { coding: 89, reasoning: 90, math: 88 },
     description: 'Community subsidized route providing robust instructional reasoning and synthesis.'
   },
   {
@@ -327,8 +271,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Llama-3' },
     category: 'Reasoning',
-    speedTps: 35,
-    benchmarks: { coding: 93, reasoning: 97, math: 94 },
     description: 'The Nous Research flagship 405B agentic orchestrator with steerable persona alignment.'
   },
   {
@@ -338,8 +280,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Llama-3' },
     category: 'Speed',
-    speedTps: 130,
-    benchmarks: { coding: 80, reasoning: 82, math: 78 },
     description: 'Native JSON structured outputs and tool call parser for Hermes OS micro-tasks.'
   },
   {
@@ -349,8 +289,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'multimodal->text', tokenizer: 'Universal' },
     category: 'General',
-    speedTps: 100,
-    benchmarks: { coding: 88, reasoning: 90, math: 87 },
     description: 'Dynamic load balancer that routes to whichever free model has the lowest active queue.'
   },
   {
@@ -360,8 +298,6 @@ export const FALLBACK_FREE_MODELS: OpenRouterModel[] = [
     pricing: { prompt: '0', completion: '0' },
     architecture: { modality: 'text->text', tokenizer: 'Qwen' },
     category: 'Reasoning',
-    speedTps: 52,
-    benchmarks: { coding: 87, reasoning: 91, math: 89 },
     description: 'Uncensored cognitive reasoning model adept at root cause system debugging.'
   }
 ];
@@ -504,14 +440,8 @@ export async function fetchAndSyncFreeOpenRouterModels(apiKey?: string): Promise
           modality: m.architecture?.modality || 'text->text',
           tokenizer: m.architecture?.tokenizer || 'Universal'
         },
-        description: m.description || `High-performance zero-cost OpenRouter model (${m.id}).`,
+        description: m.description || `Zero-cost OpenRouter model (${m.id}).`,
         category: cat,
-        speedTps: cat === 'Speed' ? 140 : cat === 'Reasoning' ? 55 : 85,
-        benchmarks: {
-          coding: cat === 'Code' ? 95 : 84,
-          reasoning: cat === 'Reasoning' ? 95 : 86,
-          math: cat === 'Reasoning' ? 94 : 82
-        }
       };
     });
 

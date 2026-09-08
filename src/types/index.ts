@@ -400,6 +400,7 @@ export interface KanbanTask {
     aegisScore?: number;
     score?: number;
     signature: string;
+    status?: string;
     timestamp?: string;
     verifiedAt?: string;
   };

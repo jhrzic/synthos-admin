@@ -92,7 +92,7 @@ export const TOUR_STEPS = [
     tab: 'overview' as ActiveTab,
     icon: Command,
     badgeColor: '#8C8AFF',
-    target: '#cmd-k-button'
+    target: '#header-search'
   }
 ];
 

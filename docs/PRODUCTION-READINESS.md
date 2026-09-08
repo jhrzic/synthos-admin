@@ -213,24 +213,21 @@ lazy-loaded views (Kanban, Master Admin, Graph Builder — see Performance below
 correctly through their `Suspense` boundary with no visible flash-of-broken-content or hydration
 issue.
 
-**Major finding, not cosmetic:** the application's **default landing screen** ("Overview") and its
-sibling OPERATIONS-section screens (Kanban, Active Runs, Agent Wireframe) show **entirely fabricated
-static demo data** inherited from the pre-SynthOS Mission Control UI this project forked — invented
-agent counts (`ACTIVE 7 agents`), invented `LIVE`/`PARTIAL` status badges for products this codebase
-does not integrate with (Cursor, Antigravity, OpenClaw — not present anywhere in `lib/model-router.ts`
-or any real provider list), an invented `22% Complete` pipeline progress bar, fabricated Kanban tasks.
-This is exactly the class of finding this checklist's own truth-sweep instruction was looking for
-(`CONNECTED`/`LIVE`/`ACTIVE` claims without backing evidence) — found by actually looking, not
-assumed clean because other passes' work was real.
+**Major finding at the time, CLOSED in Pass X:** the application's default landing screen
+("Overview") previously showed entirely fabricated static demo data inherited from the pre-SynthOS
+Mission Control UI this project forked — invented agent counts (`ACTIVE 7 agents`), invented
+`LIVE`/`PARTIAL` status badges for products this codebase does not integrate with (Cursor,
+Antigravity, OpenClaw — not present anywhere in `lib/model-router.ts` or any real provider list),
+an invented `22% Complete` pipeline progress bar. Pass X rewrote it against a real backend
+(`lib/overview.ts`, `GET /api/overview`) — see `docs/IMPLEMENTATION-STATUS.md`'s Overview row for
+the full list of what was fabricated and how each piece was fixed, and the Pass X final report for
+the complete truth-sweep findings across the rest of the app (the global header, Kanban's receipt
+display, the Model Router catalog, and others carried the same class of fabrication and were fixed
+in the same pass).
 
-The **real, tested, live-data-driven surface** — everything else in this document — is reached via
-the sidebar's "MASTER ADMIN" section, not the default view. See `docs/DEMO-PROFILE.md` for the
-practical implication (demo from Master Admin, not the default landing screen) and the final report's
-`RECOMMENDED_NEXT_TASK` for why fixing this is the single highest-priority remaining item.
-
-Not done this pass, given the scope of a proper fix (rewiring or replacing an entire legacy
-dashboard is a materially different task than hardening what's already real): actually wiring
-Overview to real data, relabeling it as a demo, or removing it.
+The sidebar's "MASTER ADMIN" section remains the real, tested surface for platform-operator
+diagnostics — that has not changed. What has changed is that the **default landing view is now
+also real**, so a demo no longer needs to detour through Master Admin just to show honest data.
 
 ## Monitoring
 
@@ -276,6 +273,14 @@ rewrite" instruction allowed.
 
 ## Voice input — microphone (Pass IX, Jarvis + Apollo hearing repair)
 
+- [x] **Pass X fix, TTS side (voice preserved, only the connection-test truth was wrong):**
+      `src/services/fishAudio.ts`'s `testFishAudioConnection()` previously returned `success: true`
+      with the message "Connected to Fish Audio (Offline / Browser Voice fallback ready)" on **any**
+      failed connection attempt — a genuine network error, an invalid key, or the service being down
+      all displayed as a green "Connected" state in Jarvis's own setup wizard. Fixed: the catch
+      branch now returns `success: false` with the real error message, so `SetupWizardCard`'s
+      existing (already-correct) "only mark saved on real success" logic behaves honestly. No voice
+      ID, speaker, model, or output configuration was touched — `TTS_VOICE_CHANGED: NO`.
 - [x] **Real browser capability detection**, never assumed: `isSpeechRecognitionSupported()`
       checks for a real `SpeechRecognition`/`webkitSpeechRecognition` constructor; the shared hook
       (`src/hooks/useSpeechRecognition.ts`) starts in a real `unsupported` `micState` on a browser
@@ -343,5 +348,28 @@ rewrite" instruction allowed.
   user) but **UNVERIFIED at runtime** — Docker is not installed in this session's environment, so
   `docker build` was never actually run. Verify before relying on it.
 - Rate limiting (Pass VIII) covers four named risk tiers, not every route — see ADR-007.
-- The default "Overview" landing screen shows fabricated demo data — see the Production browser
-  smoke section above and `docs/DEMO-PROFILE.md`. The single highest-priority remaining item.
+- ~~The default "Overview" landing screen shows fabricated demo data~~ — **closed in Pass X**, see
+  the Production browser smoke section above.
+- **New from Pass X** (full list in `docs/UI-IA-AUDIT.md` and the Pass X final report): several
+  duplicate nav entries (same tab reachable under two different labels — `guardian-aegis`,
+  `receipts`, `agent-wireframe`/`overview`, `hermes-knowledge`/`obsidian`,
+  `hermes-models`/`model-router`); seven fictional-provider dashboard tabs under the WORKSPACES
+  sidebar group (Codex/Cursor/Antigravity/OpenClaw are not in this app's real stack — their
+  hardcoded status badges were removed this pass, the pages themselves were not individually
+  audited); a Knowledge/Vault-graph screenshot supplied at the start of Pass X that does not match
+  any reachable screen in this repository (its source files have had zero importers since the
+  first commit) — needs the user's input before further action; Kanban's client-side "receipt"
+  system (`synthosControlService.ts`) is a real, working, but non-cryptographic verification token,
+  separate from and easily confused with the real server-side Ed25519 receipt pipeline — now
+  labeled honestly, not rewired onto the real pipeline (a larger integration change than this pass
+  attempted).
+- **Second Pass X sweep, same session**: four more active-screen fabrications found and fixed
+  beyond the list above — the "Launchpad" idea generator defaulted to a fabricated startup thesis
+  as its first-load state and claimed a false "cron sweep" harvested its example content; the
+  "Hermes Oracle" screen was an entirely fabricated per-agent memory/telemetry dashboard (hardcoded
+  memory sizes, "synapse connections," signal health, latency, throughput) whose test-signal
+  failure path fabricated a fake success message on a real error; the Julian Goldie audit runner's
+  status bar defaulted three badges to `'LIVE'` before any audit ran; and three of Master Admin's
+  own `getStatusBadge('LIVE')` calls (Guardian/Aegis) were hardcoded regardless of real state,
+  alongside a stale client type that didn't match the real API response shape. All fixed — see
+  `docs/IMPLEMENTATION-STATUS.md`'s Overview row and `docs/UI-IA-AUDIT.md`'s addendum.

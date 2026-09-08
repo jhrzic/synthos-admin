@@ -286,10 +286,14 @@ export async function testFishAudioConnection(apiKey?: string, voiceId?: string)
       message: 'Synthesizer responded with standard audio frames.'
     };
   } catch (err: any) {
-    // If online direct call failed, report clean state
+    // Pass X / Workstream A2 — a failed connection must report FAILED, not a
+    // disguised success. The browser speechSynthesis fallback genuinely
+    // exists elsewhere in the app (JarvisView's fallbackBrowserSpeak), but
+    // that is not the same thing as "Fish Audio is connected" — collapsing
+    // the two here misled the exact UI surface this test result feeds.
     return {
-      success: true,
-      message: `●●●● Connected to Fish Audio (Offline / Browser Voice fallback ready).`
+      success: false,
+      message: `Fish Audio connection test failed: ${err?.message || 'request failed'}. Falling back to browser speech synthesis until this is resolved.`
     };
   }
 }

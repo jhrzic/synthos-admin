@@ -59,9 +59,9 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
     selectedModel: string;
     fallbackChain: string[];
     estimatedCost: string;
-    estimatedLatency: number;
     decisionReason: string;
     output?: string;
+    failed?: boolean;
   } | null>(null);
 
   // New Rule Modal
@@ -117,18 +117,19 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
           selectedModel: zeroCostRoute.primaryModelId,
           fallbackChain: zeroCostRoute.fallbackChain,
           estimatedCost: '$0.0000 (Free :free tier)',
-          estimatedLatency: zeroCostRoute.category === 'Speed' ? 38 : 65,
           decisionReason: `Zero-Cost Arbitrage: ${zeroCostRoute.rationale} [Context: ${Math.round(zeroCostRoute.contextWindow / 1000)}k]`,
           output
         });
-      } catch (err) {
+      } catch (err: any) {
+        // Pass X / Workstream A2 — a real query failure is reported as a
+        // real failure, never disguised as a completed simulation.
         setRouteResult({
           selectedModel: zeroCostRoute.primaryModelId,
           fallbackChain: zeroCostRoute.fallbackChain,
           estimatedCost: '$0.0000 (Free)',
-          estimatedLatency: 45,
           decisionReason: `Zero-Cost Arbitrage: ${zeroCostRoute.rationale}`,
-          output: `[OpenRouter Free Route Simulator]: Directive processed on ${zeroCostRoute.primaryModelId}.\nSubtasks dispatched to ${selectedAgentRole} worker.`
+          output: `Route selection succeeded, but the query itself failed: ${err?.message || 'unknown error'}.`,
+          failed: true,
         });
       } finally {
         setIsRouting(false);
@@ -136,26 +137,24 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
       return;
     }
 
-    // Default fallback rules
+    // Default fallback rules — routing target/rationale are real, static
+    // config; cost is genuinely UNAVAILABLE (no per-token pricing lookup is
+    // wired to this simulator — see G3's estimatePlan() for the app's one
+    // real cost estimator, not duplicated here) and latency was previously
+    // a hardcoded guess per target, removed rather than fabricated further.
     let target = 'gemini';
     let fallbacks = ['hermes', 'chatgpt'];
     let reason = 'General Conversational Query';
-    let cost = '$0.0001';
-    let latency = 84;
 
     const lower = testPrompt.toLowerCase();
     if (lower.includes('code') || lower.includes('typescript') || lower.includes('patch') || lower.includes('refactor')) {
       target = 'claudecode';
       fallbacks = ['deepseek', 'codex', 'gemini'];
       reason = 'Matched Rule: Deep Code Surgery & Multi-File Architecture';
-      cost = '$0.0045';
-      latency = 165;
     } else if (lower.includes('math') || lower.includes('proof') || lower.includes('calculate') || lower.includes('convergence')) {
       target = 'deepseek';
       fallbacks = ['chatgpt', 'claudecode', 'gemini'];
       reason = 'Matched Rule: Mathematical Proofs & Chain-of-Thought Telemetry';
-      cost = '$0.0012';
-      latency = 110;
     }
 
     try {
@@ -163,19 +162,18 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
       setRouteResult({
         selectedModel: target,
         fallbackChain: fallbacks,
-        estimatedCost: cost,
-        estimatedLatency: latency,
+        estimatedCost: 'UNAVAILABLE',
         decisionReason: reason,
         output
       });
-    } catch (err) {
+    } catch (err: any) {
       setRouteResult({
         selectedModel: target,
         fallbackChain: fallbacks,
-        estimatedCost: cost,
-        estimatedLatency: latency,
+        estimatedCost: 'UNAVAILABLE',
         decisionReason: reason,
-        output: `[Router Fallback]: Simulated route completed successfully.`
+        output: `Route selection succeeded, but the query itself failed: ${err?.message || 'unknown error'}.`,
+        failed: true,
       });
     } finally {
       setIsRouting(false);
@@ -412,26 +410,12 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
                     <span>Context Window:</span>
                     <span className="text-white font-bold">{Math.round(model.context_length / 1000)}k tokens</span>
                   </div>
-                  <div className="flex items-center justify-between text-[#8E94B8]">
-                    <span>Speed / Throughput:</span>
-                    <span className="text-[#38BDF8] font-bold">~{model.speedTps || 80} tok/s</span>
-                  </div>
-                  {model.benchmarks && (
-                    <div className="grid grid-cols-3 gap-1 pt-1 text-[9px] text-center">
-                      <div className="bg-[#121424] p-1 rounded border border-[#1C1F33]">
-                        <div className="text-[#5F6589]">CODE</div>
-                        <div className="text-white font-bold">{model.benchmarks.coding}%</div>
-                      </div>
-                      <div className="bg-[#121424] p-1 rounded border border-[#1C1F33]">
-                        <div className="text-[#5F6589]">REASON</div>
-                        <div className="text-[#00D26A] font-bold">{model.benchmarks.reasoning}%</div>
-                      </div>
-                      <div className="bg-[#121424] p-1 rounded border border-[#1C1F33]">
-                        <div className="text-[#5F6589]">MATH</div>
-                        <div className="text-[#A5A2FF] font-bold">{model.benchmarks.math}%</div>
-                      </div>
-                    </div>
-                  )}
+                  {/* Pass X / Workstream E4 — throughput and code/reason/math
+                      benchmark percentages were previously invented client-
+                      side (a keyword-category guess, not a measurement) for
+                      every model shown here, live-API or fallback alike.
+                      Removed rather than relabeled: no real source for
+                      either exists anywhere in this app. */}
                 </div>
               </div>
             ))}
@@ -610,20 +594,22 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
 
             {/* Route Simulation Result */}
             {routeResult && (
-              <div className="bg-[#090A14] border border-[#00D26A]/40 rounded-2xl p-6 shadow-2xl space-y-4 animate-in fade-in">
+              <div className={`bg-[#090A14] border rounded-2xl p-6 shadow-2xl space-y-4 animate-in fade-in ${routeResult.failed ? 'border-[#FF6B6B]/40' : 'border-[#00D26A]/40'}`}>
                 <div className="flex items-center justify-between border-b border-[#1A1D30] pb-3">
                   <div className="flex items-center gap-2">
-                    <CheckCircle2 className="w-4 h-4 text-[#00D26A]" />
+                    <CheckCircle2 className={`w-4 h-4 ${routeResult.failed ? 'text-[#FF6B6B]' : 'text-[#00D26A]'}`} />
                     <h4 className="text-sm font-bold text-white font-mono uppercase">
                       Arbitration Decision & Fallback Waterfall
                     </h4>
                   </div>
-                  <span className="text-xs font-mono text-[#00D26A] bg-[#00D26A]/10 px-2 py-0.5 rounded border border-[#00D26A]/30">
-                    ROUTED IN {routeResult.estimatedLatency}ms
-                  </span>
+                  {routeResult.failed && (
+                    <span className="text-xs font-mono text-[#FF6B6B] bg-[#FF6B6B]/10 px-2 py-0.5 rounded border border-[#FF6B6B]/30">
+                      QUERY FAILED
+                    </span>
+                  )}
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs font-mono">
+                <div className="grid grid-cols-2 gap-3 text-xs font-mono">
                   <div className="bg-[#05060B] p-3 rounded-xl border border-[#1A1D30]">
                     <span className="text-[10px] text-[#6A7097] block uppercase">Selected Endpoint</span>
                     <span className="text-[#00D26A] font-bold text-xs truncate block">{routeResult.selectedModel}</span>
@@ -631,10 +617,6 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
                   <div className="bg-[#05060B] p-3 rounded-xl border border-[#1A1D30]">
                     <span className="text-[10px] text-[#6A7097] block uppercase">Est. Inference Cost</span>
                     <span className="text-white font-bold text-xs">{routeResult.estimatedCost}</span>
-                  </div>
-                  <div className="bg-[#05060B] p-3 rounded-xl border border-[#1A1D30]">
-                    <span className="text-[10px] text-[#6A7097] block uppercase">Throughput</span>
-                    <span className="text-[#38BDF8] font-bold text-xs">~95 tok/s</span>
                   </div>
                 </div>
 

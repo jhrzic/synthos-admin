@@ -210,11 +210,16 @@ export const UpstreamCapabilityRegistry: React.FC<{
       
       setScanResult(reply);
       
-      // Update the "lastChecked" and status flags in state to reflect the scan
+      // Pass X / Workstream F — a scan reply is free-text, not a structured
+      // per-item verdict, so it cannot honestly set any single item's
+      // status. Only `lastChecked` (a real fact: a scan genuinely just ran)
+      // updates here; a status change requires the user to actually read
+      // scanResult below, or would need a real per-item parse, not a coin
+      // flip (this used to randomly mark ~40% of items "UP_TO_DATE" with no
+      // connection to the scan's actual content).
       setRegistryItems(prev => prev.map(item => ({
         ...item,
         lastChecked: 'Just now',
-        status: Math.random() > 0.6 ? 'UP_TO_DATE' : item.status
       })));
 
       // Save a note of this capability audit to the vault

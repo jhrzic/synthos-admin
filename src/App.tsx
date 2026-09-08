@@ -336,10 +336,14 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
         return `[STATUS: DEGRADED - MODEL_RUNTIME_UNAVAILABLE]\nFailed to process request: ${data.error || 'Server reported execution failure'}\nProvider: ${data.model || targetModel}`;
       }
 
-      return data.reply || `[Hermes Dispatch (${targetModel})]: Executed directive and synchronized with [[Obsidian-Knowledge-Graph]].`;
+      // /api/generate's success branch always returns a real, non-empty `reply` (it only
+      // sets success:true after a candidate model actually produced text) — so this used to
+      // be dead code, but dead code that fabricated a fake "Executed and synchronized with
+      // the Knowledge Graph" completion message if it were ever reached. Fail honestly instead.
+      return data.reply || `[STATUS: DEGRADED - EMPTY_RESPONSE]\nThe model returned no content.\nProvider: ${data.model || targetModel}`;
     } catch (err: any) {
       console.warn('API fetch warning:', err);
-      return `[STATUS: DEGRADED - MODEL_RUNTIME_UNAVAILABLE]\nReason: ${err.message || 'Network error / API gateway unreachable'}\n(Simulated fallback mode active for model ${targetModel.toUpperCase()})`;
+      return `[STATUS: DEGRADED - MODEL_RUNTIME_UNAVAILABLE]\nReason: ${err.message || 'Network error / API gateway unreachable'}`;
     }
   };
 
@@ -544,179 +548,6 @@ provenance: "${finalMeta.provenance}"
     setKanbanTasks(prev => prev.filter(t => t.id !== id));
   };
 
-  const handleExecuteAgentCommand = async (command: string) => {
-    const trimmed = command.trim();
-    if (!trimmed) return;
-
-    let targetAgent: AgentRole = 'orchestrator';
-    let cleanPrompt = trimmed;
-
-    // Detect if it starts with @agent
-    const match = trimmed.match(/^@(\w+)\s+(.*)$/i);
-    if (match) {
-      const handle = match[1].toLowerCase();
-      cleanPrompt = match[2];
-      
-      // Map handles to agent roles
-      if (handle === 'synthos') targetAgent = 'orchestrator';
-      else if (handle === 'hermes') targetAgent = 'orchestrator';
-      else if (handle === 'codex') targetAgent = 'codex';
-      else if (handle === 'cursor') targetAgent = 'cursor';
-      else if (handle === 'claude') targetAgent = 'claude';
-      else if (handle === 'gemini') targetAgent = 'gemini';
-      else if (handle === 'antigravity') targetAgent = 'antigravity';
-      else if (handle === 'openclaw') targetAgent = 'openclaw';
-      else if (handle === 'scout') targetAgent = 'scout';
-      else if (handle === 'scribe') targetAgent = 'scribe';
-      else if (handle === 'reach') targetAgent = 'reach';
-      else if (handle === 'dev') targetAgent = 'dev';
-      else if (handle === 'analytics') targetAgent = 'analytics';
-    }
-
-    // Natural Delegation: Intercept general Orchestrator lookups & route them to specialists
-    if (targetAgent === 'orchestrator' && (cleanPrompt.toLowerCase().includes('look up') || cleanPrompt.toLowerCase().includes('search') || cleanPrompt.toLowerCase().includes('julian') || cleanPrompt.toLowerCase().includes('video') || cleanPrompt.toLowerCase().includes('audit'))) {
-      targetAgent = 'scout'; // Automatically delegate to Scout agent for web search and discovery!
-    }
-
-    // Create a REAL task on the Kanban board starting in the TRIAGE stage
-    const newTaskId = `task-cmd-${Date.now()}`;
-    const now = new Date().toISOString().slice(0, 16).replace('T', ' ');
-    const targetAgentInfo = agents[targetAgent] || agents['orchestrator'];
-    const model = targetAgentInfo.assignedModel || 'gemini-3.7-flash';
-
-    const newTask: KanbanTask = {
-      id: newTaskId,
-      task_id: `CMD-${Math.floor(100 + Math.random() * 900)}`,
-      title: `[Command] ${cleanPrompt.slice(0, 50)}${cleanPrompt.length > 50 ? '...' : ''}`,
-      description: `Command: "${cleanPrompt}"\n\nTarget Agent: @${targetAgent} (Delegated)\nModel Selection: ${model}`,
-      assignedAgent: targetAgent,
-      assignedModel: model,
-      priority: 'high',
-      column: 'triage', // Starts in TRIAGE!
-      tags: ['command-line', `agent-${targetAgent}`, 'delegated'],
-      obsidianWikilinks: [`Startup-Theses/Command-${newTaskId}`],
-      category: 'research',
-      subtasks: [
-        { id: 'sub-1', title: 'Verify command security via Guardian Policy', completed: false },
-        { id: 'sub-2', title: 'Execute directive in isolated workspace sandbox', completed: false },
-        { id: 'sub-3', title: 'Store output in Obsidian Vault and sync with Knowledge Graph', completed: false }
-      ],
-      createdAt: now,
-      updatedAt: now
-    };
-
-    // 1. Add the task to the Kanban list in TRIAGE column
-    setKanbanTasks(prev => [newTask, ...prev]);
-
-    // Log the triage entry to SynthOS Activity Ledger
-    synthosControl.logEvent({
-      taskId: newTask.id,
-      eventType: 'TASK_TRIAGED',
-      actorRole: 'orchestrator',
-      actorModel: 'Nous Hermes 3',
-      summary: `Command triaged and delegated to specialized agent @${targetAgent} in TRIAGE.`,
-      payload: { command: cleanPrompt, delegate: targetAgent },
-      isSimulated: false
-    });
-
-    // Short state delay to simulate multi-agent orchestration and status progression in the UI
-    setTimeout(() => {
-      setKanbanTasks(prev => prev.map(t => t.id === newTaskId ? {
-        ...t,
-        column: 'ready', // Transitions to READY
-        updatedAt: 'Just now (Triage Passed)'
-      } : t));
-
-      synthosControl.logEvent({
-        taskId: newTaskId,
-        eventType: 'TASK_PROMOTED',
-        actorRole: targetAgent,
-        actorModel: model,
-        summary: `Task dependencies resolved. Promoted command task from TRIAGE to READY.`,
-        payload: { taskId: newTaskId },
-        isSimulated: false
-      });
-
-      // Trigger actual sandbox execution!
-      setTimeout(() => {
-        handleExecuteKanbanTask(newTaskId);
-      }, 300);
-    }, 400);
-  };
-
-  const handleExecuteAcceptanceTest = () => {
-    const objective = "Research the latest Hermes Agent updates, compare them to the current SynthOS Hermes workspace, and prepare an implementation recommendation.";
-    const taskId = `task-acc-${Date.now()}`;
-    const newTask: KanbanTask = {
-      id: taskId,
-      task_id: `ACC-01`,
-      title: "Hermes Agent Update & SynthOS Integration Recommendation",
-      description: objective,
-      assignedAgent: 'orchestrator',
-      assignedModel: 'nous-hermes-3',
-      priority: 'high',
-      column: 'running',
-      createdAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
-      updatedAt: 'Just now',
-      tags: ['hermes-v3', 'deep-research', 'obsidian-memo', 'acceptance-test'],
-      obsidianWikilinks: ['Startup-Theses/Hermes-Agent-Update-Recommendation'],
-      category: 'research',
-      subtasks: [
-        { id: 'sub-1', title: 'Scout: Scrape NousResearch/hermes-agent repo & release notes', completed: false },
-        { id: 'sub-2', title: 'Analytics: Compute feature delta matrix & model routing economics', completed: false },
-        { id: 'sub-3', title: 'Dev: Benchmark sub-50ms execution sandbox & tool calling interfaces', completed: false },
-        { id: 'sub-4', title: 'Scribe: Synthesize bidirectional Obsidian investment memo', completed: false },
-        { id: 'sub-5', title: 'Orchestrator: Audit compliance with permanent rules & sign-off', completed: false }
-      ]
-    };
-
-    setKanbanTasks(prev => [newTask, ...prev]);
-
-    // Dispatch real Obsidian Note
-    const noteContent = `# Hermes AgentOS Update & SynthOS Workspace Integration Memo
-**Date**: ${new Date().toISOString().split('T')[0]}  
-**Status**: [[Status/Approved]] | **Lead**: [[Agents/Orchestrator]]  
-**Audience**: SynthOS Core Engineering & Executive Fleet
-
----
-
-## 1. Executive Summary & Context
-NousResearch's latest \`hermes-agent\` updates introduce refined tool-calling pipelines, structured multi-agent coordination hooks, and optimized inference routing. This memo cross-examines the upstream releases against our production **SynthOS Hermes Mission Control** workspace.
-
-## 2. Comparative Architecture & Delta Matrix
-- **Agent Roles**: SynthOS deploys 6 specialized roles (Orchestrator, Scout, Scribe, Reach, Dev, Analytics) with dedicated Telegram channels and strict board.db governance.
-- **Model Arbitration**: Upstream Hermes 3 open weights are combined with Claude 3.7 Sonnet for complex coding and DeepSeek R1 for reasoning telemetry.
-- **Obsidian Bi-directional Graph**: Vault memos are synchronized with 20+ \`[[wikilinks]]\`, vector embeddings, and real-time canvas updates.
-
-## 3. Implementation Recommendations
-1. **Topological Graph Validation**: Enforce 12-field resolution for all sub-agents before compilation.
-2. **Sub-50ms Sandboxing**: Dev agent must execute verified test harnesses inside isolated execution runtimes.
-3. **Continuous Upstream Sync**: Maintain automated watcher routines on \`NousResearch/hermes-agent\` releases.
-
----
-*Generated by SynthOS Multi-Agent Autonomous Fleet*`;
-
-    handleAddNoteToVault('Hermes-Agent-Update-Recommendation', noteContent, ['hermes-v3', 'upstream-sync', 'acceptance-test', 'architecture'], 'Startup-Theses');
-    handleSendTelegramMessage('orchestrator', `🚀 [ORCHESTRATOR]: Initiated Canonical Acceptance Test — "${objective}". Dispatched Scout, Analytics, Dev, and Scribe.`);
-
-    // Simulate multi-agent stage progressions
-    setTimeout(() => {
-      setKanbanTasks(prev => prev.map(t => t.id === taskId ? {
-        ...t,
-        subtasks: t.subtasks?.map((s, idx) => idx <= 1 ? { ...s, completed: true } : s)
-      } : t));
-    }, 1200);
-
-    setTimeout(() => {
-      setKanbanTasks(prev => prev.map(t => t.id === taskId ? {
-        ...t,
-        column: 'done',
-        subtasks: t.subtasks?.map(s => ({ ...s, completed: true }))
-      } : t));
-      handleSendTelegramMessage('orchestrator', `✅ [ORCHESTRATOR]: Acceptance Test successfully executed! Obsidian memo [[Startup-Theses/Hermes-Agent-Update-Recommendation]] created with 5/5 subtasks validated.`);
-    }, 2600);
-  };
-
   const handleExecuteKanbanTask = async (taskId: string) => {
     const task = kanbanTasks.find(t => t.id === taskId);
     if (!task) return;
@@ -913,7 +744,8 @@ Output your audit in markdown with your exact decision at the very top.`;
         verificationReceipt: verificationReceiptData || {
           id: receipt.id,
           score: Math.round(aegisScore.score * 100),
-          signature: `0x${receipt.id.slice(0, 16)}f74b`,
+          signature: receipt.signatureHash,
+          status: receipt.status,
           verifiedAt: new Date().toISOString()
         },
         subtasks: task.subtasks.map(s => ({ ...s, completed: true })),
@@ -1356,7 +1188,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
         onToggleVoice={() => {
           setIsGlobalVoiceOpen(true);
         }}
-        freeModelsCount={29}
+        activeAgentsCount={Object.keys(agents).length}
         activeWorkspaceId={activeWorkspaceId}
       />
 
@@ -1482,11 +1314,9 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               tasks={kanbanTasks}
               notes={notes}
               models={models}
+              activeWorkspaceId={activeWorkspaceId}
               onSelectTab={setActiveTab}
               onOpenAgentDrawer={(role) => setDrawerAgentRole(role as AgentRole)}
-              onOpenJulianAudit={() => setIsJulianAuditOpen(true)}
-              onExecuteAgentCommand={handleExecuteAgentCommand}
-              onExecuteAcceptanceTest={handleExecuteAcceptanceTest}
               onOpenGraphBuilder={() => setActiveTab('graph-builder')}
               onOpenHermesChat={() => setActiveTab('hermes-chat')}
             />
@@ -2076,11 +1906,9 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               tasks={kanbanTasks}
               notes={notes}
               models={models}
+              activeWorkspaceId={activeWorkspaceId}
               onSelectTab={setActiveTab}
               onOpenAgentDrawer={(role) => setDrawerAgentRole(role as AgentRole)}
-              onOpenJulianAudit={() => setIsJulianAuditOpen(true)}
-              onExecuteAgentCommand={handleExecuteAgentCommand}
-              onExecuteAcceptanceTest={handleExecuteAcceptanceTest}
               onOpenGraphBuilder={() => setActiveTab('graph-builder')}
               onOpenHermesChat={() => setActiveTab('hermes-chat')}
             />

@@ -1,9 +1,9 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { JarvisSettings } from '../types';
-import { 
-  Sparkles, Mic, Volume2, Cpu, Zap, Activity, 
-  RefreshCw, Radio, Shield, Terminal, Sliders, 
-  Maximize2, Minimize2, Play, Eye
+import {
+  Sparkles, Mic, Volume2, Cpu, Zap, Activity,
+  RefreshCw, Radio, Terminal, Sliders,
+  Maximize2, Minimize2, Play
 } from 'lucide-react';
 
 interface JarvisMindVisualizerProps {
@@ -27,18 +27,13 @@ export const JarvisMindVisualizer: React.FC<JarvisMindVisualizerProps> = ({
   onSendQuery,
   height = 520,
   compact = false,
-  showTelemetryHUD: initialShowTelemetryHUD = true,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const [mindState, setMindState] = useState<'standby' | 'listening' | 'thinking' | 'speaking' | 'diagnostic'>('standby');
   const [pulseTrigger, setPulseTrigger] = useState(0);
-  const [energyLevel, setEnergyLevel] = useState(92);
   const [rotationSpeed, setRotationSpeed] = useState(1.0);
-  const [showTelemetryHUD, setShowTelemetryHUD] = useState(initialShowTelemetryHUD);
-  const [coreTemp, setCoreTemp] = useState(36.4);
-  const [synapseThroughput, setSynapseThroughput] = useState(14.8);
 
   // Sync props to mindState if active
   useEffect(() => {
@@ -47,18 +42,6 @@ export const JarvisMindVisualizer: React.FC<JarvisMindVisualizerProps> = ({
     else if (isListening) setMindState('listening');
     else if (mindState !== 'diagnostic') setMindState('standby');
   }, [isSpeaking, isLoading, isListening]);
-
-  // Live telemetry jitter for authentic feel
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setCoreTemp(prev => +(36.0 + Math.random() * 1.2).toFixed(1));
-      setSynapseThroughput(prev => +(14.2 + Math.random() * 1.8).toFixed(1));
-      if (mindState === 'thinking') {
-        setEnergyLevel(prev => Math.min(99, +(prev + (Math.random() - 0.4)).toFixed(0)));
-      }
-    }, 1800);
-    return () => clearInterval(interval);
-  }, [mindState]);
 
   // Canvas 60fps holographic render loop
   useEffect(() => {
@@ -431,48 +414,6 @@ export const JarvisMindVisualizer: React.FC<JarvisMindVisualizerProps> = ({
         </div>
       </div>
 
-      {/* Telemetry HUD Overlays (Glass Panels) */}
-      {showTelemetryHUD && (
-        <>
-          {/* Top-Right HUD Stats */}
-          <div className="absolute top-16 right-4 hidden md:flex flex-col gap-2 pointer-events-none font-mono text-[11px]">
-            <div className="bg-[#0B0D18]/85 backdrop-blur-md border border-[#232742] px-3 py-2 rounded-xl text-[#8E94B8] space-y-1 w-44">
-              <div className="flex justify-between">
-                <span>Core Load:</span>
-                <span className="text-[#00D26A] font-bold">{energyLevel}%</span>
-              </div>
-              <div className="w-full bg-[#1A1D30] h-1.5 rounded-full overflow-hidden">
-                <div className="bg-gradient-to-r from-[#00D26A] to-[#EAB308] h-full" style={{ width: `${energyLevel}%` }} />
-              </div>
-            </div>
-
-            <div className="bg-[#0B0D18]/85 backdrop-blur-md border border-[#232742] px-3 py-2 rounded-xl text-[#8E94B8] space-y-0.5 w-44">
-              <div className="flex justify-between">
-                <span>Temp:</span>
-                <span className="text-white">{coreTemp}°C</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Synapse:</span>
-                <span className="text-[#EAB308]">{synapseThroughput} GB/s</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Top-Left Telemetry Feed */}
-          <div className="absolute top-16 left-4 hidden lg:flex flex-col gap-2 pointer-events-none font-mono text-[10px] text-[#7E85A8]">
-            <div className="bg-[#0B0D18]/85 backdrop-blur-md border border-[#232742] p-2.5 rounded-xl space-y-1 w-48">
-              <div className="text-white font-bold flex items-center gap-1">
-                <Shield className="w-3 h-3 text-[#615EFF]" />
-                <span>HERMES VOICE PROTOCOL</span>
-              </div>
-              <div>• Neural Arbitration: ACTIVE</div>
-              <div>• Obsidian Memory Core: ONLINE</div>
-              <div>• FFT Equalizer: 48 BANDS</div>
-            </div>
-          </div>
-        </>
-      )}
-
       {/* Bottom Command Bar */}
       <div className="absolute bottom-4 left-4 right-4 flex flex-wrap items-center justify-between gap-3 pointer-events-none">
         <div className="flex items-center gap-2 pointer-events-auto bg-[#0B0D18]/90 backdrop-blur-md border border-[#232742] p-1.5 rounded-xl">
@@ -494,19 +435,10 @@ export const JarvisMindVisualizer: React.FC<JarvisMindVisualizerProps> = ({
             </button>
           )}
 
-          <button
-            onClick={() => setShowTelemetryHUD(!showTelemetryHUD)}
-            className="p-1.5 rounded-lg text-[#8E94B8] hover:text-white hover:bg-[#15182B] transition"
-            title="Toggle Telemetry HUD"
-          >
-            <Eye className="w-4 h-4" />
-          </button>
         </div>
 
         <div className="bg-[#0B0D18]/90 backdrop-blur-md border border-[#232742] px-3 py-1.5 rounded-xl flex items-center gap-3 text-[11px] font-mono text-[#8E94B8] pointer-events-auto">
-          <span>Neural Memory Core: Nominal</span>
-          <span>•</span>
-          <span className="text-[#00D26A]">99.98% Coherence</span>
+          <span className="capitalize">{mindState}</span>
         </div>
       </div>
     </div>

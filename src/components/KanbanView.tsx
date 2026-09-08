@@ -1446,29 +1446,44 @@ ${(selectedTaskForDetail.obsidianWikilinks || []).map(w => `- [[${w}]]`).join('\
 
               {detailTab === 'receipt' && (
                 <div className="space-y-3">
-                  <label className="text-[#8E94B8] uppercase text-[10px]">Guardian Aegis Cryptographic Verification</label>
-                  <div className="p-4 bg-[#05060C] border border-[#1C2038] rounded-xl space-y-3">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[#8E94B8]">Receipt Status:</span>
-                      <span className="text-[#00D26A] font-bold flex items-center gap-1">
-                        <ShieldCheck className="w-4 h-4" /> Signed & Verified
-                      </span>
+                  <label className="text-[#8E94B8] uppercase text-[10px]">Guardian Aegis Verification</label>
+                  {!selectedTaskForDetail.verificationReceipt ? (
+                    <div className="p-4 bg-[#05060C] border border-[#1C2038] rounded-xl flex items-center gap-2 text-xs text-[#8E94B8]">
+                      <AlertTriangle className="w-4 h-4 text-[#F59E0B] shrink-0" />
+                      No receipt yet — this task has not completed a verification pass.
                     </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-[#8E94B8]">Deterministic Score:</span>
-                      <span className="text-white font-bold">{selectedTaskForDetail.verificationReceipt?.score || '98.4'} / 100</span>
+                  ) : (
+                    <div className="p-4 bg-[#05060C] border border-[#1C2038] rounded-xl space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[#8E94B8]">Receipt Status:</span>
+                        {selectedTaskForDetail.verificationReceipt.status === 'VERIFIED' ? (
+                          <span className="text-[#00D26A] font-bold flex items-center gap-1">
+                            <ShieldCheck className="w-4 h-4" /> Verified
+                          </span>
+                        ) : (
+                          <span className="text-[#F59E0B] font-bold flex items-center gap-1">
+                            <AlertTriangle className="w-4 h-4" /> {selectedTaskForDetail.verificationReceipt.status || 'Held for approval'}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[#8E94B8]">Deterministic Score:</span>
+                        <span className="text-white font-bold">
+                          {selectedTaskForDetail.verificationReceipt.score !== undefined ? `${selectedTaskForDetail.verificationReceipt.score} / 100` : 'UNKNOWN'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[#8E94B8]">Local Verification Token:</span>
+                        <span className="text-amber-400 font-mono text-[10px]">
+                          {selectedTaskForDetail.verificationReceipt.signature || 'UNAVAILABLE'}
+                        </span>
+                      </div>
+                      <p className="text-[9px] text-[#5D6489] leading-relaxed">
+                        This token is a client-side deterministic check, not a cryptographic (Ed25519) signature — those
+                        are issued only by the server-side execution pipeline and are visible on the Receipts screen.
+                      </p>
                     </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-[#8E94B8]">Cryptographic Hash:</span>
-                      <span className="text-amber-400 font-mono text-[10px]">
-                        {selectedTaskForDetail.verificationReceipt?.signature || `0x${Math.random().toString(16).substring(2, 18)}f74b`}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-[#8E94B8]">Airbyte Data Stream:</span>
-                      <span className="text-cyan-400 font-mono">airbyte://streams/hermes_tasks_{selectedTaskForDetail.id}</span>
-                    </div>
-                  </div>
+                  )}
                 </div>
               )}
             </div>
