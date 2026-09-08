@@ -221,6 +221,36 @@ export function getDatabase(): any {
         created_at TEXT NOT NULL
       );
 
+      -- STEP 6 concurrent-idempotency corrective pass. The real defect: the
+      -- old check (lib/fabric/envelope.ts's checkIdempotentTask) only ever
+      -- READ task state, and the first durable WRITE of that state
+      -- (createInitialTask, called only after the real GitHub/Gemini/Vault
+      -- work already completed) happened too late to stop truly concurrent
+      -- duplicates — a proven live defect (three simultaneous requests with
+      -- the same idempotency key produced three real artifacts/receipts).
+      --
+      -- This table is the atomic claim: a real INSERT guarded by the UNIQUE
+      -- constraint below, attempted BEFORE any expensive/side-effectful
+      -- call. SQLite's own constraint enforcement is the source of truth —
+      -- there is no SELECT-then-INSERT window (see acquireExecutionClaim).
+      -- workspace_id leads the UNIQUE tuple so no claim can ever cross a
+      -- workspace boundary.
+      CREATE TABLE IF NOT EXISTS execution_claims (
+        claim_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        actor_user_id TEXT NOT NULL,
+        capability TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('CLAIMED', 'DONE', 'FAILED')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (workspace_id, actor_user_id, capability, idempotency_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_execution_claims_task ON execution_claims(task_id);
+
       CREATE TABLE IF NOT EXISTS graphs (
         graph_id TEXT PRIMARY KEY,
         workspace_id TEXT,
@@ -391,6 +421,10 @@ export function getDatabase(): any {
       CREATE INDEX IF NOT EXISTS idx_graph_runs_workspace ON graph_runs(workspace_id);
       CREATE INDEX IF NOT EXISTS idx_graph_runs_workspace_graph ON graph_runs(workspace_id, graph_id);
     `);
+
+    // Stale-claim reconciliation — see reconcileStaleExecutionClaims below
+    // for what this does and why it's sufficient for this deployment.
+    reconcileStaleExecutionClaims();
 
     // Local memory index (SQLite FTS5) over real, verified Vault artifacts.
     // workspace_id/artifact_id/source_path/updated_at are UNINDEXED — stored
@@ -901,6 +935,102 @@ export function createInitialTask(params: {
     created_at: now,
     updated_at: now
   };
+}
+
+export interface ExecutionClaimRecord {
+  claim_id: string;
+  workspace_id: string;
+  actor_user_id: string;
+  capability: string;
+  idempotency_key: string;
+  payload_hash: string;
+  task_id: string;
+  status: 'CLAIMED' | 'DONE' | 'FAILED';
+  created_at: string;
+  updated_at: string;
+}
+
+export type ExecutionClaimAcquisition =
+  | { outcome: 'ACQUIRED'; claim: ExecutionClaimRecord }
+  | { outcome: 'EXISTS'; claim: ExecutionClaimRecord };
+
+/**
+ * The atomic claim itself. Always attempts the real INSERT first — never
+ * SELECT-then-INSERT — so SQLite's UNIQUE constraint is the sole arbiter of
+ * who owns execution. On a UNIQUE conflict, reads back and returns the
+ * winning claim rather than treating the conflict as an error.
+ */
+export function acquireExecutionClaim(params: {
+  workspaceId: string;
+  actorUserId: string;
+  capability: string;
+  idempotencyKey: string;
+  payloadHash: string;
+  taskId: string;
+}): ExecutionClaimAcquisition {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  const claimId = `claim-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+
+  try {
+    db.prepare(`
+      INSERT INTO execution_claims (claim_id, workspace_id, actor_user_id, capability, idempotency_key, payload_hash, task_id, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'CLAIMED', ?, ?)
+    `).run(claimId, params.workspaceId, params.actorUserId, params.capability, params.idempotencyKey, params.payloadHash, params.taskId, now, now);
+    return {
+      outcome: 'ACQUIRED',
+      claim: {
+        claim_id: claimId,
+        workspace_id: params.workspaceId,
+        actor_user_id: params.actorUserId,
+        capability: params.capability,
+        idempotency_key: params.idempotencyKey,
+        payload_hash: params.payloadHash,
+        task_id: params.taskId,
+        status: 'CLAIMED',
+        created_at: now,
+        updated_at: now,
+      },
+    };
+  } catch (err: any) {
+    const isUniqueConflict = err?.code === 'ERR_SQLITE_ERROR' && /UNIQUE constraint failed/.test(String(err?.message));
+    if (!isUniqueConflict) throw err;
+    const existing = db.prepare(`
+      SELECT * FROM execution_claims WHERE workspace_id = ? AND actor_user_id = ? AND capability = ? AND idempotency_key = ?
+    `).get(params.workspaceId, params.actorUserId, params.capability, params.idempotencyKey) as ExecutionClaimRecord;
+    return { outcome: 'EXISTS', claim: existing };
+  }
+}
+
+/** Resolves a claim this process owns to its terminal state. Called from a try/finally so a claim is never left CLAIMED once its owning call has returned or thrown. */
+export function resolveExecutionClaim(claimId: string, status: 'DONE' | 'FAILED'): void {
+  const db = getDatabase();
+  db.prepare(`UPDATE execution_claims SET status = ?, updated_at = ? WHERE claim_id = ?`).run(status, new Date().toISOString(), claimId);
+}
+
+/**
+ * Stale-claim reconciliation. This process is single-instance, single-
+ * writer SQLite (see the WAL/busy_timeout pragmas earlier in this file) —
+ * a claim can only ever be CLAIMED while the process that inserted it is
+ * alive, because the code path that owns it always resolves it to
+ * DONE/FAILED in a try/finally before returning (see withAtomicClaim in
+ * lib/fabric/envelope.ts). The only way a row can still read CLAIMED when
+ * this runs is a hard crash (kill -9, power loss) that skipped that
+ * finally block entirely — which also means no live process is still
+ * working on it. A full distributed lease/heartbeat is not needed for a
+ * single-process deployment; reconciling once at every startup (this
+ * function is called once from getDatabase()'s one-time init) is
+ * sufficient and honest about what this actually is. Returns the number
+ * of rows reconciled, so this is directly testable rather than only
+ * inspectable.
+ */
+export function reconcileStaleExecutionClaims(): number {
+  const db = getDatabase();
+  const result = db.prepare(`
+    UPDATE execution_claims SET status = 'FAILED', updated_at = ?
+    WHERE status = 'CLAIMED'
+  `).run(new Date().toISOString());
+  return result.changes;
 }
 
 // PHASE 0b — thrown by updateTaskStatus/recordActivityEvent when an

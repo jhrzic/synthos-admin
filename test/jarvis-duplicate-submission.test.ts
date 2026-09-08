@@ -149,8 +149,8 @@ import { getDatabase } from '../lib/persistence';
 import { createUser, login } from '../lib/auth';
 import { ensureWorkspace, grantMembership } from '../lib/workspaces';
 import { VAULT_ROOT } from '../lib/vault';
-import { deriveIdempotentTaskId, checkIdempotentTask } from '../lib/fabric/envelope';
-import { createInitialTask, updateTaskStatus, recordReceipt, recordQualityReview, runDeterministicAegisVerification } from '../lib/persistence';
+import { deriveIdempotentTaskId, checkIdempotentTask, hashRequestPayload, executeEnvelope } from '../lib/fabric/envelope';
+import { createInitialTask, updateTaskStatus, recordReceipt, recordQualityReview, runDeterministicAegisVerification, acquireExecutionClaim, resolveExecutionClaim, reconcileStaleExecutionClaims } from '../lib/persistence';
 import { writeWorkspaceArtifact } from '../lib/vault';
 
 const SESSION_COOKIE_NAME = 'synthos_session';
@@ -306,5 +306,199 @@ describe('B2 unit: checkIdempotentTask short-circuits correctly for every real t
     const result = checkIdempotentTask(taskId, 'research', key);
     expect(result).not.toBeNull();
     expect(result!.outcome).toBe('BLOCKED');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// STEP 6 concurrent-idempotency corrective pass.
+//
+// The defect this closes was proven live against the real :3000 server:
+// three truly concurrent (Promise.all, not sequential) requests carrying
+// the same idempotency key produced three real github.search calls, three
+// real model.gemini calls, three artifacts, three receipts, all sharing
+// one derived taskId — because the old check (checkIdempotentTask, above)
+// only ever READ task state, and the first durable WRITE of that state
+// happened only after the real provider work had already completed.
+//
+// The fix (withAtomicClaim in lib/fabric/envelope.ts, backed by
+// execution_claims' UNIQUE(workspace_id, actor_user_id, capability,
+// idempotency_key) constraint) is exercised here via vault.write, not
+// research — both capabilities share the exact same withAtomicClaim
+// function; vault.write differs only in what its `run()` callback does
+// (a real Vault write, no Gemini/GitHub call), which makes it possible to
+// prove the mechanism exhaustively, at zero cost, with real HTTP against
+// the real spawned server. This repo's own existing convention (see
+// test/execution-envelope.test.ts deliberately deleting GEMINI_API_KEY)
+// already avoids ever invoking the real paid Gemini path from the
+// automated suite — this file does not introduce an exception for research
+// specifically. The research-specific real call-count-of-exactly-one
+// (github.search once, model.gemini once) is proven live in the separate
+// LIVE_REACCEPTANCE pass against the real :3000 server with the real
+// GEMINI_API_KEY already present there, not fabricated here for free.
+// Since research and vault.write both route every duplicate through the
+// identical withAtomicClaim gate, "run() executes at most once" is proven
+// once, generically, and applies to both.
+// ---------------------------------------------------------------------------
+
+describe('STEP 6 concurrent-idempotency corrective pass — LIVE: real concurrent HTTP requests against the real spawned server', () => {
+  it('1. three truly concurrent identical requests (same key, same payload) produce exactly one real execution', async () => {
+    const key = `concurrent3-${Date.now()}`;
+    const command = 'save this to the Vault — concurrency test 3-way';
+    const results = await Promise.all([
+      jarvisCommand(command, key),
+      jarvisCommand(command, key),
+      jarvisCommand(command, key),
+    ]);
+
+    for (const r of results) {
+      expect(r.status).toBe(200);
+      // Per spec: every duplicate caller either reuses the same terminal
+      // result (SUCCESS, replaying the real artifact) or receives the
+      // defined IN_PROGRESS response — none may execute again.
+      expect(['SUCCESS', 'IN_PROGRESS']).toContain(r.json.evidence.outcome);
+    }
+
+    const successResults = results.filter((r) => r.json.evidence.outcome === 'SUCCESS');
+    expect(successResults.length).toBeGreaterThan(0); // at least the winner must have succeeded
+    const distinctPaths = new Set(successResults.map((r) => r.json.evidence.artifact?.path));
+    expect(distinctPaths.size).toBe(1); // every SUCCESS response points at the SAME real artifact
+
+    const db = getDatabase();
+    const taskId = deriveIdempotentTaskId('vault', key);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM execution_claims WHERE task_id = ?').get(taskId) as any).n).toBe(1);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM artifacts WHERE task_id = ?').get(taskId) as any).n).toBe(1);
+
+    const winningPath = [...distinctPaths][0] as string;
+    const onDiskCount = fs.existsSync(path.join(VAULT_ROOT, ...winningPath.split('/'))) ? 1 : 0;
+    expect(onDiskCount).toBe(1);
+  });
+
+  it('2. ten truly concurrent identical requests (same key, same payload) still produce exactly one real execution', async () => {
+    const key = `concurrent10-${Date.now()}`;
+    const command = 'save this to the Vault — concurrency test 10-way';
+    const results = await Promise.all(Array.from({ length: 10 }, () => jarvisCommand(command, key)));
+
+    for (const r of results) {
+      expect(r.status).toBe(200);
+      expect(['SUCCESS', 'IN_PROGRESS']).toContain(r.json.evidence.outcome);
+    }
+    const successResults = results.filter((r) => r.json.evidence.outcome === 'SUCCESS');
+    const distinctPaths = new Set(successResults.map((r) => r.json.evidence.artifact?.path));
+    expect(distinctPaths.size).toBe(1);
+
+    const db = getDatabase();
+    const taskId = deriveIdempotentTaskId('vault', key);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM execution_claims WHERE task_id = ?').get(taskId) as any).n).toBe(1);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM artifacts WHERE task_id = ?').get(taskId) as any).n).toBe(1);
+  }, 20000);
+
+  it('3. same idempotency key with a DIFFERENT payload is a conflict, never an accidental duplicate execution', async () => {
+    const key = `payload-collision-${Date.now()}`;
+    const first = await jarvisCommand('save this to the Vault — original payload', key);
+    expect(first.status).toBe(200);
+    expect(first.json.evidence.outcome).toBe('SUCCESS');
+
+    const second = await jarvisCommand('save this to the Vault — a completely different payload', key);
+    expect(second.status).toBe(200);
+    expect(second.json.evidence.outcome).toBe('CONFLICT');
+    expect(second.json.evidence.reason).toMatch(/different request/i);
+
+    // Zero accidental second execution: still exactly one artifact for this taskId.
+    const db = getDatabase();
+    const taskId = deriveIdempotentTaskId('vault', key);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM artifacts WHERE task_id = ?').get(taskId) as any).n).toBe(1);
+  });
+});
+
+describe('STEP 6 concurrent-idempotency corrective pass — direct executeEnvelope: deterministic edge cases', () => {
+  it('4. same idempotency key in a DIFFERENT workspace executes independently — no cross-workspace claim collision', async () => {
+    const otherWs = `ws-claim-other-${Date.now()}`;
+    ensureWorkspace(otherWs, 'Claim Cross-Workspace Test');
+    const key = `cross-ws-${Date.now()}`;
+
+    const a = await executeEnvelope({ workspaceId: WS, actorUserId: 'u1', capability: 'vault.write', action: 'vault.write', parameters: {}, rawText: 'cross-workspace claim test', idempotencyKey: key });
+    const b = await executeEnvelope({ workspaceId: otherWs, actorUserId: 'u1', capability: 'vault.write', action: 'vault.write', parameters: {}, rawText: 'cross-workspace claim test', idempotencyKey: key });
+
+    expect(a.outcome).toBe('SUCCESS');
+    expect(b.outcome).toBe('SUCCESS');
+    expect(a.artifact?.path).not.toBe(b.artifact?.path); // two real, independent artifacts
+    expect(a.artifact?.path).toContain(`workspaces/${WS}/`);
+    expect(b.artifact?.path).toContain(`workspaces/${otherWs}/`);
+
+    try { fs.rmSync(path.join(VAULT_ROOT, 'workspaces', otherWs), { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
+  it('5. a duplicate arriving while the first is still CLAIMED (genuinely in-flight) gets IN_PROGRESS, never a second execution', async () => {
+    const key = `inflight-claim-${Date.now()}`;
+    const rawText = 'in-flight claim test';
+    const taskId = deriveIdempotentTaskId('vault', key);
+    const payloadHash = hashRequestPayload('vault.write', rawText, {});
+
+    // Simulate "request A is still running": acquire the claim ourselves and
+    // deliberately do NOT resolve it — the exact state a real in-flight
+    // request would leave it in.
+    const acquisition = acquireExecutionClaim({ workspaceId: WS, actorUserId: 'u1', capability: 'vault.write', idempotencyKey: key, payloadHash, taskId });
+    expect(acquisition.outcome).toBe('ACQUIRED');
+
+    const duplicate = await executeEnvelope({ workspaceId: WS, actorUserId: 'u1', capability: 'vault.write', action: 'vault.write', parameters: {}, rawText, idempotencyKey: key });
+    expect(duplicate.outcome).toBe('IN_PROGRESS');
+
+    // No execution happened for the duplicate: no artifact exists for this taskId yet.
+    const db = getDatabase();
+    expect((db.prepare('SELECT COUNT(*) AS n FROM artifacts WHERE task_id = ?').get(taskId) as any).n).toBe(0);
+
+    resolveExecutionClaim(acquisition.claim.claim_id, 'DONE'); // cleanup — this test never lets the real run() happen
+  });
+
+  it('6. a previously FAILED claim is never silently retried — matches the existing approved failure policy', async () => {
+    const key = `failed-claim-${Date.now()}`;
+    const rawText = 'failed claim test';
+    const taskId = deriveIdempotentTaskId('vault', key);
+    const payloadHash = hashRequestPayload('vault.write', rawText, {});
+
+    const acquisition = acquireExecutionClaim({ workspaceId: WS, actorUserId: 'u1', capability: 'vault.write', idempotencyKey: key, payloadHash, taskId });
+    resolveExecutionClaim(acquisition.claim.claim_id, 'FAILED');
+
+    const result = await executeEnvelope({ workspaceId: WS, actorUserId: 'u1', capability: 'vault.write', action: 'vault.write', parameters: {}, rawText, idempotencyKey: key });
+    expect(result.outcome).toBe('FAILED');
+    expect(result.reason).toMatch(/duplicate submission ignored, not retried/i);
+
+    const db = getDatabase();
+    expect((db.prepare('SELECT COUNT(*) AS n FROM artifacts WHERE task_id = ?').get(taskId) as any).n).toBe(0);
+  });
+
+  it('7. a real UNIQUE constraint backs the claim table — a second raw INSERT for the same identity is rejected by SQLite itself, not application logic', () => {
+    const key = `unique-constraint-${Date.now()}`;
+    const taskId = deriveIdempotentTaskId('vault', key);
+    const payloadHash = hashRequestPayload('vault.write', 'unique constraint test', {});
+
+    const first = acquireExecutionClaim({ workspaceId: WS, actorUserId: 'u1', capability: 'vault.write', idempotencyKey: key, payloadHash, taskId });
+    expect(first.outcome).toBe('ACQUIRED');
+
+    const second = acquireExecutionClaim({ workspaceId: WS, actorUserId: 'u1', capability: 'vault.write', idempotencyKey: key, payloadHash, taskId });
+    expect(second.outcome).toBe('EXISTS');
+    expect(second.claim.claim_id).toBe(first.claim.claim_id); // the exact same row, not a second one
+
+    const db = getDatabase();
+    const rowCount = (db.prepare(
+      'SELECT COUNT(*) AS n FROM execution_claims WHERE workspace_id = ? AND actor_user_id = ? AND capability = ? AND idempotency_key = ?'
+    ).get(WS, 'u1', 'vault.write', key) as any).n;
+    expect(rowCount).toBe(1);
+  });
+
+  it('8. stale-claim reconciliation: a CLAIMED row left behind by a hard crash is reconciled to FAILED, never left to block a legitimate retry forever', () => {
+    const key = `stale-claim-${Date.now()}`;
+    const taskId = deriveIdempotentTaskId('vault', key);
+    const payloadHash = hashRequestPayload('vault.write', 'stale claim test', {});
+
+    const acquisition = acquireExecutionClaim({ workspaceId: WS, actorUserId: 'u1', capability: 'vault.write', idempotencyKey: key, payloadHash, taskId });
+    expect(acquisition.outcome).toBe('ACQUIRED'); // left CLAIMED — simulates a process that crashed before resolving it
+
+    const reconciledCount = reconcileStaleExecutionClaims();
+    expect(reconciledCount).toBeGreaterThanOrEqual(1);
+
+    const db = getDatabase();
+    const row = db.prepare('SELECT status FROM execution_claims WHERE claim_id = ?').get(acquisition.claim.claim_id) as any;
+    expect(row.status).toBe('FAILED');
   });
 });

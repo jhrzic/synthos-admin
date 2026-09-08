@@ -46,6 +46,9 @@ import {
   getTaskArtifacts,
   getTaskReceipts,
   verifyReceipt,
+  acquireExecutionClaim,
+  resolveExecutionClaim,
+  type ExecutionClaimRecord,
 } from '../persistence';
 import { verifyTaskAtGate } from '../kil-gate';
 import { indexVaultArtifact, searchWorkspaceMemory } from '../memory-index';
@@ -53,7 +56,7 @@ import { writeWorkspaceArtifact, listWorkspaceVaultEntries } from '../vault';
 import * as windmillClient from '../windmill-client';
 import { listWorkspaceExternalExecutions } from '../external-executions';
 
-export type EnvelopeOutcome = 'SUCCESS' | 'READ_OK' | 'BLOCKED' | 'NOT_CONFIGURED' | 'APPROVAL_REQUIRED' | 'FAILED';
+export type EnvelopeOutcome = 'SUCCESS' | 'READ_OK' | 'BLOCKED' | 'NOT_CONFIGURED' | 'APPROVAL_REQUIRED' | 'FAILED' | 'IN_PROGRESS' | 'CONFLICT';
 
 export interface ExecutionEnvelopeInput {
   workspaceId: string;
@@ -196,10 +199,15 @@ export function deriveIdempotentTaskId(prefix: string, idempotencyKey?: string):
 }
 
 /**
- * Checked BEFORE any real external call (Gemini/GitHub/Vault write) — a
- * duplicate submission carrying the same idempotency key must never repeat
- * those calls, not just avoid a duplicate receipt. Returns null when no
- * real prior record exists (the normal, non-duplicate path).
+ * PRE-CONCURRENCY-FIX gate, preserved as-is and still directly unit-tested
+ * (test/jarvis-duplicate-submission.test.ts). It only ever READS task
+ * state and is no longer the primary duplicate gate for research/
+ * vault.write — see the STEP 6 concurrent-idempotency corrective pass
+ * below (withAtomicClaim). Kept because it is real, correct, tested
+ * behavior for a caller that already has a task row and wants to check its
+ * terminal status; it is simply insufficient on its own against true
+ * concurrency, since no row exists yet for the very first of several
+ * simultaneous callers to inspect.
  */
 export function checkIdempotentTask(taskId: string, capability: string, idempotencyKey?: string): ExecutionEnvelopeResult | null {
   if (!idempotencyKey) return null;
@@ -207,18 +215,7 @@ export function checkIdempotentTask(taskId: string, capability: string, idempote
   if (!existing.task) return null;
 
   if (existing.task.status === 'DONE') {
-    const artifacts = getTaskArtifacts(taskId);
-    const receipts = getTaskReceipts(taskId);
-    const artifact = artifacts[artifacts.length - 1];
-    const receipt = receipts[receipts.length - 1];
-    return {
-      outcome: 'SUCCESS',
-      capability,
-      reason: 'Already completed for this request — duplicate submission ignored, not re-executed.',
-      taskId,
-      artifact: artifact ? { id: artifact.artifact_id, path: artifact.relative_path, contentHash: artifact.content_hash } : null,
-      receipt: receipt ? { receiptId: receipt.receipt_id, verified: verifyReceipt(receipt) } : null,
-    };
+    return replayFromTask(taskId, capability);
   }
   if (existing.task.status === 'FAILED') {
     return {
@@ -238,96 +235,211 @@ export function checkIdempotentTask(taskId: string, capability: string, idempote
   };
 }
 
-async function executeVaultWrite(input: ExecutionEnvelopeInput): Promise<ExecutionEnvelopeResult> {
-  const taskId = deriveIdempotentTaskId('vault', input.idempotencyKey);
-  // vault.write never called createInitialTask (writeWorkspaceArtifact
-  // doesn't require a task row to exist) — so the idempotency check here
-  // looks at the artifacts table directly rather than the task table.
-  if (input.idempotencyKey) {
-    const existingArtifacts = getTaskArtifacts(taskId);
-    if (existingArtifacts.length > 0) {
-      const artifact = existingArtifacts[existingArtifacts.length - 1];
-      return {
-        outcome: 'SUCCESS',
-        capability: 'vault.write',
-        reason: 'Already saved to the Vault for this request — duplicate submission ignored.',
-        taskId,
-        artifact: { id: artifact.artifact_id, path: artifact.relative_path, contentHash: artifact.content_hash },
-      };
-    }
-  }
-
-  const content = `# Jarvis Note\n\n${input.rawText}\n`;
-  const artifact = writeWorkspaceArtifact({ workspaceId: input.workspaceId, taskId, content, folder: 'Jarvis-Notes', extension: 'md' });
-  try {
-    indexVaultArtifact(input.workspaceId, artifact.artifact_id);
-  } catch {
-    /* non-blocking */
-  }
+/**
+ * Builds the SUCCESS replay result from whatever real artifact/receipt
+ * already exist for taskId — independent of whether a `tasks` row exists
+ * (vault.write never creates one; research does). Never touches a
+ * provider/tool; this is a pure read of already-recorded evidence.
+ */
+function replayFromTask(taskId: string, capability: string): ExecutionEnvelopeResult {
+  const artifacts = getTaskArtifacts(taskId);
+  const receipts = getTaskReceipts(taskId);
+  const artifact = artifacts[artifacts.length - 1];
+  const receipt = receipts[receipts.length - 1];
   return {
     outcome: 'SUCCESS',
-    capability: 'vault.write',
-    reason: 'Saved to the Vault.',
+    capability,
+    reason: 'Already completed for this request — duplicate submission ignored, not re-executed.',
     taskId,
-    artifact: { id: artifact.artifact_id, path: artifact.relative_path, contentHash: artifact.content_hash },
+    artifact: artifact ? { id: artifact.artifact_id, path: artifact.relative_path, contentHash: artifact.content_hash } : null,
+    receipt: receipt ? { receiptId: receipt.receipt_id, verified: verifyReceipt(receipt) } : null,
   };
+}
+
+/** Deterministic hash of the request identity a duplicate idempotency key must match to be treated as a replay rather than a conflict. */
+export function hashRequestPayload(capability: string, rawText: string, parameters: Record<string, unknown>): string {
+  const canonical = canonicalizePayload({ capability, rawText, parameters: JSON.stringify(parameters ?? {}) });
+  return crypto.createHash('sha256').update(canonical, 'utf8').digest('hex');
+}
+
+/**
+ * STEP 6 concurrent-idempotency corrective pass — the actual fix.
+ *
+ * EXACT RACE this closes: executeResearch/executeVaultWrite used to call
+ * checkIdempotentTask() (a pure read of the `tasks` table) BEFORE any real
+ * work, then only write a durable task row at the very end, inside
+ * commitEvidencedArtifact -> createInitialTask, AFTER the real GitHub
+ * Search + Gemini calls had already completed. Every concurrent caller
+ * that arrived before that final write read "no task yet" and proceeded —
+ * proven live: three simultaneous requests with the same idempotency key
+ * produced three real github.search calls, three real model.gemini calls,
+ * three artifacts, three receipts, all sharing one derived taskId.
+ *
+ * The fix moves the durable claim to the very top, as a real INSERT into
+ * execution_claims guarded by a UNIQUE(workspace_id, actor_user_id,
+ * capability, idempotency_key) constraint (see acquireExecutionClaim in
+ * lib/persistence.ts) — attempted before `run` (the real work) is ever
+ * invoked. There is no read-then-write gap: the INSERT either succeeds
+ * (this call owns execution) or fails on the UNIQUE constraint (another
+ * call already owns or has finished it), and SQLite's own constraint
+ * enforcement decides which, not application logic.
+ *
+ * In-flight duplicate behavior (chosen: option B from the spec, a
+ * structured result, not a bounded wait/poll): a concurrent duplicate
+ * that loses the race gets IN_PROGRESS immediately. A bounded-wait/poll
+ * loop was considered and rejected — it adds a real timeout policy this
+ * deployment doesn't need (the client already disables its own submit
+ * button while in flight; this is the second, independent line of
+ * defense for a voice+button race, a second tab, or a retried network
+ * request, not the primary UX path), and "do not wait indefinitely" plus
+ * "do not fabricate a successful result before A finishes" already rule
+ * out the alternative's two ways of going wrong.
+ */
+async function withAtomicClaim(
+  input: ExecutionEnvelopeInput,
+  capability: string,
+  taskId: string,
+  run: () => Promise<ExecutionEnvelopeResult>,
+): Promise<ExecutionEnvelopeResult> {
+  if (!input.idempotencyKey) {
+    // No meaningful key supplied — unguarded execution, same as every
+    // capability that never opts into idempotency at all.
+    return run();
+  }
+
+  const payloadHash = hashRequestPayload(capability, input.rawText, input.parameters);
+  const acquisition = acquireExecutionClaim({
+    workspaceId: input.workspaceId,
+    actorUserId: input.actorUserId,
+    capability,
+    idempotencyKey: input.idempotencyKey,
+    payloadHash,
+    taskId,
+  });
+
+  if (acquisition.outcome === 'EXISTS') {
+    const claim: ExecutionClaimRecord = acquisition.claim;
+    if (claim.payload_hash !== payloadHash) {
+      // Same idempotency key, different request — never treated as an
+      // accidental duplicate, and never executed either.
+      return {
+        outcome: 'CONFLICT',
+        capability,
+        reason: 'This idempotency key was already used for a different request — refusing rather than executing it as an accidental duplicate.',
+        taskId: claim.task_id,
+      };
+    }
+    if (claim.status === 'CLAIMED') {
+      return {
+        outcome: 'IN_PROGRESS',
+        capability,
+        reason: 'A request with this same idempotency key is already executing — not re-executed.',
+        taskId: claim.task_id,
+      };
+    }
+    if (claim.status === 'FAILED') {
+      // Preserves the existing approved failure semantics: a failed
+      // consequential request is never silently retried.
+      return {
+        outcome: 'FAILED',
+        capability,
+        reason: 'This request already failed previously — duplicate submission ignored, not retried automatically.',
+        taskId: claim.task_id,
+      };
+    }
+    // DONE — replay the real, already-recorded evidence. No provider/tool
+    // call, no new artifact, no new Aegis review, no new receipt.
+    return replayFromTask(claim.task_id, capability);
+  }
+
+  // ACQUIRED — this call owns execution. try/finally guarantees the claim
+  // always reaches a terminal state (DONE or FAILED) even on an
+  // unanticipated exception, so it is never left CLAIMED while this
+  // process is still alive (see the startup reconciliation in
+  // lib/persistence.ts for the only remaining case: a hard process crash).
+  try {
+    const result = await run();
+    resolveExecutionClaim(acquisition.claim.claim_id, result.outcome === 'FAILED' ? 'FAILED' : 'DONE');
+    return result;
+  } catch (err) {
+    resolveExecutionClaim(acquisition.claim.claim_id, 'FAILED');
+    throw err;
+  }
+}
+
+async function executeVaultWrite(input: ExecutionEnvelopeInput): Promise<ExecutionEnvelopeResult> {
+  const taskId = deriveIdempotentTaskId('vault', input.idempotencyKey);
+  return withAtomicClaim(input, 'vault.write', taskId, async () => {
+    const content = `# Jarvis Note\n\n${input.rawText}\n`;
+    const artifact = writeWorkspaceArtifact({ workspaceId: input.workspaceId, taskId, content, folder: 'Jarvis-Notes', extension: 'md' });
+    try {
+      indexVaultArtifact(input.workspaceId, artifact.artifact_id);
+    } catch {
+      /* non-blocking */
+    }
+    return {
+      outcome: 'SUCCESS',
+      capability: 'vault.write',
+      reason: 'Saved to the Vault.',
+      taskId,
+      artifact: { id: artifact.artifact_id, path: artifact.relative_path, contentHash: artifact.content_hash },
+    };
+  });
 }
 
 async function executeResearch(input: ExecutionEnvelopeInput): Promise<ExecutionEnvelopeResult> {
   const taskId = deriveIdempotentTaskId('research', input.idempotencyKey);
-  // B2 — checked before any real Gemini/GitHub call, not just before the
-  // artifact/receipt write: a duplicate submission must not repeat those
-  // calls either.
-  const shortCircuit = checkIdempotentTask(taskId, 'research', input.idempotencyKey);
-  if (shortCircuit) return shortCircuit;
 
   const apiKey = process.env.GEMINI_API_KEY || '';
   if (!apiKey) {
-    // Discovery itself (GitHub Search) needs no Gemini key — this gate
-    // exists because synthesis (A3) is a required step of this capability
-    // whenever it runs, not an optional enhancement.
+    // A static deployment condition, not an execution race — checked
+    // before the atomic claim so a transient "not configured" state can
+    // never permanently consume a claim under a key the caller might
+    // legitimately retry once the deployment is configured.
     return { outcome: 'NOT_CONFIGURED', capability: 'research', reason: 'GEMINI_API_KEY is not configured — the synthesis step requires a real Gemini call.' };
   }
 
-  const ctx = createExecutionContext({ workspaceId: input.workspaceId });
-  let result;
-  try {
-    result = await runLiveRepositoryResearch({ apiKey, query: input.rawText }, ctx);
-  } catch (err: any) {
-    // A5 — a GitHub rate-limit exhaustion (or any other real failure,
-    // including a failed synthesis call) is reported as a structured,
-    // honest failure. No retry, no sleep, no fallback to stale data.
-    const reason = err?.name === 'GithubRateLimitError'
-      ? `GitHub API rate limit reached: ${err.message}`
-      : `Live research failed: ${err?.message || String(err)}`;
-    return {
-      outcome: 'FAILED',
-      capability: 'research',
-      reason,
-      toolsInvoked: ctx.getInvocations().map((r) => r.name),
-    };
-  }
+  return withAtomicClaim(input, 'research', taskId, async () => {
+    const ctx = createExecutionContext({ workspaceId: input.workspaceId });
+    let result;
+    try {
+      result = await runLiveRepositoryResearch({ apiKey, query: input.rawText }, ctx);
+    } catch (err: any) {
+      // A5 — a GitHub rate-limit exhaustion (or any other real failure,
+      // including a failed synthesis call) is reported as a structured,
+      // honest failure. No retry, no sleep, no fallback to stale data.
+      const reason = err?.name === 'GithubRateLimitError'
+        ? `GitHub API rate limit reached: ${err.message}`
+        : `Live research failed: ${err?.message || String(err)}`;
+      return {
+        outcome: 'FAILED',
+        capability: 'research',
+        reason,
+        toolsInvoked: ctx.getInvocations().map((r) => r.name),
+      };
+    }
 
-  if (result.repos.length === 0) {
-    // No real live evidence came back — refuse rather than let this look
-    // like a satisfied research request.
-    return {
-      outcome: 'FAILED',
-      capability: 'research',
-      reason: 'GitHub Search returned no resolvable repositories for this query.',
-      toolsInvoked: ctx.getInvocations().map((r) => r.name),
-    };
-  }
+    if (result.repos.length === 0) {
+      // No real live evidence came back — refuse rather than let this look
+      // like a satisfied research request.
+      return {
+        outcome: 'FAILED',
+        capability: 'research',
+        reason: 'GitHub Search returned no resolvable repositories for this query.',
+        toolsInvoked: ctx.getInvocations().map((r) => r.name),
+      };
+    }
 
-  return commitEvidencedArtifact({
-    taskId,
-    workspaceId: input.workspaceId,
-    title: `Research — ${result.query.slice(0, 80)}`,
-    description: `Live research: ${result.query}`,
-    assignedAgent: 'research',
-    content: result.reportMarkdown,
-    folder: 'Research',
-    toolsInvoked: ctx.getInvocations().map((r) => r.name),
+    return commitEvidencedArtifact({
+      taskId,
+      workspaceId: input.workspaceId,
+      title: `Research — ${result.query.slice(0, 80)}`,
+      description: `Live research: ${result.query}`,
+      assignedAgent: 'research',
+      content: result.reportMarkdown,
+      folder: 'Research',
+      toolsInvoked: ctx.getInvocations().map((r) => r.name),
+    });
   });
 }
 
