@@ -45,12 +45,12 @@ import {
 } from "./lib/persistence";
 import { hermesAdapter } from "./src/services/hermesAdapter";
 import { classifyModelRequest, generateWithFailover, type FailoverResult, DEFAULT_CANDIDATE_MODELS } from "./lib/model-router";
-import { verifyTaskAtGate } from "./lib/kil-gate";
+import { verifyTaskAtGate, checkGuardianRules } from "./lib/kil-gate";
 import { buildTonReadiness } from "./lib/ton-readiness";
 import { probeTonReadiness } from "./lib/ton-probe";
 import { tonAnalyticsSnapshot, recordTonTelemetry } from "./lib/ton-analytics";
 import { tonGuardianViews, installTonGuardians } from "./lib/ton-guardians";
-import { listWorkspaceVaultEntries, getWorkspaceVaultEntry, previewWorkspaceVaultEntry } from "./lib/vault";
+import { listWorkspaceVaultEntries, getWorkspaceVaultEntry, previewWorkspaceVaultEntry, writeWorkspaceArtifact } from "./lib/vault";
 import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory } from "./lib/memory-index";
 import { estimateGraphExecution, selectLiveExecutionNodes } from "./lib/graph-execution";
 import { listWorkspaceSkills, getWorkspaceSkill, createSkill, updateSkill, testSkill, discoverRepoSkillFiles, isValidMcpEndpointRef, classifySkillExecutability, getRawCredentialCiphertext, ExecutionTargetType } from "./lib/skills";
@@ -124,57 +124,13 @@ const terminalSessions = new Map<string, ServerTerminalSession>([
   ]
 ]);
 
-function checkGuardianRules(cmd: string): {
-  status: "SAFE" | "APPROVAL_REQUIRED" | "BLOCKED";
-  riskLevel: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | "FATAL";
-  warning?: string;
-  ruleCitation?: string;
-} {
-  const trimmed = cmd.trim();
-  // Forbidden / fatal blocked
-  if (
-    trimmed.includes(":(){ :|:& };:") ||
-    /rm\s+-rf\s+(\/|\/\*|~|\$HOME|\.\.)(\s|$)/.test(trimmed) ||
-    /mkfs\b/.test(trimmed) ||
-    /dd\s+if=.*of=\/dev\//.test(trimmed) ||
-    /chmod\s+-R\s+777\s+\//.test(trimmed)
-  ) {
-    return {
-      status: "BLOCKED",
-      riskLevel: "FATAL",
-      warning: "Catastrophic filesystem destruction or fork bomb detected. Execution strictly denied by Guardian Aegis Sentinel.",
-      ruleCitation: "RULE-SEC-01: Permanent Root Protection"
-    };
-  }
-
-  // Approval required for privileged/destructive operations
-  if (
-    /sudo\b/.test(trimmed) ||
-    /rm\s+-rf\b/.test(trimmed) ||
-    /kill\s+-9\b/.test(trimmed) ||
-    /git\s+reset\s+--hard\b/.test(trimmed) ||
-    /git\s+clean\s+-fdx?\b/.test(trimmed) ||
-    /curl\s+.*\|\s*(ba)?sh\b/.test(trimmed) ||
-    /wget\s+.*\|\s*(ba)?sh\b/.test(trimmed) ||
-    />\s*\/dev\/sd/.test(trimmed) ||
-    /chmod\s+(\+x|[0-7]{3,4})\s+(\/|etc|bin|usr)/.test(trimmed) ||
-    /npm\s+publish\b/.test(trimmed) ||
-    /npx\s+.*--yes\b/.test(trimmed) ||
-    /drop\s+database\b/i.test(trimmed)
-  ) {
-    return {
-      status: "APPROVAL_REQUIRED",
-      riskLevel: "CRITICAL",
-      warning: "Privileged, destructive, or external execution pipeline detected. Explicit human authorization required before execution.",
-      ruleCitation: "RULE-SEC-04: Privileged Operation Gate"
-    };
-  }
-
-  return {
-    status: "SAFE",
-    riskLevel: "LOW"
-  };
-}
+// STEP 2 — checkGuardianRules relocated to lib/kil-gate.ts (Guardian
+// collapse: the canonical policy layer now owns both content verification
+// and terminal command policy — see that file's module comment). Moved
+// verbatim (byte-for-byte body comparison run before deletion); imported
+// above instead of declared locally. The three real call sites
+// (/api/terminal/guardian-check, /api/terminal/exec, /api/terminal/stream)
+// and the E2E self-test below are unchanged.
 
 // STEP 1b — relocated to lib/model-router.ts (same value) so
 // lib/fabric/kernel.ts has a real shared source instead of a duplicated
@@ -3407,6 +3363,116 @@ Rules for spokenSummary specifically:
       return res.json({ success: true, workspaceId: resolved.workspaceId, entry });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to read Vault entry" });
+    }
+  });
+
+  // STEP 2 — the real, server-backed Vault-note write path. Replaces
+  // src/App.tsx's former handleAddNoteToVault(), which only ever called
+  // setNotes() into React state (no fetch, no disk write, no DB row —
+  // confirmed in Phase 0/F2 and never actually fixed until now, only made
+  // honest about not persisting). This route is a thin adapter, same shape
+  // as the read routes above: resolve the real workspace, then call the one
+  // canonical writer (lib/vault.ts writeWorkspaceArtifact) — no local write
+  // logic, no fabricated Aegis/provenance metadata, no receipt (a manual
+  // note is not an agent execution and was never characterized as needing
+  // one). A minimal real task row is created to satisfy artifacts.task_id's
+  // real NOT NULL constraint when the caller has no existing task to
+  // attach to — reusing createInitialTask/updateTaskStatus/
+  // recordActivityEvent rather than a second, parallel "notes" table.
+  app.post("/api/vault/notes", requireWorkspaceMember(fromBody), (req, res) => {
+    try {
+      const body = req.body || {};
+      const resolvedWorkspaceId = (req as AuthedRequest).authWorkspaceId ?? (body.workspaceId || DEFAULT_WORKSPACE_ID);
+      const title = typeof body.title === "string" ? body.title.trim() : "";
+      const content = typeof body.content === "string" ? body.content : "";
+      const tags = Array.isArray(body.tags) ? body.tags.filter((t: unknown) => typeof t === "string") : [];
+      const folder = typeof body.folder === "string" && body.folder.trim() ? body.folder.trim() : "Notes";
+
+      if (!title) {
+        return res.status(400).json({ success: false, error: "title is required" });
+      }
+      if (!content) {
+        return res.status(400).json({ success: false, error: "content is required" });
+      }
+
+      const nowIso = new Date().toISOString();
+      let taskId = typeof body.taskId === "string" && body.taskId.trim() ? body.taskId.trim() : "";
+
+      if (taskId) {
+        // A caller-supplied taskId must belong to this workspace — same
+        // ownership rule as /api/execute-agent-task (Phase 0b), enforced
+        // here too rather than trusting a client-supplied id.
+        const existingTaskWorkspaceId = getTaskWorkspaceId(taskId);
+        if (existingTaskWorkspaceId !== null && existingTaskWorkspaceId !== resolvedWorkspaceId) {
+          return res.status(403).json({
+            success: false,
+            status: "BLOCKED",
+            reason: "WORKSPACE_MISMATCH",
+            error: `Task ${taskId} belongs to a different workspace and cannot be reused here.`,
+          });
+        }
+      } else {
+        taskId = `note-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+        createInitialTask({
+          taskId,
+          workspaceId: resolvedWorkspaceId,
+          title,
+          description: "Manual Vault note — captured directly, not an agent execution.",
+          assignedAgent: "operator",
+          assignedModel: "n/a",
+          createdAt: nowIso,
+        });
+        updateTaskStatus(taskId, "DONE", undefined, resolvedWorkspaceId);
+        recordActivityEvent({
+          taskId,
+          expectedWorkspaceId: resolvedWorkspaceId,
+          eventType: "VAULT_NOTE_SAVED",
+          agentId: "operator",
+          payload: { title, tags },
+          createdAt: nowIso,
+        });
+      }
+
+      const frontmatter = `---\ntitle: ${JSON.stringify(title)}\ntags: ${JSON.stringify(tags)}\ncreatedAt: ${JSON.stringify(nowIso)}\n---\n\n`;
+      const fullContent = content.startsWith("---") ? content : `${frontmatter}# ${title}\n\n${content}\n`;
+
+      const artifact = writeWorkspaceArtifact({
+        workspaceId: resolvedWorkspaceId,
+        taskId,
+        content: fullContent,
+        folder,
+        extension: "md",
+        createdAt: nowIso,
+      });
+
+      // Immediate indexing: unlike /api/execute-agent-task (which only
+      // indexes after Aegis verification + a signed receipt — preserved
+      // exactly, Step 2 does not touch that ordering), a manual note has no
+      // verification stage to wait for.
+      try {
+        indexVaultArtifact(resolvedWorkspaceId, artifact.artifact_id);
+      } catch (indexErr: any) {
+        console.warn("[Memory Index] Note indexing skipped:", indexErr?.message || indexErr);
+      }
+
+      return res.json({
+        success: true,
+        workspaceId: resolvedWorkspaceId,
+        taskId,
+        artifact: {
+          id: artifact.artifact_id,
+          relativePath: artifact.relative_path,
+          contentHash: artifact.content_hash,
+          sizeBytes: artifact.size_bytes,
+          createdAt: artifact.created_at,
+        },
+      });
+    } catch (err: any) {
+      // Honest failure — never a fabricated success. VaultWriteSecurityError
+      // (path traversal/symlink rejection) and any other real error both
+      // land here.
+      console.error("[Vault Note Write Error]:", err);
+      return res.status(500).json({ success: false, error: err?.message || "Failed to save Vault note" });
     }
   });
 

@@ -135,12 +135,19 @@ describe('F2: handleAddNoteToVault never fabricates verification, tools, sources
     expect(slice).toMatch(/model:\s*provenanceMeta\?\.model \|\|/);
   });
 
-  it('this function still only writes to React state — confirms F2 fixed the claim, not a real persistence layer that does not exist yet', () => {
+  it('SUPERSEDED BY STEP 2, not re-broken: this function now also performs a real server-backed write (POST /api/vault/notes -> lib/vault.ts writeWorkspaceArtifact), not just the local React state echo F2 left honest about being the only thing that happened', () => {
     const idx = appContent.indexOf('const handleAddNoteToVault');
     const end = appContent.indexOf('const handleUpdateNote', idx);
     const fullFnBody = appContent.slice(idx, end);
+    // The optimistic local echo is preserved (unchanged UI behavior for
+    // all ~28 existing fire-and-forget callers) ...
     expect(fullFnBody).toContain('setNotes(prev => [newNote, ...prev])');
-    expect(fullFnBody).not.toMatch(/fetch\(/);
+    // ... but it is no longer the only thing that happens: a real fetch to
+    // the real endpoint now follows it.
+    expect(fullFnBody).toMatch(/fetch\('\/api\/vault\/notes'/);
+    // Honest failure handling: the optimistic note gets patched with a real
+    // SAVE_FAILED state on a real error, never left silently claiming success.
+    expect(fullFnBody).toContain('SAVE_FAILED');
   });
 });
 

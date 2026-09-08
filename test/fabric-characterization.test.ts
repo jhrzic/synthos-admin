@@ -442,13 +442,14 @@ describe('STATIC: provider-error and empty-response failure branches (unreachabl
   });
 });
 
-describe('STATIC: the success path (VERIFIED) — ordering that Step 2+ must preserve', () => {
-  it('exact order: model.gemini invocation -> PROVIDER_COMPLETED -> disk write -> recordArtifact (DB+disk) -> ARTIFACT_SAVED -> AWAITING_VERIFICATION -> Aegis run -> recordQualityReview -> (VERIFIED branch) AWAITING_RECEIPT -> AEGIS_REVIEWED -> sign -> verify -> recordReceipt -> RECEIPT_CREATED -> DONE -> TASK_COMPLETED -> KIL (best-effort) -> memory index (best-effort)', () => {
+const vaultContent = fs.readFileSync(path.resolve(REPO_ROOT, 'lib/vault.ts'), 'utf-8');
+
+describe('STATIC: the success path (VERIFIED) — ordering that Step 3+ must preserve', () => {
+  it('exact order: model.gemini invocation -> PROVIDER_COMPLETED -> writeWorkspaceArtifact (canonical writer, DB+disk) -> ARTIFACT_SAVED -> AWAITING_VERIFICATION -> Aegis run -> recordQualityReview -> (VERIFIED branch) AWAITING_RECEIPT -> AEGIS_REVIEWED -> sign -> verify -> recordReceipt -> RECEIPT_CREATED -> DONE -> TASK_COMPLETED -> KIL (best-effort) -> memory index (best-effort)', () => {
     const order = [
       'await ctx.invoke("model.gemini", async () => {',
       'eventType: "PROVIDER_COMPLETED"',
-      'fs.writeFileSync(vaultDiskPath',
-      'recordArtifact(',
+      'writeWorkspaceArtifact({',
       'eventType: "ARTIFACT_SAVED"',
       'updateTaskStatus(taskId, "AWAITING_VERIFICATION", undefined, resolvedWorkspaceId)',
       'runDeterministicAegisVerification(',
@@ -472,10 +473,27 @@ describe('STATIC: the success path (VERIFIED) — ordering that Step 2+ must pre
     }
   });
 
-  it('the artifact disk path is derived from the task title alone, NOT workspaceId or taskId (DEFERRED — Phase 0b, item B: deferred to Step 2\'s writeWorkspaceArtifact, not fixed here): two tasks in ANY workspaces sharing a sanitized title silently overwrite each other\'s file on disk', () => {
-    expect(kernelContent).toContain('const vaultRelPath = `Startup-Theses/${sanitizedTitle}.md`');
-    expect(kernelContent).not.toMatch(/vaultRelPath = `.*workspaceId.*Startup-Theses/);
-    expect(kernelContent).not.toMatch(/vaultRelPath = `.*taskId.*Startup-Theses/);
+  it('the kernel no longer writes to disk or calls recordArtifact() itself — the canonical writer (lib/vault.ts writeWorkspaceArtifact) is the only path', () => {
+    // Checks real code, not prose: no fs import at all anymore (its only
+    // use was the removed direct write), no `recordArtifact(` call
+    // expression, and no import of recordArtifact from persistence.
+    expect(kernelContent).not.toMatch(/^import fs /m);
+    expect(kernelContent).not.toMatch(/[^.]\brecordArtifact\(\s*\{/); // a real call would open an object literal
+    expect(kernelContent).not.toMatch(/^\s*recordArtifact,\s*$/m); // the old named import line
+    expect(kernelContent).toContain("import { writeWorkspaceArtifact } from '../vault';");
+    expect(kernelContent).toContain('const persistedArtifact = writeWorkspaceArtifact({');
+  });
+
+  it('STEP 2 FIX (was DEFERRED Phase 0b item B, now closed): storage identity is workspace-scoped and server-generated, never derived from the task title — two tasks anywhere sharing a title can no longer collide on disk', () => {
+    // The kernel builds no disk path of its own from a title anymore —
+    // checked as real code (a declaration/assignment), not prose, since
+    // this file's own comments legitimately discuss the old scheme by name.
+    expect(kernelContent).not.toMatch(/const sanitizedTitle/);
+    expect(kernelContent).not.toMatch(/const vaultRelPath/);
+    // The writer itself: filename is artifactId-based, root is workspace-scoped.
+    expect(vaultContent).toContain("const filename = `${artifactId}.${extension}`;");
+    expect(vaultContent).toContain("path.resolve(root, 'workspaces', workspaceId, folder)");
+    expect(vaultContent).not.toMatch(/const filename = .*title/i);
   });
 
   it('KIL projection and memory indexing are both isolated in their own try/catch and cannot affect task completion, the receipt, or the response (by design, confirmed at the source level)', () => {

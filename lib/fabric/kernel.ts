@@ -47,15 +47,12 @@
 // different-sounding concept for them.
 // ---------------------------------------------------------------------------
 
-import fs from 'fs';
-import path from 'path';
 import crypto from 'node:crypto';
 import { GoogleGenAI } from '@google/genai';
 import {
   createInitialTask,
   updateTaskStatus,
   recordActivityEvent,
-  recordArtifact,
   recordQualityReview,
   getTaskQualityReviews,
   runDeterministicAegisVerification,
@@ -76,6 +73,10 @@ import {
 import { classifyModelRequest, DEFAULT_CANDIDATE_MODELS } from '../model-router';
 import { verifyTaskAtGate } from '../kil-gate';
 import { indexVaultArtifact } from '../memory-index';
+// STEP 2 — the canonical Vault writer (lib/vault.ts). Replaces this file's
+// own former direct fs.writeFileSync + recordArtifact() pair; see the
+// artifact-write section below for the full rationale.
+import { writeWorkspaceArtifact } from '../vault';
 import type { ExecuteAgentTaskInput, ExecutionResult, ExecutionContext } from './types';
 
 export async function executeAgentTask(
@@ -441,27 +442,32 @@ sourceHash: ${packageMetadataResult.sourceHash}
     const elapsedMs = Date.now() - startTime;
     const nowIso = new Date().toISOString();
 
-    // Write artifact to physical disk
-    const sanitizedTitle = (taskTitle || "untitled").replace(/[^a-zA-Z0-9_-]/g, "-");
-    const vaultRelPath = `Startup-Theses/${sanitizedTitle}.md`;
-    const vaultDiskDir = path.join(process.cwd(), "vault", "Startup-Theses");
-    if (!fs.existsSync(vaultDiskDir)) {
-      fs.mkdirSync(vaultDiskDir, { recursive: true });
-    }
-    const vaultDiskPath = path.join(vaultDiskDir, `${sanitizedTitle}.md`);
+    // STEP 2 — the artifact write and its DB record both now go through
+    // writeWorkspaceArtifact() (lib/vault.ts), the one canonical Vault
+    // writer. Before this, the route both wrote the file itself
+    // (fs.writeFileSync) AND called recordArtifact(), which performs its own
+    // internal fs.writeFileSync to the same path — a real, harmless but
+    // duplicate write. Now there is exactly one write path. Storage
+    // identity is workspace-scoped and server-generated
+    // (vault/workspaces/<id>/Startup-Theses/<artifactId>.md) instead of the
+    // old flat vault/Startup-Theses/${sanitizedTitle}.md — which let two
+    // tasks anywhere sharing a sanitized title silently overwrite each
+    // other's file (characterized in test/fabric-characterization.test.ts,
+    // DEFERRED item B — now fixed, not merely documented). The real
+    // relative_path is only known once writeWorkspaceArtifact() generates
+    // it, so the old "**Vault Path**: `...`" header line (which had to
+    // guess the path before writing) is dropped rather than filled with a
+    // placeholder that would be baked, wrong, into the saved document
+    // itself — the real path is already on the persisted artifact record
+    // and in the API response, which is where a caller should read it from.
+    const artifactContent = `# ${taskTitle}\n\n**Executed by**: ${assignedAgent.toUpperCase()} (${modelUsed})\n**Timestamp**: ${nowIso}\n\n---\n\n${executionOutput}\n`;
 
-    const artifactContent = `# ${taskTitle}\n\n**Executed by**: ${assignedAgent.toUpperCase()} (${modelUsed})\n**Timestamp**: ${nowIso}\n**Vault Path**: \`${vaultRelPath}\`\n\n---\n\n${executionOutput}\n`;
-
-    fs.writeFileSync(vaultDiskPath, artifactContent, "utf8");
-
-    // Calculate real SHA-256 of artifact contents & persist artifact record & ARTIFACT_SAVED
-    const artifactId = `art-${Date.now()}`;
-    const persistedArtifact = recordArtifact({
-      artifactId,
+    const persistedArtifact = writeWorkspaceArtifact({
+      workspaceId: resolvedWorkspaceId,
       taskId,
-      relativePath: vaultRelPath,
-      diskPath: vaultDiskPath,
       content: artifactContent,
+      folder: 'Startup-Theses',
+      extension: 'md',
       createdAt: nowIso,
     });
 

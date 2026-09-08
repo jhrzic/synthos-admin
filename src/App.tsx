@@ -505,9 +505,10 @@ provenance: "${finalMeta.provenance}"
 `;
 
     const finalContent = content.startsWith('---') ? content : frontmatter + content;
+    const localId = `note-${Date.now()}`;
 
     const newNote: ObsidianNote = {
-      id: `note-${Date.now()}`,
+      id: localId,
       title,
       path: `${folder}/${cleanTitle}.md`,
       folder,
@@ -518,9 +519,52 @@ provenance: "${finalMeta.provenance}"
       createdAt: timestampStr.slice(0, 10),
       ...finalMeta
     };
-    
+
+    // Optimistic local echo — same immediate UI update as before, so every
+    // existing caller (still a synchronous, fire-and-forget void callback;
+    // ~28 call sites across this file, unchanged) keeps working exactly as
+    // it did. What's new is the real write below and the honest patch once
+    // it resolves — this function no longer pretends that showing the note
+    // locally IS the save.
     setNotes(prev => [newNote, ...prev]);
     setVaults(prev => prev.map(v => v.id === 'vault-1' ? { ...v, notesCount: v.notesCount + 1 } : v));
+
+    // STEP 2 — the real, server-backed write (lib/vault.ts
+    // writeWorkspaceArtifact via POST /api/vault/notes). No fabricated
+    // success: the optimistic note above is patched with the real
+    // server-confirmed path/hash on success, or an honest failure state on
+    // failure — never silently left claiming a save that did not happen.
+    fetch('/api/vault/notes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: activeWorkspaceId, title, content: finalContent, tags, folder }),
+    })
+      .then(async (res) => {
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.success) {
+          const reason = data?.error || `HTTP ${res.status}`;
+          setNotes(prev => prev.map(n => n.id === localId ? {
+            ...n,
+            verification: `SAVE_FAILED — ${reason}`,
+            provenance: 'NOT_IMPLEMENTED — real save attempted and failed; this note exists only in this browser session',
+          } : n));
+          return;
+        }
+        setNotes(prev => prev.map(n => n.id === localId ? {
+          ...n,
+          path: data.artifact.relativePath,
+          artifact: data.artifact.relativePath,
+          verification: `SAVED — real Vault artifact ${data.artifact.id} (sha256 ${String(data.artifact.contentHash).slice(0, 19)}…)`,
+          provenance: `Server-backed write via POST /api/vault/notes -> lib/vault.ts writeWorkspaceArtifact (workspace ${data.workspaceId})`,
+        } : n));
+      })
+      .catch((err: any) => {
+        setNotes(prev => prev.map(n => n.id === localId ? {
+          ...n,
+          verification: `SAVE_FAILED — ${err?.message || 'network error'}`,
+          provenance: 'NOT_IMPLEMENTED — real save attempted and failed; this note exists only in this browser session',
+        } : n));
+      });
   };
 
   const handleUpdateNote = (id: string, updates: Partial<ObsidianNote>) => {

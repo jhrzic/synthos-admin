@@ -11,6 +11,20 @@
 // the agent was allowed to draw facts from" is the task's own title,
 // description, and inputs/sourceUrl — which is exactly the fallback the
 // source itself uses when no directive-step chain exists for a task.
+//
+// STEP 2 (SynthOS Execution Fabric) — Guardian collapse. checkGuardianRules
+// (terminal pre-execution command policy: BLOCKED / APPROVAL_REQUIRED /
+// SAFE) used to be a second, separate policy function defined locally in
+// server.ts, with no relationship to this module's own gate even though
+// both are "does this get to happen" decisions. It is moved here verbatim
+// — same regexes, same status/riskLevel/warning/ruleCitation shape, same
+// RULE-SEC-01/RULE-SEC-04 citations — so this file is the one canonical
+// policy layer for both "is this generated content acceptable"
+// (verifyTaskAtGate) and "is this command acceptable to run"
+// (checkGuardianRules), rather than a second Guardian module. server.ts's
+// three real call sites (POST /api/terminal/guardian-check, POST
+// /api/terminal/exec, GET /api/terminal/stream) now import this instead of
+// a local definition; no terminal-protection behavior changed.
 // ---------------------------------------------------------------------------
 
 import {
@@ -138,5 +152,68 @@ export function verifyTaskAtGate(task: GateTask): GateVerification {
     observation,
     blocking,
     blockedReason: describeBlockingFailures(blocking),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Terminal command policy (moved verbatim from server.ts's former local
+// checkGuardianRules — STEP 2 Guardian collapse, see the module comment
+// above). Pure, synchronous, no persistence dependency: given a command
+// string, decide SAFE / APPROVAL_REQUIRED / BLOCKED. Callers (the three
+// /api/terminal/* routes in server.ts) are responsible for acting on the
+// result — this function only classifies.
+// ---------------------------------------------------------------------------
+
+export interface GuardianCommandCheck {
+  status: "SAFE" | "APPROVAL_REQUIRED" | "BLOCKED";
+  riskLevel: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | "FATAL";
+  warning?: string;
+  ruleCitation?: string;
+}
+
+export function checkGuardianRules(cmd: string): GuardianCommandCheck {
+  const trimmed = cmd.trim();
+  // Forbidden / fatal blocked
+  if (
+    trimmed.includes(":(){ :|:& };:") ||
+    /rm\s+-rf\s+(\/|\/\*|~|\$HOME|\.\.)(\s|$)/.test(trimmed) ||
+    /mkfs\b/.test(trimmed) ||
+    /dd\s+if=.*of=\/dev\//.test(trimmed) ||
+    /chmod\s+-R\s+777\s+\//.test(trimmed)
+  ) {
+    return {
+      status: "BLOCKED",
+      riskLevel: "FATAL",
+      warning: "Catastrophic filesystem destruction or fork bomb detected. Execution strictly denied by Guardian Aegis Sentinel.",
+      ruleCitation: "RULE-SEC-01: Permanent Root Protection"
+    };
+  }
+
+  // Approval required for privileged/destructive operations
+  if (
+    /sudo\b/.test(trimmed) ||
+    /rm\s+-rf\b/.test(trimmed) ||
+    /kill\s+-9\b/.test(trimmed) ||
+    /git\s+reset\s+--hard\b/.test(trimmed) ||
+    /git\s+clean\s+-fdx?\b/.test(trimmed) ||
+    /curl\s+.*\|\s*(ba)?sh\b/.test(trimmed) ||
+    /wget\s+.*\|\s*(ba)?sh\b/.test(trimmed) ||
+    />\s*\/dev\/sd/.test(trimmed) ||
+    /chmod\s+(\+x|[0-7]{3,4})\s+(\/|etc|bin|usr)/.test(trimmed) ||
+    /npm\s+publish\b/.test(trimmed) ||
+    /npx\s+.*--yes\b/.test(trimmed) ||
+    /drop\s+database\b/i.test(trimmed)
+  ) {
+    return {
+      status: "APPROVAL_REQUIRED",
+      riskLevel: "CRITICAL",
+      warning: "Privileged, destructive, or external execution pipeline detected. Explicit human authorization required before execution.",
+      ruleCitation: "RULE-SEC-04: Privileged Operation Gate"
+    };
+  }
+
+  return {
+    status: "SAFE",
+    riskLevel: "LOW"
   };
 }
