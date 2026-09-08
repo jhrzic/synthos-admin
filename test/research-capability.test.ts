@@ -1,78 +1,85 @@
 import { describe, it, expect } from 'vitest';
-import { extractRepoCandidates, buildReportMarkdown } from '../lib/fabric/research';
+import { buildSearchQueries, buildReportMarkdown, GithubRateLimitError, type ResearchRepo, type ResearchSource } from '../lib/fabric/research';
 
 // ---------------------------------------------------------------------------
-// STEP 6 — the deterministic parts of lib/fabric/research.ts: extracting
-// real GitHub repo candidates from grounded text/sources, and building the
-// final report from real, already-fetched structured data. These are pure
-// functions, testable without a live network call — the live grounding +
-// GitHub API calls themselves are proven in test/jarvis-command-routing.test.ts
-// (honest NOT_CONFIGURED without a real key) and the Section 13 live
-// acceptance pass (with a real key, run separately).
+// STEP 6 corrective pass — the deterministic parts of lib/fabric/research.ts
+// now that discovery is GitHub Search API, not Gemini grounding. Pure
+// functions, testable without a live network call — the live GitHub Search
+// + synthesis calls themselves are proven in
+// test/jarvis-command-routing.test.ts (honest NOT_CONFIGURED/FAILED without
+// real credentials) and the live acceptance pass (with real credentials).
 // ---------------------------------------------------------------------------
 
-describe('extractRepoCandidates: real github.com URLs only, deduplicated, never fabricated', () => {
-  it('extracts owner/repo from a real github.com URL in grounded text', () => {
-    const candidates = extractRepoCandidates('Check out https://github.com/langchain-ai/langchain for agent orchestration.', []);
-    expect(candidates).toContainEqual({ owner: 'langchain-ai', repo: 'langchain' });
+describe('buildSearchQueries: derives real queries from the caller\'s own text, strips task-framing words and the platform\'s own name', () => {
+  it('the Step 6 acceptance command reduces to a real, meaningful primary query, never including "synthos"', () => {
+    const queries = buildSearchQueries('Research the latest AI agent repositories relevant to SynthOS, compare the five most useful, and save the report to the Vault.');
+    expect(queries[0]).toBe('ai agent');
+    expect(queries.join(' ')).not.toContain('synthos');
   });
 
-  it('extracts from grounding source URIs too, not just the text body', () => {
-    const candidates = extractRepoCandidates('', [{ title: 'AutoGPT', uri: 'https://github.com/Significant-Gravitas/AutoGPT' }]);
-    expect(candidates).toContainEqual({ owner: 'Significant-Gravitas', repo: 'AutoGPT' });
+  it('never returns more than two queries', () => {
+    const queries = buildSearchQueries('research the latest multi agent orchestration frameworks for autonomous llm agents');
+    expect(queries.length).toBeLessThanOrEqual(2);
   });
 
-  it('deduplicates the same repo mentioned in both text and sources', () => {
-    const candidates = extractRepoCandidates(
-      'See https://github.com/microsoft/autogen for details.',
-      [{ title: null, uri: 'https://github.com/microsoft/autogen/blob/main/README.md' }]
-    );
-    const autogenCount = candidates.filter((c) => c.owner.toLowerCase() === 'microsoft' && c.repo.toLowerCase() === 'autogen').length;
-    expect(autogenCount).toBe(1);
+  it('always includes the curated fallback query so a second attempt is possible if the primary is insufficient', () => {
+    const queries = buildSearchQueries('research the latest AI agent repos');
+    expect(queries).toContain('ai agent framework');
   });
 
-  it('strips trailing punctuation and .git suffixes', () => {
-    const candidates = extractRepoCandidates('(https://github.com/openai/openai-python.git), a client library.', []);
-    expect(candidates).toContainEqual({ owner: 'openai', repo: 'openai-python' });
-  });
-
-  it('returns an empty list when no real github.com URL is present — never fabricates a repo', () => {
-    const candidates = extractRepoCandidates('There are many great open-source projects out there.', []);
-    expect(candidates).toEqual([]);
+  it('a query with no significant words after stripping falls back to the curated query alone', () => {
+    const queries = buildSearchQueries('research the latest and most useful repos for the vault');
+    expect(queries).toEqual(['ai agent framework']);
   });
 });
 
-describe('buildReportMarkdown: deterministic structure, real data only', () => {
-  const repos = [
-    { fullName: 'a/one', url: 'https://github.com/a/one', description: 'First', stars: 500, language: 'TypeScript', pushedAt: '2026-08-01T00:00:00Z' },
-    { fullName: 'b/two', url: 'https://github.com/b/two', description: 'Second', stars: 900, language: 'Python', pushedAt: '2026-07-15T00:00:00Z' },
-  ];
-  const sources = [{ title: 'Source One', uri: 'https://example.com/1' }];
+describe('GithubRateLimitError: a real, distinguishable failure class for A5', () => {
+  it('is a real Error subclass with its own name, distinguishable from a generic failure', () => {
+    const err = new GithubRateLimitError('rate limited');
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).toBe('GithubRateLimitError');
+    expect(err.message).toBe('rate limited');
+  });
+});
 
-  it('includes the query, repo count, and a comparison table with real repo data', () => {
-    const md = buildReportMarkdown('AI agent frameworks', repos, sources);
+describe('buildReportMarkdown: deterministic structure, real data only, live GitHub provenance', () => {
+  const repos: ResearchRepo[] = [
+    { fullName: 'a/one', url: 'https://github.com/a/one', description: 'First', stars: 500, forks: 10, language: 'TypeScript', topics: ['agents'], license: 'MIT', openIssues: 3, archived: false, createdAt: '2025-01-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z', pushedAt: '2026-08-01T00:00:00Z', defaultBranch: 'main', homepage: null },
+    { fullName: 'b/two', url: 'https://github.com/b/two', description: 'Second', stars: 900, forks: 20, language: 'Python', topics: [], license: null, openIssues: 1, archived: false, createdAt: null, updatedAt: null, pushedAt: '2026-07-15T00:00:00Z', defaultBranch: 'main', homepage: null },
+  ];
+  const sources: ResearchSource[] = repos.map((r) => ({ title: r.fullName, uri: r.url, retrievedAt: '2026-09-08T00:00:00Z' }));
+
+  it('identifies GitHub, not Google Search, as the live source', () => {
+    const md = buildReportMarkdown('AI agent frameworks', repos, sources, 'A real synthesis paragraph.', ['ai agent']);
+    expect(md).toContain('**Live source**: GitHub Search API');
+    expect(md).not.toMatch(/google search/i);
+  });
+
+  it('includes the query, repo count, real comparison table, and the real synthesis text verbatim', () => {
+    const md = buildReportMarkdown('AI agent frameworks', repos, sources, 'A real synthesis paragraph.', ['ai agent']);
     expect(md).toContain('# Research: AI agent frameworks');
     expect(md).toContain('**Repositories reviewed**: 2');
     expect(md).toContain('[a/one](https://github.com/a/one)');
     expect(md).toContain('[b/two](https://github.com/b/two)');
     expect(md).toContain('500');
     expect(md).toContain('900');
+    expect(md).toContain('A real synthesis paragraph.');
   });
 
-  it('includes a real Sources section with the actual grounding URIs, never fabricated citations', () => {
-    const md = buildReportMarkdown('query', repos, sources);
-    expect(md).toContain('## Sources');
-    expect(md).toContain('[Source One](https://example.com/1)');
+  it('includes real per-repo provenance with a retrieval timestamp, never fabricated citations', () => {
+    const md = buildReportMarkdown('query', repos, sources, 'synthesis', ['ai agent']);
+    expect(md).toContain('## Sources (live, GitHub, retrieved this run)');
+    expect(md).toContain('[a/one](https://github.com/a/one) — retrieved 2026-09-08T00:00:00Z');
   });
 
-  it('an empty repo list produces an honest zero-repo report, never a fabricated entry', () => {
-    const md = buildReportMarkdown('query', [], []);
-    expect(md).toContain('**Repositories reviewed**: 0');
-    expect(md).toContain('No grounding sources were returned by the search.');
+  it('missing optional fields (license, homepage) render honestly as n/a, never a fabricated value', () => {
+    const md = buildReportMarkdown('query', [repos[1]], [sources[1]], 'synthesis', ['ai agent']);
+    const row = md.split('\n').find((l) => l.includes('b/two'))!;
+    expect(row).toContain('| n/a |'); // license column, real absence
   });
 
-  it('a table cell never breaks on a pipe character in a real description (escaped, not corrupting the table)', () => {
-    const md = buildReportMarkdown('query', [{ fullName: 'x/y', url: 'https://github.com/x/y', description: 'A | B', stars: 1, language: null, pushedAt: null }], []);
+  it('a table cell never breaks on a pipe character in a real description', () => {
+    const md = buildReportMarkdown('query', [{ ...repos[0], description: 'A | B' }], sources, 'synthesis', ['ai agent']);
     expect(md).toContain('A \\| B');
   });
 });

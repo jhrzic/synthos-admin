@@ -186,7 +186,10 @@ async function executeVaultWrite(input: ExecutionEnvelopeInput): Promise<Executi
 async function executeResearch(input: ExecutionEnvelopeInput): Promise<ExecutionEnvelopeResult> {
   const apiKey = process.env.GEMINI_API_KEY || '';
   if (!apiKey) {
-    return { outcome: 'NOT_CONFIGURED', capability: 'research', reason: 'GEMINI_API_KEY is not configured — live research grounding requires a real Gemini call.' };
+    // Discovery itself (GitHub Search) needs no Gemini key — this gate
+    // exists because synthesis (A3) is a required step of this capability
+    // whenever it runs, not an optional enhancement.
+    return { outcome: 'NOT_CONFIGURED', capability: 'research', reason: 'GEMINI_API_KEY is not configured — the synthesis step requires a real Gemini call.' };
   }
 
   const ctx = createExecutionContext({ workspaceId: input.workspaceId });
@@ -194,21 +197,27 @@ async function executeResearch(input: ExecutionEnvelopeInput): Promise<Execution
   try {
     result = await runLiveRepositoryResearch({ apiKey, query: input.rawText }, ctx);
   } catch (err: any) {
+    // A5 — a GitHub rate-limit exhaustion (or any other real failure,
+    // including a failed synthesis call) is reported as a structured,
+    // honest failure. No retry, no sleep, no fallback to stale data.
+    const reason = err?.name === 'GithubRateLimitError'
+      ? `GitHub API rate limit reached: ${err.message}`
+      : `Live research failed: ${err?.message || String(err)}`;
     return {
       outcome: 'FAILED',
       capability: 'research',
-      reason: `Live research failed: ${err?.message || String(err)}`,
+      reason,
       toolsInvoked: ctx.getInvocations().map((r) => r.name),
     };
   }
 
-  if (result.sources.length === 0 && result.repos.length === 0) {
+  if (result.repos.length === 0) {
     // No real live evidence came back — refuse rather than let this look
-    // like a satisfied research request built on an ungrounded answer.
+    // like a satisfied research request.
     return {
       outcome: 'FAILED',
       capability: 'research',
-      reason: 'The live search returned no grounded sources or resolvable repositories.',
+      reason: 'GitHub Search returned no resolvable repositories for this query.',
       toolsInvoked: ctx.getInvocations().map((r) => r.name),
     };
   }
