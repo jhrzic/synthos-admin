@@ -453,23 +453,33 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
   ) => {
     const timestampStr = new Date().toISOString();
     const cleanTitle = title.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 50);
-    
-    // Fill in default provenance parameters to ensure absolute evidence mapping
+
+    // F2 (SynthOS Execution Fabric, Phase 0) — this function has no real
+    // persistence path: below, it only calls setNotes() into React state
+    // (see also the real, separate, GET-only /api/vault routes in
+    // server.ts, and the real fs.writeFileSync vault writer used only by
+    // Windmill external-execution results — neither is called here). Every
+    // default below used to name a specific tool, source, or Aegis score
+    // that never ran/existed for a plain client-side note. None of these
+    // are guesses about what SHOULD be true — they are honest statements
+    // of what actually happened: nothing was verified, no tool ran, and
+    // this is not durably saved. Real values still flow through untouched
+    // whenever a caller actually supplies provenanceMeta.
     const defaultProvenance = {
       workspace: folder || 'SynthOS-Shared-Workspace',
       objective: provenanceMeta?.objective || 'System Curation / Research Task',
       task: provenanceMeta?.task || title,
-      agent: provenanceMeta?.agent || 'SynthOS-Orchestrator',
-      model: provenanceMeta?.model || 'gemini-3.7-flash',
-      tools: provenanceMeta?.tools || ['Web-Discovery', 'Aegis-Validator'],
-      sources: provenanceMeta?.sources || ['YouTube Ingestion Feed', 'System Logs'],
+      agent: provenanceMeta?.agent || 'NOT_AVAILABLE',
+      model: provenanceMeta?.model || 'NOT_AVAILABLE',
+      tools: provenanceMeta?.tools || [],
+      sources: provenanceMeta?.sources || [],
       artifact: `${folder}/${cleanTitle}.md`,
-      decision: provenanceMeta?.decision || 'Automated execution and storage commit',
-      verification: provenanceMeta?.verification || 'Passed Aegis Verification (Score: 94/100)',
-      lesson: provenanceMeta?.lesson || 'Multi-agent coordination increases information density and synthesis speed',
+      decision: provenanceMeta?.decision || 'NOT_IMPLEMENTED — no automated commit executed',
+      verification: provenanceMeta?.verification || 'NOT_VERIFIED — no Aegis review has run on this note',
+      lesson: provenanceMeta?.lesson || 'NOT_AVAILABLE',
       error: provenanceMeta?.error || 'None',
       timestamp: timestampStr,
-      provenance: provenanceMeta?.provenance || `SynthOS Client Node -> Local Obsidian Storage`
+      provenance: provenanceMeta?.provenance || 'NOT_IMPLEMENTED — held in browser session state only; not written to a real Vault or filesystem'
     };
 
     const finalMeta = { ...defaultProvenance, ...provenanceMeta };

@@ -34,12 +34,16 @@ export class HermesAdapter implements IHermesAdapter {
         ? (globalThis as any).importMeta?.env?.VITE_HERMES_ADAPTER_BASE_URL
         : undefined;
 
-    const envToken =
-      typeof process !== 'undefined' && process.env
-        ? process.env.HERMES_ADAPTER_TOKEN
-        : typeof (globalThis as any).importMeta !== 'undefined'
-        ? (globalThis as any).importMeta?.env?.VITE_HERMES_ADAPTER_TOKEN
-        : undefined;
+    // F3 (SynthOS Execution Fabric, Phase 0) — HERMES_ADAPTER_TOKEN is a
+    // server-to-server bearer secret (ADR-001 Decision 3: "Secrets: bearer
+    // token lives in Vercel environment variables and the VPS environment.
+    // Never in the repo."). This module is imported by both server.ts and
+    // (via src/) the Vite client bundle. A VITE_-prefixed env var is
+    // inlined into that client bundle at build time and readable by anyone
+    // who opens devtools — there is deliberately no client-side fallback
+    // for the token, and none should be added. Only a real Node process
+    // environment can supply it.
+    const envToken = typeof process !== 'undefined' && process.env ? process.env.HERMES_ADAPTER_TOKEN : undefined;
 
     this.baseUrl = config?.baseUrl || envBaseUrl;
     this.token = config?.token || envToken;

@@ -1553,7 +1553,15 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
 
       let executionOutput = "";
       let modelUsed = assignedModel;
-      let toolCalls: string[] = [];
+      // F1 (SynthOS Execution Fabric, Phase 0) — toolCalls stays [] for the
+      // whole request. It used to be set per-role below to a hand-authored
+      // literal array of invented tool-name strings, naming tools that
+      // never actually ran — the only real invocation in this route is
+      // read_package_metadata() further down, which never populated this
+      // array either. There is no real per-tool invocation mechanism
+      // (ctx dot invoke) in this codebase yet; until one exists, this must
+      // never claim a tool ran.
+      const toolCalls: string[] = [];
       let lastProviderError: string | null = null;
       let hadProviderError = false;
       let providerUsageMetadata: any = null;
@@ -1570,7 +1578,6 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
 
         let rolePrompt = "";
         if (assignedAgent === "scout") {
-          toolCalls = ["web_search_grounding", "rss_parser", "dom_inspector"];
           rolePrompt = `You are the Hermes Scout Research Agent. Execute this task with real-world technical precision:
 TASK: "${taskTitle}"
 DESCRIPTION: "${description}"
@@ -1582,7 +1589,6 @@ Produce structured intelligence findings in clean Markdown format:
 3. Market & Developer Pain Points
 4. Actionable Next Steps for Dev & Scribe`;
         } else if (assignedAgent === "dev") {
-          toolCalls = ["typescript_compiler", "docker_sandbox_runner", "latency_benchmarker"];
           rolePrompt = `You are the Hermes Dev Systems Engineering Agent. Execute this engineering directive:
 TASK: "${taskTitle}"
 DESCRIPTION: "${description}"
@@ -1594,7 +1600,6 @@ Produce a production-grade Technical Implementation Blueprint & Verification Spe
 3. Execution Latency & Performance Profile (<50ms target)
 4. Automated Test Harness & Verification Criteria`;
         } else if (assignedAgent === "reach") {
-          toolCalls = ["distribution_modeler", "viral_hook_generator", "seo_aeo_indexer"];
           rolePrompt = `You are the Hermes Reach Growth & Distribution Agent. Execute this GTM directive:
 TASK: "${taskTitle}"
 DESCRIPTION: "${description}"
@@ -1605,7 +1610,6 @@ Produce a high-leverage Distribution & Go-To-Market Plan in Markdown:
 3. Viral Demo & Launch Mechanism
 4. Growth Metric Targets & Retention Loops`;
         } else if (assignedAgent === "analytics") {
-          toolCalls = ["sql_telemetry_aggregator", "token_economics_calculator", "tam_matrix"];
           rolePrompt = `You are the Hermes Analytics & Token Optimization Agent. Execute this analysis:
 TASK: "${taskTitle}"
 DESCRIPTION: "${description}"
@@ -1616,7 +1620,6 @@ Produce an analytical telemetry and unit economics breakdown in Markdown:
 3. Total Addressable Market (TAM) & Competitive Positioning
 4. Strategic Recommendations`;
         } else if (assignedAgent === "scribe") {
-          toolCalls = ["obsidian_vault_writer", "wikilinks_mesh_generator", "markdown_compiler"];
           rolePrompt = `You are the Hermes Scribe Knowledge Architect. Synthesize this task into an Obsidian Vault Memo:
 TASK: "${taskTitle}"
 DESCRIPTION: "${description}"
@@ -1627,7 +1630,6 @@ Produce a comprehensive Obsidian Knowledge Graph Document with at least 5 [[wiki
 3. Interconnected Knowledge Mesh ([[Architecture/Agentic-OS]], [[Aegis-Receipts/Verification]], etc.)
 4. Permanent Knowledge Base Takeaways`;
         } else {
-          toolCalls = ["guardian_aegis_auditor", "cryptographic_signer", "board_db_committer"];
           rolePrompt = `You are the Hermes Orchestrator Master Agent. Conduct an executive audit and sign-off:
 TASK: "${taskTitle}"
 DESCRIPTION: "${description}"
@@ -1644,7 +1646,6 @@ Produce an Orchestrator Executive Sign-Off in Markdown:
           `${taskTitle} ${description}`
         );
         if (isPackageVersionRequest) {
-          toolCalls = ["read_package_metadata", "obsidian_vault_writer"];
           const packageMetadataResult = read_package_metadata();
           rolePrompt = `You are the SynthOS Runtime Worker Agent.
 TASK: "${taskTitle}"
