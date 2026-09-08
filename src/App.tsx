@@ -1798,16 +1798,23 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
 
           {/* Individual Specialized Agent Views */}
           {isAgentTab(activeTab) && (
-            <AgentView
-              agent={agents[getAgentRoleFromTab(activeTab)]}
-              tasks={kanbanTasks}
-              models={models}
-              onSendQuery={handleSendQuery}
-              onAddTask={handleAddKanbanTask}
-              onUpdateTask={handleUpdateKanbanTask}
-              onPushNoteToObsidian={(title, content, tags) => handleAddNoteToVault(title, content, tags, 'Agent-Syntheses')}
-              onUpdateAgent={handleUpdateAgent}
-            />
+            agents[getAgentRoleFromTab(activeTab)] ? (
+              <AgentView
+                agent={agents[getAgentRoleFromTab(activeTab)]}
+                tasks={kanbanTasks}
+                models={models}
+                onSendQuery={handleSendQuery}
+                onAddTask={handleAddKanbanTask}
+                onUpdateTask={handleUpdateKanbanTask}
+                onPushNoteToObsidian={(title, content, tags) => handleAddNoteToVault(title, content, tags, 'Agent-Syntheses')}
+                onUpdateAgent={handleUpdateAgent}
+              />
+            ) : (
+              <div className="p-8 text-sm text-[#8E94B8]">
+                <p className="text-[#F3F4F9] font-semibold mb-1">Agent not configured</p>
+                <p>No roster entry exists for "{getAgentRoleFromTab(activeTab)}". This workspace has a navigation entry but no matching AGENT_DEFINITIONS record, so there is nothing real to show yet.</p>
+              </div>
+            )
           )}
 
           {/* Obsidian Knowledge Mesh & Vaults */}

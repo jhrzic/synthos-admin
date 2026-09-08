@@ -610,6 +610,45 @@ export const AGENT_DEFINITIONS: Record<string, AgentInfo> = {
     temperature: 0.1
   },
 
+  // Restored from src/data/mockData.ts's INITIAL_AGENTS (the pre-refactor
+  // agent roster) — this entry was never carried over when AGENT_DEFINITIONS
+  // was split out, even though SidebarNav's 'agent-gemini' tab and
+  // getAgentRoleFromTab/getWorkspaceFromTab in App.tsx have always routed to
+  // role 'gemini'. That left agents['gemini'] undefined, and AgentView reads
+  // agent.systemPrompt unconditionally on mount, so opening the Gemini
+  // workspace crashed with "Cannot read properties of undefined (reading
+  // 'systemPrompt')" from the very first commit in this file's history.
+  'gemini': {
+    id: 'agent-gemini',
+    tabKey: 'agent-gemini',
+    name: 'Gemini 3.1 Pro / Flash',
+    role: 'gemini',
+    title: 'Multimodal Research & Realtime Context Engine',
+    description: 'Processes large-scale multimodal inputs, audio streams, search grounding, and complex algorithmic tasks with 1M token context windows.',
+    avatarColor: '#1A73E8',
+    iconName: 'Sparkles',
+    assignedModel: 'gemini',
+    secondaryModel: 'chatgpt',
+    status: 'active',
+    telegramThreadId: 117,
+    telegramChannelName: '#gemini-multimodal',
+    workspacePath: '/agents/gemini/workspace',
+    memoryFileSize: '48.2 KB (multimodal-index.json)',
+    isolatedWorkspace: true,
+    officeCoordinates: { x: -1, y: -2, z: 0 },
+    systemPrompt: `You are Google Gemini 3.1 in Hermes AgentOS. You specialize in multimodal analysis, search-grounded deep synthesis, and high-throughput real-time streaming.`,
+    capabilities: [
+      'Multimodal Audio/Visual Understanding',
+      'Google Search Grounding & Citation',
+      '1,000,000 Token Context Window',
+      'Live WebSocket Streaming API Integration',
+      'Fast Structured Output Parsing'
+    ],
+    activeTasksCount: 3,
+    completedTasksCount: 128,
+    lastActive: 'Just now'
+  },
+
   'openclaw': {
     id: 'agent-openclaw',
     tabKey: 'agent-openclaw',
