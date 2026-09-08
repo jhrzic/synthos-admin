@@ -6,25 +6,28 @@ import os from 'os';
 import net from 'node:net';
 
 // ---------------------------------------------------------------------------
-// SynthOS Execution Fabric — Step 1a characterization, updated in Phase 0b.
+// SynthOS Execution Fabric — Step 1a characterization, updated in Phase 0b,
+// then updated again for the Step 1b extraction.
 //
 // Purpose (per the binding spec, Section 6, Step 1a): snapshot every
-// externally observable side effect of POST /api/execute-agent-task
-// (server.ts:~1453-2160). This is the behavioral oracle Step 1b must match.
+// externally observable side effect of POST /api/execute-agent-task. This is
+// the behavioral oracle every later step must match.
 //
 // History: the original Step 1a commit (e2f0697) characterized the route as
-// it existed then and found two live-provable, unfixed bugs (a cross-
-// workspace task-id hijack, and gate ordering that masks the unsupported-
-// model check) plus two source-only findings (a receipt workspaceId that
-// could diverge from the task's real workspace, and an artifact-filename
-// collision). e2f0697 itself is kept unchanged in git history as the
-// historical pre-fix record. PHASE 0b then fixed the task-hijack and the
-// receipt-workspaceId-divergence bugs (both proven live below, not just
-// re-asserted) and deliberately left the gate-ordering and filename-
-// collision findings open (still characterized below, now explicitly
-// labeled DEFERRED rather than unfixed-and-unlabeled). This file is the
-// CURRENT oracle — it reflects the code as it stands right now, after
-// Phase 0b, not e2f0697's snapshot.
+// it existed then, inline in server.ts, and found two live-provable, unfixed
+// bugs (a cross-workspace task-id hijack, and gate ordering that masks the
+// unsupported-model check) plus two source-only findings (a receipt
+// workspaceId that could diverge from the task's real workspace, and an
+// artifact-filename collision). e2f0697 itself is kept unchanged in git
+// history as the historical pre-fix record. PHASE 0b then fixed the
+// task-hijack and receipt-workspaceId-divergence bugs in place, still inline
+// in server.ts (both proven live below, not just re-asserted), leaving the
+// gate-ordering and filename-collision findings open and explicitly labeled
+// DEFERRED. STEP 1b then extracted the route's entire logic out of server.ts
+// into lib/fabric/kernel.ts — server.ts is now a thin adapter around it (see
+// the STATIC describe blocks below for exactly which file each assertion now
+// reads). This file is the CURRENT oracle throughout — it reflects the code
+// as it stands right now, not any prior commit's snapshot.
 //
 // Method: server.ts calls startServer() unconditionally at module load and
 // binds a real port (server.ts:5773) — it is not structured for in-process
@@ -35,7 +38,8 @@ import net from 'node:net';
 // `tsx server.ts` as a child process against an isolated SQLite file
 // (SYNTHOS_DB_PATH) and a free port, then makes real HTTP requests to it and
 // inspects the real DB/filesystem afterward — a true black-box
-// characterization, not a description of the source code.
+// characterization of the real Express route (which internally now calls
+// lib/fabric/kernel.ts), not a description of the source code.
 //
 // Environment-imposed scope split (recorded here, not worked around):
 // - No GEMINI_API_KEY exists in this environment (confirmed: the real
@@ -413,6 +417,17 @@ describe('LIVE 5 (PHASE 0b FIX — was SURPRISING/UNSAFE in e2f0697, now closed)
 // ===========================================================================
 
 const serverContent = fs.readFileSync(path.resolve(REPO_ROOT, 'server.ts'), 'utf-8');
+// STEP 1b relocated /api/execute-agent-task's logic out of server.ts into
+// lib/fabric/kernel.ts — server.ts is now a thin INGRESS_EXTERNAL_API
+// adapter (auth middleware, resolving resolvedWorkspaceId from real Express
+// auth state, mapping the kernel's {status, body} onto the HTTP response).
+// STATIC assertions about kernel LOGIC (ordering, branches, receipt
+// construction) now read kernelContent; assertions about the ROUTE WRAPPER
+// itself (auth bypass, resolvedWorkspaceId derivation) still read
+// executeAgentTaskRouteSlice(). Both are the same real files this run
+// verified compile and pass the full suite against — not a description
+// written from memory.
+const kernelContent = fs.readFileSync(path.resolve(REPO_ROOT, 'lib/fabric/kernel.ts'), 'utf-8');
 function executeAgentTaskRouteSlice(): string {
   const idx = serverContent.indexOf('app.post("/api/execute-agent-task"');
   const nextRoute = serverContent.indexOf('\n  app.', idx + 10);
@@ -420,20 +435,17 @@ function executeAgentTaskRouteSlice(): string {
 }
 
 describe('STATIC: provider-error and empty-response failure branches (unreachable live here)', () => {
-  const slice = executeAgentTaskRouteSlice();
-
   it('a thrown provider error -> 502 MODEL_PROVIDER_UNAVAILABLE; an empty-but-non-throwing response -> 502 EMPTY_PROVIDER_RESPONSE; both still write PROVIDER_FAILED + FAILED, still no artifact/review/receipt', () => {
-    expect(slice).toContain('reason: "MODEL_PROVIDER_UNAVAILABLE"');
-    expect(slice).toContain('reason: "EMPTY_PROVIDER_RESPONSE"');
-    expect(slice).toMatch(/if \(!executionOutput\) \{[\s\S]*?updateTaskStatus\(taskId, "FAILED", undefined, resolvedWorkspaceId\);[\s\S]*?eventType: "PROVIDER_FAILED"/);
+    expect(kernelContent).toContain('reason: "MODEL_PROVIDER_UNAVAILABLE"');
+    expect(kernelContent).toContain('reason: "EMPTY_PROVIDER_RESPONSE"');
+    expect(kernelContent).toMatch(/if \(!executionOutput\) \{[\s\S]*?updateTaskStatus\(taskId, "FAILED", undefined, resolvedWorkspaceId\);[\s\S]*?eventType: "PROVIDER_FAILED"/);
   });
 });
 
-describe('STATIC: the success path (VERIFIED) — ordering that Step 1b must preserve', () => {
-  const slice = executeAgentTaskRouteSlice();
-
-  it('exact order: PROVIDER_COMPLETED -> disk write -> recordArtifact (DB+disk) -> ARTIFACT_SAVED -> AWAITING_VERIFICATION -> Aegis run -> recordQualityReview -> (VERIFIED branch) AWAITING_RECEIPT -> AEGIS_REVIEWED -> sign -> verify -> recordReceipt -> RECEIPT_CREATED -> DONE -> TASK_COMPLETED -> KIL (best-effort) -> memory index (best-effort)', () => {
+describe('STATIC: the success path (VERIFIED) — ordering that Step 2+ must preserve', () => {
+  it('exact order: model.gemini invocation -> PROVIDER_COMPLETED -> disk write -> recordArtifact (DB+disk) -> ARTIFACT_SAVED -> AWAITING_VERIFICATION -> Aegis run -> recordQualityReview -> (VERIFIED branch) AWAITING_RECEIPT -> AEGIS_REVIEWED -> sign -> verify -> recordReceipt -> RECEIPT_CREATED -> DONE -> TASK_COMPLETED -> KIL (best-effort) -> memory index (best-effort)', () => {
     const order = [
+      'await ctx.invoke("model.gemini", async () => {',
       'eventType: "PROVIDER_COMPLETED"',
       'fs.writeFileSync(vaultDiskPath',
       'recordArtifact(',
@@ -454,45 +466,51 @@ describe('STATIC: the success path (VERIFIED) — ordering that Step 1b must pre
     ];
     let cursor = 0;
     for (const marker of order) {
-      const found = slice.indexOf(marker, cursor);
+      const found = kernelContent.indexOf(marker, cursor);
       expect(found, `expected to find "${marker}" after position ${cursor}`).toBeGreaterThan(-1);
       cursor = found;
     }
   });
 
   it('the artifact disk path is derived from the task title alone, NOT workspaceId or taskId (DEFERRED — Phase 0b, item B: deferred to Step 2\'s writeWorkspaceArtifact, not fixed here): two tasks in ANY workspaces sharing a sanitized title silently overwrite each other\'s file on disk', () => {
-    expect(slice).toContain('const vaultRelPath = `Startup-Theses/${sanitizedTitle}.md`');
-    expect(slice).not.toMatch(/vaultRelPath = `.*workspaceId.*Startup-Theses/);
-    expect(slice).not.toMatch(/vaultRelPath = `.*taskId.*Startup-Theses/);
+    expect(kernelContent).toContain('const vaultRelPath = `Startup-Theses/${sanitizedTitle}.md`');
+    expect(kernelContent).not.toMatch(/vaultRelPath = `.*workspaceId.*Startup-Theses/);
+    expect(kernelContent).not.toMatch(/vaultRelPath = `.*taskId.*Startup-Theses/);
   });
 
   it('KIL projection and memory indexing are both isolated in their own try/catch and cannot affect task completion, the receipt, or the response (by design, confirmed at the source level)', () => {
-    expect(slice).toMatch(/try \{\s*\n\s*const gate = verifyTaskAtGate\(/);
-    expect(slice).toMatch(/\} catch \(kilErr: any\) \{\s*\n\s*console\.warn\("\[KIL\] Gate verification skipped:"/);
-    expect(slice).toMatch(/try \{\s*\n\s*indexVaultArtifact\(resolvedWorkspaceId, persistedArtifact\.artifact_id\);/);
-    expect(slice).toMatch(/\} catch \(indexErr: any\) \{\s*\n\s*console\.warn\("\[Memory Index\] Indexing skipped:"/);
+    expect(kernelContent).toMatch(/try \{\s*\n\s*const gate = verifyTaskAtGate\(/);
+    expect(kernelContent).toMatch(/\} catch \(kilErr: any\) \{\s*\n\s*console\.warn\("\[KIL\] Gate verification skipped:"/);
+    expect(kernelContent).toMatch(/try \{\s*\n\s*indexVaultArtifact\(resolvedWorkspaceId, persistedArtifact\.artifact_id\);/);
+    expect(kernelContent).toMatch(/\} catch \(indexErr: any\) \{\s*\n\s*console\.warn\("\[Memory Index\] Indexing skipped:"/);
   });
 });
 
-describe('STATIC (PHASE 0b FIX — was SURPRISING/UNSAFE in e2f0697, now closed): the signed receipt\'s workspaceId is now the single canonical value, never independently re-derived', () => {
-  const slice = executeAgentTaskRouteSlice();
-
-  it('the receipt payload reuses resolvedWorkspaceId — the exact same value createInitialTask/verifyTaskAtGate/indexVaultArtifact all use — with no second, independent req.body.workspaceId read anywhere in this route', () => {
-    expect(slice).not.toContain('req.body?.workspaceId');
-    expect(slice).not.toContain('req.body.workspaceId');
-    const canonicalPayloadIdx = slice.indexOf('const canonicalPayload: CanonicalReceiptPayload = {');
+describe('STATIC (PHASE 0b FIX, preserved through Step 1b): the signed receipt\'s workspaceId is the single canonical value, never independently re-derived', () => {
+  it('the receipt payload (in the kernel) reuses resolvedWorkspaceId — the exact same value createInitialTask/verifyTaskAtGate/indexVaultArtifact all use — with no second, independent req.body.workspaceId read anywhere in the kernel', () => {
+    expect(kernelContent).not.toContain('req.body?.workspaceId');
+    expect(kernelContent).not.toContain('req.body.workspaceId');
+    // The kernel has no `req` at all — it takes rawBody/resolvedWorkspaceId/ctx.
+    expect(kernelContent).not.toContain('req.body');
+    const canonicalPayloadIdx = kernelContent.indexOf('const canonicalPayload: CanonicalReceiptPayload = {');
     expect(canonicalPayloadIdx).toBeGreaterThan(-1);
-    const nextConstructorCall = slice.indexOf('canonicalizePayload(canonicalPayload)', canonicalPayloadIdx);
-    const payloadBlock = slice.slice(canonicalPayloadIdx, nextConstructorCall);
+    const nextConstructorCall = kernelContent.indexOf('canonicalizePayload(canonicalPayload)', canonicalPayloadIdx);
+    const payloadBlock = kernelContent.slice(canonicalPayloadIdx, nextConstructorCall);
     expect(payloadBlock).toContain('workspaceId: resolvedWorkspaceId,');
   });
 
-  it('resolvedWorkspaceId itself is defined once, from the real authenticated/verified membership when the auth middleware ran, falling back to the request body only for the internal-service-token bypass (which skips that middleware by design)', () => {
-    expect(slice).toContain('const resolvedWorkspaceId = (req as AuthedRequest).authWorkspaceId ?? workspaceId;');
-    // Every write in the route goes through this one value now — createInitialTask,
-    // the workspace-ownership gate, both KIL calls, and memory indexing.
-    const usages = (slice.match(/resolvedWorkspaceId/g) || []).length;
-    expect(usages).toBeGreaterThanOrEqual(8); // 1 declaration + gate check + createInitialTask + 11 updateTaskStatus + 14 recordActivityEvent + receipt + 2 KIL + 1 memory-index, conservatively floored
+  it('resolvedWorkspaceId is derived once in the route wrapper (server.ts), from the real authenticated/verified membership when the auth middleware ran, falling back to the request body only for the internal-service-token bypass (which skips that middleware by design) — then passed into the kernel as a plain parameter, never re-derived inside it', () => {
+    const routeSlice = executeAgentTaskRouteSlice();
+    expect(routeSlice).toContain(
+      'const resolvedWorkspaceId =\n        (req as AuthedRequest).authWorkspaceId ?? ((req.body || {}).workspaceId || "ws-synthos-primary");'
+    );
+    expect(routeSlice).toContain('executeAgentTask(req.body, resolvedWorkspaceId, ctx)');
+    // Inside the kernel, resolvedWorkspaceId is only ever a function
+    // parameter, read many times, assigned nowhere.
+    expect(kernelContent).toContain('resolvedWorkspaceId: string,');
+    expect(kernelContent).not.toMatch(/const resolvedWorkspaceId =/);
+    const usages = (kernelContent.match(/resolvedWorkspaceId/g) || []).length;
+    expect(usages).toBeGreaterThanOrEqual(8); // 1 parameter + gate check + createInitialTask + 11 updateTaskStatus + 14 recordActivityEvent + receipt + 2 KIL + 1 memory-index, conservatively floored
   });
 });
 
@@ -514,8 +532,25 @@ describe('LIVE 6 (PHASE 0b — new regression): the receipt\'s workspaceId match
   });
 });
 
-describe('STATIC: toolCalls after Phase 0 (F1) — confirmed honest, cross-referenced against the live BLOCKED_MISSING_CREDENTIAL response', () => {
-  it('toolCalls is a fixed const [] in the route source (Phase 0, commit c0083dc) — the live response in LIVE 3 never included the field at all because BLOCKED_MISSING_CREDENTIAL returns before the response object containing toolCalls is ever built; this static check pins the source guarantee for the path this environment cannot reach', () => {
-    expect(executeAgentTaskRouteSlice()).toContain('const toolCalls: string[] = [];');
+describe('STATIC (STEP 1b — the one permitted evidence correction over Phase 0/F1): toolCalls now comes from real ctx.invoke() observations, not a fixed empty array', () => {
+  it('toolCalls in the kernel\'s success response is ctx.getInvocations().map(name) — real observation, never a literal, never a per-role fabrication', () => {
+    expect(kernelContent).toContain('toolCalls: ctx.getInvocations().map((r) => r.name),');
+    expect(kernelContent).not.toContain('const toolCalls: string[] = [];');
+  });
+
+  it('this changes nothing observable in this environment: BLOCKED_MISSING_CREDENTIAL (the only reachable outcome, per LIVE 3 above) returns before ctx.invoke() is ever called, so ctx.getInvocations() is empty and toolCalls would still be [] if that response included the field at all — and it does not (LIVE 3 already asserts the exact response body, which has no toolCalls key)', () => {
+    const apiKeyCheckIdx = kernelContent.indexOf('if (!apiKey) {');
+    const invokeIdx = kernelContent.indexOf('await ctx.invoke("model.gemini"');
+    expect(apiKeyCheckIdx).toBeGreaterThan(-1);
+    expect(invokeIdx).toBeGreaterThan(apiKeyCheckIdx); // the only live-reachable return in this environment happens first
+  });
+
+  it('the receipt\'s signed payload is untouched by this change — CanonicalReceiptPayload has no toolCalls/toolsInvoked field, so the cryptographically signed bytes are identical whether or not ctx observed an invocation; only the surrounding HTTP response JSON differs', () => {
+    const persistenceContent = fs.readFileSync(path.resolve(REPO_ROOT, 'lib/persistence.ts'), 'utf-8');
+    const idx = persistenceContent.indexOf('export interface CanonicalReceiptPayload {');
+    expect(idx).toBeGreaterThan(-1);
+    const end = persistenceContent.indexOf('}', idx);
+    const receiptTypeBody = persistenceContent.slice(idx, end);
+    expect(receiptTypeBody).not.toMatch(/toolCalls|toolsInvoked/);
   });
 });

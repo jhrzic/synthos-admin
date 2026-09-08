@@ -241,6 +241,15 @@ function recordCircuitSuccess(model: string): void {
   circuitBreakerState.set(model, { consecutiveFailures: 0, openUntil: null });
 }
 
+// STEP 1b (SynthOS Execution Fabric) — relocated here from a local const in
+// server.ts (unchanged value, unchanged meaning: this file's own comments
+// above already referred to "DEFAULT_CANDIDATE_MODELS" as a routing concept
+// living conceptually in this module). server.ts's 5 existing call sites
+// were updated to import this instead of declaring their own copy;
+// lib/fabric/kernel.ts is the one new consumer that needed a real, shared
+// source for it rather than a duplicated literal.
+export const DEFAULT_CANDIDATE_MODELS = ["gemini-3.1-flash-lite"];
+
 export interface FailoverAttemptLog {
   model: string;
   attempt: number;

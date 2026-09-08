@@ -111,17 +111,17 @@ describe('SYNTHOS PROVIDER IDENTITY RULE: non-Gemini requests must never silentl
     expect(route.indexOf('classifyModelRequest(model)')).toBeLessThan(route.indexOf('candidateModels'));
   });
 
-  it('/api/execute-agent-task gates on classifyModelRequest before the task is marked RUNNING', () => {
-    const route = serverContent.slice(
-      serverContent.indexOf('app.post("/api/execute-agent-task"'),
-      serverContent.indexOf('app.get("/api/graphs"')
-    );
-    expect(route).toContain('classifyModelRequest(assignedModel)');
-    expect(route).toContain("modelClassification.provider === \"UNSUPPORTED\"");
-    expect(route.indexOf('classifyModelRequest(assignedModel)')).toBeLessThan(route.indexOf('updateTaskStatus(taskId, "RUNNING"'));
+  it('lib/fabric/kernel.ts (Step 1b: extracted from /api/execute-agent-task) gates on classifyModelRequest before the task is marked RUNNING', () => {
+    // STEP 1b relocated this route's logic into lib/fabric/kernel.ts —
+    // server.ts is now a thin adapter with no classifyModelRequest call of
+    // its own. This assertion follows the logic to where it actually lives.
+    const kernelContent = fs.readFileSync(path.resolve(process.cwd(), 'lib/fabric/kernel.ts'), 'utf-8');
+    expect(kernelContent).toContain('classifyModelRequest(assignedModel)');
+    expect(kernelContent).toContain("modelClassification.provider === \"UNSUPPORTED\"");
+    expect(kernelContent.indexOf('classifyModelRequest(assignedModel)')).toBeLessThan(kernelContent.indexOf('updateTaskStatus(taskId, "RUNNING"'));
     // The old exclude-list hack (silent Gemini fallback for claude/o3/sonar
     // while leaving deepseek/hermes/perplexity/chatgpt unguarded) must be gone
-    expect(route).not.toContain('!v.includes("claude")');
+    expect(kernelContent).not.toContain('!v.includes("claude")');
   });
 
   it('server.ts no longer defines its own permissive model resolution — it imports the shared classifier', () => {

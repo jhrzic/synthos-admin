@@ -38,6 +38,13 @@ import path from 'path';
 const serverContent = fs.readFileSync(path.resolve(process.cwd(), 'server.ts'), 'utf-8');
 const appContent = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf-8');
 const hermesAdapterContent = fs.readFileSync(path.resolve(process.cwd(), 'src/services/hermesAdapter.ts'), 'utf-8');
+// STEP 1b relocated /api/execute-agent-task's logic out of server.ts into
+// lib/fabric/kernel.ts (server.ts is now a thin adapter around it) — F1's
+// logic-level assertions below read the kernel now. This file is not
+// re-litigating that move (see test/fabric-characterization.test.ts and the
+// Step 1b commit for that); it only updates F1's own assertions to point at
+// where the logic actually lives today.
+const kernelContent = fs.readFileSync(path.resolve(process.cwd(), 'lib/fabric/kernel.ts'), 'utf-8');
 
 function executeAgentTaskRouteSlice(): string {
   const idx = serverContent.indexOf('app.post("/api/execute-agent-task"');
@@ -46,16 +53,16 @@ function executeAgentTaskRouteSlice(): string {
   return serverContent.slice(idx, nextRoute);
 }
 
-describe('F1: /api/execute-agent-task never claims a tool ran (server.ts:1452)', () => {
-  it('toolCalls is declared once, as an empty array, and never reassigned', () => {
-    const slice = executeAgentTaskRouteSlice();
-    expect(slice).toContain('const toolCalls: string[] = [];');
-    expect(slice).not.toMatch(/toolCalls\s*=\s*\[/); // no reassignment anywhere, incl. the fixed [] declaration itself
-    expect(slice).not.toMatch(/let toolCalls/);
+describe('F1: /api/execute-agent-task never claims a tool ran (originally server.ts:1452, now lib/fabric/kernel.ts post-Step-1b)', () => {
+  it('SUPERSEDED BY STEP 1b, not re-broken: toolCalls is no longer a permanently-fixed empty array — it is derived from real ctx.invoke() observations, which is the honest mechanism F1\'s own comment said did not exist yet ("no real per-tool invocation mechanism... until one exists, this must never claim a tool ran"). One now exists, scoped to exactly one real call site.', () => {
+    expect(kernelContent).toContain('toolCalls: ctx.getInvocations().map((r) => r.name),');
+    // The historical Phase 0 literal is gone from the kernel — replaced by
+    // the ctx.invoke-derived line above, not reintroduced as a second
+    // fabrication.
+    expect(kernelContent).not.toContain('const toolCalls: string[] = [];');
   });
 
-  it('none of the seven previously-hardcoded fabricated tool names remain anywhere in this route', () => {
-    const slice = executeAgentTaskRouteSlice();
+  it('none of the seven previously-hardcoded fabricated tool names remain anywhere in the kernel', () => {
     const fabricatedToolNames = [
       'web_search_grounding', 'rss_parser', 'dom_inspector',
       'typescript_compiler', 'docker_sandbox_runner', 'latency_benchmarker',
@@ -65,22 +72,28 @@ describe('F1: /api/execute-agent-task never claims a tool ran (server.ts:1452)',
       'guardian_aegis_auditor', 'cryptographic_signer', 'board_db_committer',
     ];
     for (const name of fabricatedToolNames) {
-      expect(slice).not.toContain(`"${name}"`);
+      expect(kernelContent).not.toContain(`"${name}"`);
     }
   });
 
-  it('the real read_package_metadata() call is untouched — F1 removes a false claim, not a real capability', () => {
-    const slice = executeAgentTaskRouteSlice();
-    expect(slice).toContain('const packageMetadataResult = read_package_metadata();');
+  it('the real read_package_metadata() call is untouched — F1 removed a false claim, not a real capability, and Step 1b moved but did not alter it', () => {
+    expect(kernelContent).toContain('const packageMetadataResult = read_package_metadata();');
   });
 
-  it('no ctx.invoke mechanism exists yet anywhere in this codebase (the condition F1 is gated on)', () => {
-    expect(serverContent).not.toMatch(/ctx\.invoke/);
+  it('the real ctx.invoke() call site in the kernel wraps the real existing Gemini retry loop, named "model.gemini" — not a fabricated or per-role tool name', () => {
+    expect(kernelContent).toContain('await ctx.invoke("model.gemini", async () => {');
+    // The wrapped block still contains the real, unchanged retry loop —
+    // ctx.invoke() did not replace it with a different mechanism.
+    const invokeIdx = kernelContent.indexOf('await ctx.invoke("model.gemini"');
+    const wrappedBlock = kernelContent.slice(invokeIdx, invokeIdx + 8000);
+    expect(wrappedBlock).toContain('for (const m of modelsToTry) {');
+    expect(wrappedBlock).toContain('ai.models.generateContent({');
   });
 
-  it('the response still returns toolCalls (contract preserved) — it is just always empty now', () => {
+  it('the thin route wrapper in server.ts contains no toolCalls logic of its own — it only maps the kernel\'s {status, body} onto the HTTP response', () => {
     const slice = executeAgentTaskRouteSlice();
-    expect(slice).toMatch(/\btoolCalls,/);
+    expect(slice).not.toContain('toolCalls');
+    expect(slice).toContain('executeAgentTask(req.body, resolvedWorkspaceId, ctx)');
   });
 });
 
