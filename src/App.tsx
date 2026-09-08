@@ -1,4 +1,4 @@
-import React, { useState, useEffect, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
 import { 
   ActiveTab, AIModelInfo, ObsidianNote, ObsidianVault, 
   BotTask, JarvisSettings, AgentInfo, KanbanTask, ModelRouterRule, AgentRole,
@@ -355,6 +355,20 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
   useEffect(() => { setJarvisSessionId(null); }, [activeWorkspaceId]);
   const handleNewJarvisSession = () => setJarvisSessionId(null);
 
+  // STEP 6 corrective pass (B2) — the one real in-flight guard shared by
+  // BOTH Jarvis surfaces (JarvisView's typed submission and
+  // GlobalVoiceOverlay's voice dispatch both call this same function),
+  // so "voice and typed input share the same guard" holds structurally
+  // rather than by convention. A ref, not state: state updates are
+  // batched/async, so two calls fired in the same synchronous tick (a
+  // real double-click, or a click racing a voice callback) would both
+  // still read a stale `false` before either commit — a ref is read/set
+  // synchronously and closes that race. This is a real guard, not a
+  // debounce: a duplicate call while one is in flight is rejected
+  // outright (returns null), never queued or delayed.
+  const jarvisInFlightRef = useRef(false);
+  const [jarvisRequestInFlight, setJarvisRequestInFlight] = useState(false);
+
   // Real, workspace-scoped Jarvis admin-command dispatcher. Jarvis's own
   // text/voice submission uses this instead of handleSendQuery — the
   // backend route itself decides whether the directive is a supported admin
@@ -367,7 +381,29 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
   // conversation history that survives reload, not just React state. A
   // persistence failure here never blocks the directive itself from
   // returning a reply.
-  const handleJarvisCommand = async (command: string, messageType: 'text' | 'voice_transcript' = 'text'): Promise<{ reply: string; spokenSummary: string | null }> => {
+  //
+  // Returns null (never throws, never fabricates a response) when a
+  // request is already in flight — the guard's real rejection signal,
+  // which every caller must treat as "ignored," not "failed."
+  const handleJarvisCommand = async (command: string, messageType: 'text' | 'voice_transcript' = 'text'): Promise<{ reply: string; spokenSummary: string | null } | null> => {
+    if (jarvisInFlightRef.current) {
+      return null;
+    }
+    jarvisInFlightRef.current = true;
+    setJarvisRequestInFlight(true);
+    try {
+      return await dispatchJarvisCommand(command, messageType);
+    } finally {
+      // B2 — the guard clears on every real outcome: success, failure,
+      // blocked/degraded result, or network error. dispatchJarvisCommand
+      // below never throws (every branch is caught internally), so this
+      // finally is the one real clear point.
+      jarvisInFlightRef.current = false;
+      setJarvisRequestInFlight(false);
+    }
+  };
+
+  const dispatchJarvisCommand = async (command: string, messageType: 'text' | 'voice_transcript' = 'text'): Promise<{ reply: string; spokenSummary: string | null }> => {
     let sessionId = jarvisSessionId;
     try {
       if (!sessionId) {
@@ -408,10 +444,15 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
       // reasoning. Previously omitted entirely — every request reasoned
       // with zero awareness of what was said earlier in the same session,
       // even though that history was already being persisted above.
+      // B2 — one real key per logical submission attempt, generated here
+      // (inside the already-guarded dispatchJarvisCommand, reachable only
+      // once at a time) so the server can reuse the canonical task-table
+      // idempotency check if this exact request is ever resubmitted.
+      const idempotencyKey = `jarvis-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       const res = await fetch('/api/jarvis/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command, workspaceId: activeWorkspaceId, sessionId: sessionId || null }),
+        body: JSON.stringify({ command, workspaceId: activeWorkspaceId, sessionId: sessionId || null, idempotencyKey }),
       });
       const data = await res.json();
       if (!res.ok || data.success === false) {

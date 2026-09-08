@@ -10,7 +10,28 @@ export interface VoiceConfig {
   speed?: number;
 }
 
+// STEP 6 corrective pass (B1) — module-level so every caller of this
+// shared service (GlobalVoiceOverlay, HermesChatView, ApolloVoiceView,
+// MasterAdminView, VoiceSettingsModal) cancels through the same real
+// state, rather than each tracking its own. Never allow overlapping
+// Jarvis/voice speech: a new speakText() call always stops whatever this
+// service was previously playing before it starts anything new.
+let activeAudio: HTMLAudioElement | null = null;
+
+/** Stops any audio or Web Speech utterance this service is currently playing. Exported so a caller (e.g. a new-request guard) can stop speech explicitly, not only implicitly on the next speakText() call. */
+export function stopSpeaking(): void {
+  if (activeAudio) {
+    try { activeAudio.pause(); } catch { /* best effort */ }
+    activeAudio = null;
+  }
+  if (typeof window !== 'undefined' && window.speechSynthesis) {
+    window.speechSynthesis.cancel();
+  }
+}
+
 export async function speakText(text: string, config: VoiceConfig): Promise<void> {
+  stopSpeaking();
+
   // If Web Speech is explicitly selected
   if (config.provider === 'web_speech') {
     return playWebSpeech(text, config.speed);
@@ -48,17 +69,21 @@ export async function speakText(text: string, config: VoiceConfig): Promise<void
 
     const audioUrl = URL.createObjectURL(blob);
     const audio = new Audio(audioUrl);
-    
+    activeAudio = audio;
+
     return new Promise((resolve) => {
       audio.onended = () => {
+        if (activeAudio === audio) activeAudio = null;
         URL.revokeObjectURL(audioUrl);
         resolve();
       };
       audio.onerror = () => {
+        if (activeAudio === audio) activeAudio = null;
         URL.revokeObjectURL(audioUrl);
         playWebSpeech(text, config.speed).then(resolve);
       };
       audio.play().catch(() => {
+        if (activeAudio === audio) activeAudio = null;
         URL.revokeObjectURL(audioUrl);
         playWebSpeech(text, config.speed).then(resolve);
       });

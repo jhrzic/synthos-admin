@@ -105,12 +105,19 @@ describe('Jarvis conversation memory: server-side wiring is real, not decorative
 
 describe('Jarvis conversation memory: client-side wiring passes the real session id', () => {
   it('handleJarvisCommand sends sessionId to /api/jarvis/command (it did not before this task)', () => {
-    const idx = appContent.indexOf('const handleJarvisCommand');
+    // STEP 6 (B2) wrapped the original function in a shared in-flight
+    // guard (handleJarvisCommand) that delegates to the renamed
+    // dispatchJarvisCommand, which still contains this exact fetch —
+    // anchor on the renamed function so the window isn't pushed out by
+    // the guard's own body. The body also now carries a real
+    // idempotencyKey (B2's server-side dedup key), not just sessionId.
+    const idx = appContent.indexOf('const dispatchJarvisCommand');
+    expect(idx).toBeGreaterThan(-1);
     // P3 (TTS/speech separation) added real, non-decorative code to this
     // function (spokenSummary handling) between its start and this fetch
     // call — widened from 2000 to keep margin rather than chase the exact
     // byte count on every future real addition here.
     const slice = appContent.slice(idx, idx + 3000);
-    expect(slice).toContain("body: JSON.stringify({ command, workspaceId: activeWorkspaceId, sessionId: sessionId || null })");
+    expect(slice).toContain("body: JSON.stringify({ command, workspaceId: activeWorkspaceId, sessionId: sessionId || null, idempotencyKey })");
   });
 });

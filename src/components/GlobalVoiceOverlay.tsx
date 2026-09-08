@@ -17,8 +17,8 @@ interface GlobalVoiceOverlayProps {
   settings: JarvisSettings;
   onUpdateSettings?: (newSettings: Partial<JarvisSettings>) => void;
   onSendQuery: (query: string, targetModel: string) => Promise<string>;
-  /** Real, workspace-scoped /api/jarvis/command dispatcher — see JarvisView for the same contract. `reply` is the full text (transcript/vault); `spokenSummary` is the concise, spoken-safe text (TTS) — never the same string used for both (P3). */
-  onJarvisCommand: (command: string, messageType?: 'text' | 'voice_transcript') => Promise<{ reply: string; spokenSummary: string | null }>;
+  /** Real, workspace-scoped /api/jarvis/command dispatcher — see JarvisView for the same contract. `reply` is the full text (transcript/vault); `spokenSummary` is the concise, spoken-safe text (TTS) — never the same string used for both (P3). STEP 6 (B2): null means the shared in-flight guard rejected this as a duplicate — a real no-op, not a failure. */
+  onJarvisCommand: (command: string, messageType?: 'text' | 'voice_transcript') => Promise<{ reply: string; spokenSummary: string | null } | null>;
   onAddKanbanTask?: (task: Omit<KanbanTask, 'id' | 'createdAt' | 'updatedAt' | 'subtasks'>) => void;
   onAddNoteToVault?: (title: string, content: string, tags: string[], folder?: string) => void;
   onOpenFullJarvis?: () => void;
@@ -39,6 +39,12 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
 }) => {
   const [inputText, setInputText] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  // STEP 6 corrective pass (B2) — synchronous companion to isProcessing,
+  // same rationale as JarvisView's isLoadingRef: a real double-click (or
+  // a click racing a voice callback) can fire two invocations in the same
+  // tick, both reading a stale isProcessing===false before either state
+  // update commits. This ref is the real, authoritative local guard.
+  const isProcessingRef = useRef(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [activeStage, setActiveStage] = useState<number>(0);
   const [transcriptLogs, setTranscriptLogs] = useState<Array<{ id: string; sender: 'user' | 'synthos'; text: string; time: string }>>([
@@ -94,11 +100,16 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
   }, [workspaceContext]);
 
   const handleExecuteVoiceDirective = async (directiveText: string) => {
-    if (!directiveText.trim()) return;
+    // B2 — the real, synchronous guard: reject a duplicate call outright
+    // (double-click, repeated Enter, or the voice-transcript callback
+    // racing a manual button press) rather than relying on isProcessing
+    // state, which can still be stale within the same synchronous tick.
+    if (!directiveText.trim() || isProcessingRef.current) return;
+    isProcessingRef.current = true;
 
     const userLogId = `user-${Date.now()}`;
     const timeString = new Date().toLocaleTimeString();
-    
+
     setTranscriptLogs(prev => [...prev, {
       id: userLogId,
       sender: 'user',
@@ -161,8 +172,18 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
       // classification (task/graph/receipt keywords) sees exactly what the
       // user said rather than a system-prompt wrapper that could shift or
       // mask those keywords.
-      const { reply, spokenSummary } = await onJarvisCommand(directiveText, 'voice_transcript');
-      
+      const dispatchResult = await onJarvisCommand(directiveText, 'voice_transcript');
+      if (!dispatchResult) {
+        // The shared cross-surface guard (App.tsx) rejected this as a
+        // duplicate of an already-in-flight request — a real, honest
+        // no-op. Nothing to log, save, or speak; the ref clears in
+        // finally below same as any other path.
+        isProcessingRef.current = false;
+        setIsProcessing(false);
+        return;
+      }
+      const { reply, spokenSummary } = dispatchResult;
+
       setPipelineTrace({
         workspace: workspaceContext,
         targetAgent: target,
@@ -195,6 +216,7 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
       }]);
 
       setInputText('');
+      isProcessingRef.current = false;
       setIsProcessing(false);
       setActiveStage(8); // Complete
 
@@ -218,6 +240,7 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
         setIsSpeaking(false);
       }
     } catch (e: any) {
+      isProcessingRef.current = false;
       setIsProcessing(false);
       // This path means the directive genuinely failed — never claim it
       // dispatched successfully here.

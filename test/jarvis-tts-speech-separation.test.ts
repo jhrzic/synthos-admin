@@ -45,10 +45,14 @@ describe('1/3: only the concise spokenSummary ever reaches speakText — never t
   it('JarvisView never calls speakText with the raw `reply` returned from onJarvisCommand', () => {
     // The only speakText(reply...) call in this file must not be the one
     // fed by executeDirective's destructured `reply` — it must use the
-    // derived `spoken` (spokenSummary-or-fallback) local instead.
-    const idx = jarvisViewContent.indexOf('const { reply, spokenSummary } = await onJarvisCommand(query);');
+    // derived `spoken` (spokenSummary-or-fallback) local instead. STEP 6
+    // (B2) inserted a null-check (a duplicate-submission no-op) between
+    // the onJarvisCommand() call and the destructure, so the search
+    // anchors on the call itself, not the exact original destructure line.
+    const idx = jarvisViewContent.indexOf('const result = await onJarvisCommand(query);');
     expect(idx).toBeGreaterThan(-1);
-    const slice = jarvisViewContent.slice(idx, idx + 1000);
+    const slice = jarvisViewContent.slice(idx, idx + 1200);
+    expect(slice).toContain('const { reply, spokenSummary } = result;');
     expect(slice).toContain('speakText(spoken)');
     expect(slice).not.toMatch(/speakText\(reply\)/);
   });
@@ -99,8 +103,14 @@ describe('5: a degraded/failed outcome gets a short honest spoken line, never th
   });
 
   it('client-side network-failure branches also set a short honest spokenSummary, never the raw err.message', () => {
-    const idx = appContent.indexOf('const handleJarvisCommand');
-    const slice = appContent.slice(idx, idx + 3500);
+    // STEP 6 (B2) wrapped the original function in a shared in-flight
+    // guard (handleJarvisCommand) that delegates to the renamed
+    // dispatchJarvisCommand, which still contains this exact logic —
+    // anchor on the renamed function so the window isn't pushed out by
+    // the guard's own body.
+    const idx = appContent.indexOf('const dispatchJarvisCommand');
+    expect(idx).toBeGreaterThan(-1);
+    const slice = appContent.slice(idx, idx + 4200);
     expect(slice).toContain("spokenSummary = \"I can't reach SynthOS right now.\"");
     // The catch block sets spokenSummary to the fixed string above, not to err.message.
     const catchIdx = slice.indexOf('} catch (err: any) {');

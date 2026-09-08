@@ -2365,7 +2365,13 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       // (lib/jarvis-sessions.ts) but never read it back into its own
       // reasoning request. That gap is what this fixes — see the natural-
       // language branch below.
-      const { command = "", sessionId = null } = req.body || {};
+      // STEP 6 corrective pass (B2) — an optional, real idempotency key the
+      // client generates once per logical submission attempt (not per
+      // click; the client's own in-flight guard already prevents a second
+      // click from ever reaching here while one is active). Reused by
+      // executeEnvelope() via the canonical task-table check-before-execute
+      // pattern — never a second, Jarvis-specific dedup system.
+      const { command = "", sessionId = null, idempotencyKey = null } = req.body || {};
       const trimmed = command.trim();
       if (!trimmed) {
         return res.status(400).json({ success: false, error: "Empty command received." });
@@ -2484,7 +2490,16 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
             : health.status === "CONNECTED"
               ? `Windmill is CONNECTED — authenticated as "${health.identity}"${health.version ? ` (version ${health.version})` : ""}.`
               : `Windmill is ${health.status}: ${health.error || "no further detail."}`;
-          spokenSummary = reply;
+          // STEP 6 corrective pass (B1) — this used to be `spokenSummary =
+          // reply`, aliasing the two fields: a FAILED health check would
+          // speak health.error (a raw provider diagnostic) verbatim. A
+          // short, fixed spoken line per real status, same pattern every
+          // other branch in this route already uses.
+          spokenSummary = health.status === "NOT_CONFIGURED"
+            ? "Windmill isn't configured on this deployment."
+            : health.status === "CONNECTED"
+              ? "Windmill is connected."
+              : "Windmill's connection isn't healthy right now.";
         } else {
           intent = "ADMIN_EXTERNAL_EXECUTIONS_QUERY";
           const executions = listWorkspaceExternalExecutions(jarvisWorkspaceId, 10);
@@ -2519,6 +2534,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
           action: classification.action,
           parameters: classification.parameters,
           rawText: trimmed,
+          idempotencyKey: typeof idempotencyKey === "string" && idempotencyKey.trim() ? idempotencyKey.trim() : undefined,
         });
         evidence = envelopeResult;
         if (envelopeResult.outcome === "SUCCESS" && classification.capability === "research") {

@@ -42,6 +42,10 @@ import {
   listGraphRuns,
   listWorkspaceReceipts,
   projectKnowledgeCandidate,
+  getTaskWithHistory,
+  getTaskArtifacts,
+  getTaskReceipts,
+  verifyReceipt,
 } from '../persistence';
 import { verifyTaskAtGate } from '../kil-gate';
 import { indexVaultArtifact, searchWorkspaceMemory } from '../memory-index';
@@ -60,6 +64,17 @@ export interface ExecutionEnvelopeInput {
   parameters: Record<string, unknown>;
   /** The original request text. Used only as content/query input for capabilities that need it (research query, a note's body) — never persisted beyond what that capability would honestly record. */
   rawText: string;
+  /**
+   * STEP 6 corrective pass (B2) — reuses the same real check-before-execute
+   * idempotency pattern lib/external-executions.ts's submitExternalExecution
+   * (Q1) already established for Windmill submissions, applied here via the
+   * canonical task table instead of a second, Jarvis-specific ledger: when
+   * supplied, a real prior task with the same derived id short-circuits to
+   * ITS already-recorded outcome (real receipt/artifact from the DB) rather
+   * than re-executing. Optional — a caller with no meaningful key (a plain
+   * READ) simply gets normal, unguarded execution.
+   */
+  idempotencyKey?: string;
 }
 
 export interface ExecutionEnvelopeResult {
@@ -166,8 +181,82 @@ async function executeWindmillRead(input: ExecutionEnvelopeInput): Promise<Execu
 }
 
 /** Canonical policy already approved for vault.write (Step 2/4): direct write, no Aegis/receipt, no extra approval. */
+// STEP 6 corrective pass (B2) — reuses the real task table as the
+// idempotency ledger (same pattern lib/external-executions.ts's
+// submitExternalExecution Q1 check already established: look up a real
+// existing record before doing any real work, short-circuit to its
+// already-recorded outcome). No second, Jarvis-specific idempotency
+// system is created.
+export function deriveIdempotentTaskId(prefix: string, idempotencyKey?: string): string {
+  if (idempotencyKey && idempotencyKey.trim()) {
+    const safe = idempotencyKey.trim().replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 80);
+    return `jarvis-${prefix}-${safe}`;
+  }
+  return `jarvis-${prefix}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+}
+
+/**
+ * Checked BEFORE any real external call (Gemini/GitHub/Vault write) — a
+ * duplicate submission carrying the same idempotency key must never repeat
+ * those calls, not just avoid a duplicate receipt. Returns null when no
+ * real prior record exists (the normal, non-duplicate path).
+ */
+export function checkIdempotentTask(taskId: string, capability: string, idempotencyKey?: string): ExecutionEnvelopeResult | null {
+  if (!idempotencyKey) return null;
+  const existing = getTaskWithHistory(taskId);
+  if (!existing.task) return null;
+
+  if (existing.task.status === 'DONE') {
+    const artifacts = getTaskArtifacts(taskId);
+    const receipts = getTaskReceipts(taskId);
+    const artifact = artifacts[artifacts.length - 1];
+    const receipt = receipts[receipts.length - 1];
+    return {
+      outcome: 'SUCCESS',
+      capability,
+      reason: 'Already completed for this request — duplicate submission ignored, not re-executed.',
+      taskId,
+      artifact: artifact ? { id: artifact.artifact_id, path: artifact.relative_path, contentHash: artifact.content_hash } : null,
+      receipt: receipt ? { receiptId: receipt.receipt_id, verified: verifyReceipt(receipt) } : null,
+    };
+  }
+  if (existing.task.status === 'FAILED') {
+    return {
+      outcome: 'FAILED',
+      capability,
+      reason: 'This request already failed previously — duplicate submission ignored, not retried automatically.',
+      taskId,
+    };
+  }
+  // Any other in-progress-looking status: refuse rather than race a
+  // concurrent execution under the same key.
+  return {
+    outcome: 'BLOCKED',
+    capability,
+    reason: 'A request with this same idempotency key is already being processed.',
+    taskId,
+  };
+}
+
 async function executeVaultWrite(input: ExecutionEnvelopeInput): Promise<ExecutionEnvelopeResult> {
-  const taskId = `jarvis-vault-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+  const taskId = deriveIdempotentTaskId('vault', input.idempotencyKey);
+  // vault.write never called createInitialTask (writeWorkspaceArtifact
+  // doesn't require a task row to exist) — so the idempotency check here
+  // looks at the artifacts table directly rather than the task table.
+  if (input.idempotencyKey) {
+    const existingArtifacts = getTaskArtifacts(taskId);
+    if (existingArtifacts.length > 0) {
+      const artifact = existingArtifacts[existingArtifacts.length - 1];
+      return {
+        outcome: 'SUCCESS',
+        capability: 'vault.write',
+        reason: 'Already saved to the Vault for this request — duplicate submission ignored.',
+        taskId,
+        artifact: { id: artifact.artifact_id, path: artifact.relative_path, contentHash: artifact.content_hash },
+      };
+    }
+  }
+
   const content = `# Jarvis Note\n\n${input.rawText}\n`;
   const artifact = writeWorkspaceArtifact({ workspaceId: input.workspaceId, taskId, content, folder: 'Jarvis-Notes', extension: 'md' });
   try {
@@ -179,11 +268,19 @@ async function executeVaultWrite(input: ExecutionEnvelopeInput): Promise<Executi
     outcome: 'SUCCESS',
     capability: 'vault.write',
     reason: 'Saved to the Vault.',
+    taskId,
     artifact: { id: artifact.artifact_id, path: artifact.relative_path, contentHash: artifact.content_hash },
   };
 }
 
 async function executeResearch(input: ExecutionEnvelopeInput): Promise<ExecutionEnvelopeResult> {
+  const taskId = deriveIdempotentTaskId('research', input.idempotencyKey);
+  // B2 — checked before any real Gemini/GitHub call, not just before the
+  // artifact/receipt write: a duplicate submission must not repeat those
+  // calls either.
+  const shortCircuit = checkIdempotentTask(taskId, 'research', input.idempotencyKey);
+  if (shortCircuit) return shortCircuit;
+
   const apiKey = process.env.GEMINI_API_KEY || '';
   if (!apiKey) {
     // Discovery itself (GitHub Search) needs no Gemini key — this gate
@@ -223,6 +320,7 @@ async function executeResearch(input: ExecutionEnvelopeInput): Promise<Execution
   }
 
   return commitEvidencedArtifact({
+    taskId,
     workspaceId: input.workspaceId,
     title: `Research — ${result.query.slice(0, 80)}`,
     description: `Live research: ${result.query}`,
@@ -245,6 +343,7 @@ async function executeResearch(input: ExecutionEnvelopeInput): Promise<Execution
  * server.ts's graph-run aggregate path already call.
  */
 async function commitEvidencedArtifact(params: {
+  taskId: string;
   workspaceId: string;
   title: string;
   description: string;
@@ -253,7 +352,7 @@ async function commitEvidencedArtifact(params: {
   folder: string;
   toolsInvoked: string[];
 }): Promise<ExecutionEnvelopeResult> {
-  const taskId = `jarvis-${params.assignedAgent}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+  const taskId = params.taskId;
   const nowIso = new Date().toISOString();
 
   createInitialTask({

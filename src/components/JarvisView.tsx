@@ -34,7 +34,10 @@ interface JarvisViewProps {
    * so its "show my tasks"-style directives actually reach that real
    * infrastructure instead of a generic chat call that can't answer them.
    */
-  onJarvisCommand: (command: string, messageType?: 'text' | 'voice_transcript') => Promise<{ reply: string; spokenSummary: string | null }>;
+  // STEP 6 corrective pass (B2) — null means "a request was already in
+  // flight and this call was rejected by the shared guard," not a
+  // failure; callers must treat it as a no-op, never an error.
+  onJarvisCommand: (command: string, messageType?: 'text' | 'voice_transcript') => Promise<{ reply: string; spokenSummary: string | null } | null>;
   /** Real workspace-scoped session history — see lib/jarvis-sessions.ts. */
   activeWorkspaceId?: string;
   /** Starts a fresh Jarvis session on the next directive. */
@@ -54,6 +57,13 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  // STEP 6 corrective pass (B2) — a synchronous companion to isLoading:
+  // React state updates are batched/async, so a real double-click (two
+  // handler invocations in the same synchronous tick) can both read a
+  // stale isLoading===false before either commit. This ref is read/set
+  // synchronously and is the real, authoritative local guard; isLoading
+  // remains for rendering (disabling the button, showing a spinner).
+  const isLoadingRef = useRef(false);
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
   const [transientCaption, setTransientCaption] = useState<string | null>(null);
   const [hudLogs, setHudLogs] = useState<string[]>([
@@ -210,9 +220,24 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
     };
   }, []);
 
+  // STEP 6 corrective pass (B1) — never allow overlapping Jarvis speech: a
+  // new speakText() call always stops whatever this view was previously
+  // playing (either provider's <audio> element, or a Web Speech
+  // utterance) before starting anything new.
+  const stopActiveSpeech = () => {
+    if (currentAudioRef.current) {
+      try { currentAudioRef.current.pause(); } catch { /* best effort */ }
+      currentAudioRef.current = null;
+    }
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+  };
+
   // Neural Voice Synthesis: Fish Audio -> ElevenLabs -> Browser Fallback
   const speakText = async (text: string) => {
     if (!settings.voiceEnabled) return;
+    stopActiveSpeech();
 
     // 1. Fish Audio Neural Voice Provider
     if (settings.voiceProvider === 'fish_audio') {
@@ -363,13 +388,25 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
   // same admin-intent routing as typed input — never a separate,
   // parallel voice-only code path.
   const executeDirective = useCallback(async (query: string) => {
-    if (!query.trim() || isLoading) return;
+    // B2 — the real, synchronous guard: reject a duplicate call outright
+    // (double-click, repeated Enter, or a voice callback racing the
+    // button) rather than relying on isLoading state, which can still be
+    // stale within the same synchronous tick.
+    if (!query.trim() || isLoadingRef.current) return;
+    isLoadingRef.current = true;
 
     setIsLoading(true);
     setHudLogs(prev => [`[USER DIRECTIVE]: ${query}`, ...prev]);
 
     try {
-      const { reply, spokenSummary } = await onJarvisCommand(query);
+      const result = await onJarvisCommand(query);
+      if (!result) {
+        // The shared cross-surface guard (App.tsx) rejected this as a
+        // duplicate of an already-in-flight request — a real, honest
+        // no-op, not an error. Nothing to log or speak.
+        return;
+      }
+      const { reply, spokenSummary } = result;
       setActiveVoiceResponse(reply);
       // TTS/speech separation (P3) — the caption and the replay button both
       // key off the concise spoken text, not the full reply; only the
@@ -393,9 +430,13 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
     } catch (err: any) {
       console.error(err);
     } finally {
+      // B2 — the guard clears on every real outcome: success, failure
+      // (caught above), blocked/degraded result, or the early no-op
+      // return on a duplicate rejection.
+      isLoadingRef.current = false;
       setIsLoading(false);
     }
-  }, [isLoading, onJarvisCommand, settings.voiceEnabled, settings.autoSyncObsidian, onAddNoteToVault, showCaptionWithAutoDismiss]);
+  }, [onJarvisCommand, settings.voiceEnabled, settings.autoSyncObsidian, onAddNoteToVault, showCaptionWithAutoDismiss]);
 
   const handleExecute = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
