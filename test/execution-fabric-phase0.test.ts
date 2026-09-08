@@ -45,6 +45,12 @@ const hermesAdapterContent = fs.readFileSync(path.resolve(process.cwd(), 'src/se
 // Step 1b commit for that); it only updates F1's own assertions to point at
 // where the logic actually lives today.
 const kernelContent = fs.readFileSync(path.resolve(process.cwd(), 'lib/fabric/kernel.ts'), 'utf-8');
+// STEP 4 extracted the real Gemini candidate-model retry loop out of
+// kernel.ts into lib/fabric/model-gemini.ts (generateViaGemini), shared
+// with graph execution's native COMPUTE nodes — this file's own F1
+// assertions below follow that move, same pattern as the Step 1b relocation
+// comment above.
+const modelGeminiContent = fs.readFileSync(path.resolve(process.cwd(), 'lib/fabric/model-gemini.ts'), 'utf-8');
 
 function executeAgentTaskRouteSlice(): string {
   const idx = serverContent.indexOf('app.post("/api/execute-agent-task"');
@@ -80,14 +86,17 @@ describe('F1: /api/execute-agent-task never claims a tool ran (originally server
     expect(kernelContent).toContain('const packageMetadataResult = read_package_metadata();');
   });
 
-  it('the real ctx.invoke() call site in the kernel wraps the real existing Gemini retry loop, named "model.gemini" — not a fabricated or per-role tool name', () => {
+  it('the real ctx.invoke() call site in the kernel wraps the real Gemini retry mechanics, named "model.gemini" — not a fabricated or per-role tool name', () => {
     expect(kernelContent).toContain('await ctx.invoke("model.gemini", async () => {');
-    // The wrapped block still contains the real, unchanged retry loop —
-    // ctx.invoke() did not replace it with a different mechanism.
+    // STEP 4 — the wrapped block now calls the shared generateViaGemini()
+    // helper (lib/fabric/model-gemini.ts) rather than inlining the retry
+    // loop; the real, unchanged loop lives there now, not a different or
+    // fabricated mechanism.
     const invokeIdx = kernelContent.indexOf('await ctx.invoke("model.gemini"');
-    const wrappedBlock = kernelContent.slice(invokeIdx, invokeIdx + 8000);
-    expect(wrappedBlock).toContain('for (const m of modelsToTry) {');
-    expect(wrappedBlock).toContain('ai.models.generateContent({');
+    const wrappedBlock = kernelContent.slice(invokeIdx, invokeIdx + 2000);
+    expect(wrappedBlock).toContain('generateViaGemini({');
+    expect(modelGeminiContent).toContain('for (const m of candidateModels) {');
+    expect(modelGeminiContent).toContain('ai.models.generateContent({');
   });
 
   it('the thin route wrapper in server.ts contains no toolCalls logic of its own — it only maps the kernel\'s {status, body} onto the HTTP response', () => {

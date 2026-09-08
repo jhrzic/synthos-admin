@@ -27,6 +27,13 @@ import { listWorkspaceVaultEntries } from './vault';
 import { recordRuntimeEvent } from './runtime-events';
 import { hermesAdapter } from '../src/services/hermesAdapter';
 import { submitAndAwaitExternalExecution } from './external-executions';
+// STEP 4 — real model/MCP calls now flow through the one canonical
+// ExecutionContext (lib/fabric/context.ts), the same factory kernel.ts and
+// external-executions.ts use, so the invocation trace is real and observed
+// rather than implicit. This does NOT add a task/artifact/Aegis/receipt
+// spine to skills — SKILLS_RECEIPT_INTEGRATION stays NO (see below); only
+// the windmill branch (already fabric-backed since Step 3) gets one.
+import { createExecutionContext } from './fabric/context';
 
 export interface SkillExecutionResult {
   success: boolean;
@@ -35,6 +42,14 @@ export interface SkillExecutionResult {
   output?: unknown;
   error?: string;
   latencyMs: number;
+  /**
+   * Real, observed ctx.invoke() names for this execution — never a
+   * hardcoded or fabricated list. Present only for branches that make a
+   * real model/tool call (model, mcp_tool); a deterministic/hermes_runtime/
+   * NOT_EXECUTABLE result has nothing to invoke, so it is omitted rather
+   * than fabricated as [].
+   */
+  toolsInvoked?: string[];
 }
 
 const EXECUTE_TIMEOUT_MS = 15000;
@@ -166,17 +181,24 @@ async function runModelAction(
     throw new Error(classification.message);
   }
   const model = classification.resolvedModel;
-  const ai = new GoogleGenAI({ apiKey });
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), EXECUTE_TIMEOUT_MS);
-  let text = '';
-  try {
-    const response = await ai.models.generateContent({ model, contents: prompt });
-    text = response.text || '';
-  } finally {
-    clearTimeout(timer);
-  }
+  // STEP 4 — the real call, wrapped so it is a real, observed ctx.invoke()
+  // rather than a bare SDK call. Deliberately still a single real call with
+  // no candidate-model failover — that is unchanged from before this step;
+  // this is NOT lib/fabric/model-gemini.ts's generateViaGemini(), which
+  // fails over across candidates and would be a real behavior change here.
+  const ctx = createExecutionContext({ workspaceId });
+  const text = await ctx.invoke('model.gemini', async () => {
+    const ai = new GoogleGenAI({ apiKey });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), EXECUTE_TIMEOUT_MS);
+    try {
+      const response = await ai.models.generateContent({ model, contents: prompt });
+      return response.text || '';
+    } finally {
+      clearTimeout(timer);
+    }
+  });
 
   if (!text.trim()) {
     throw new Error(`Model "${model}" returned an empty response.`);
@@ -184,6 +206,7 @@ async function runModelAction(
 
   const result: SkillExecutionResult = {
     success: true, status: 'SUCCESS', targetType: 'model', output: { model, text }, latencyMs: Date.now() - startedAt,
+    toolsInvoked: ctx.getInvocations().map((r) => r.name),
   };
   recordRuntimeEvent({
     workspaceId, eventType: 'SKILL_EXECUTION', targetType: 'skill', targetId: skillId,
@@ -198,11 +221,16 @@ async function runMcpToolAction(
   const ciphertext = getRawCredentialCiphertext(workspaceId, skillId);
   const credential = ciphertext ? decryptCredential(ciphertext) : null;
 
-  const probe = await probeMcpServer(endpointUrl, credential);
+  // STEP 4 — one ExecutionContext for this skill call; both real external
+  // MCP operations (probe, then the tool call itself) are truthfully named
+  // ctx.invoke()s, not bare calls.
+  const ctx = createExecutionContext({ workspaceId });
+  const probe = await ctx.invoke('mcp.probe', () => probeMcpServer(endpointUrl, credential));
   if (probe.status !== 'CONNECTED') {
     const result: SkillExecutionResult = {
       success: false, status: 'FAILED', targetType: 'mcp_tool',
       error: probe.error || `MCP probe returned ${probe.status}.`, latencyMs: Date.now() - startedAt,
+      toolsInvoked: ctx.getInvocations().map((r) => r.name),
     };
     recordRuntimeEvent({
       workspaceId, eventType: 'SKILL_EXECUTION', targetType: 'skill', targetId: skillId,
@@ -217,6 +245,7 @@ async function runMcpToolAction(
       success: false, status: 'FAILED', targetType: 'mcp_tool',
       error: `Tool "${toolName}" was not found among the ${probe.tools?.length || 0} tools this server reported.`,
       latencyMs: Date.now() - startedAt,
+      toolsInvoked: ctx.getInvocations().map((r) => r.name),
     };
     recordRuntimeEvent({
       workspaceId, eventType: 'SKILL_EXECUTION', targetType: 'skill', targetId: skillId,
@@ -231,16 +260,18 @@ async function runMcpToolAction(
   const timer = setTimeout(() => controller.abort(), EXECUTE_TIMEOUT_MS);
   let body: any;
   try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
-    if (credential) headers.Authorization = `Bearer ${credential}`;
-    const res = await fetch(endpointUrl, {
-      method: 'POST', headers, signal: controller.signal, redirect: 'error',
-      body: JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/call', params: { name: toolName, arguments: {} } }),
+    body = await ctx.invoke('mcp.tool', async () => {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
+      if (credential) headers.Authorization = `Bearer ${credential}`;
+      const res = await fetch(endpointUrl, {
+        method: 'POST', headers, signal: controller.signal, redirect: 'error',
+        body: JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/call', params: { name: toolName, arguments: {} } }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // P — same response-size bound as every other MCP boundary call (see
+      // lib/mcp-client.ts's readBoundedText).
+      return JSON.parse(await readBoundedText(res));
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    // P — same response-size bound as every other MCP boundary call (see
-    // lib/mcp-client.ts's readBoundedText).
-    body = JSON.parse(await readBoundedText(res));
   } finally {
     clearTimeout(timer);
   }
@@ -249,6 +280,7 @@ async function runMcpToolAction(
     const result: SkillExecutionResult = {
       success: false, status: 'FAILED', targetType: 'mcp_tool',
       error: `tools/call: ${body.error.message}`, latencyMs: Date.now() - startedAt,
+      toolsInvoked: ctx.getInvocations().map((r) => r.name),
     };
     recordRuntimeEvent({
       workspaceId, eventType: 'SKILL_EXECUTION', targetType: 'skill', targetId: skillId,
@@ -259,6 +291,7 @@ async function runMcpToolAction(
 
   const result: SkillExecutionResult = {
     success: true, status: 'SUCCESS', targetType: 'mcp_tool', output: body?.result, latencyMs: Date.now() - startedAt,
+    toolsInvoked: ctx.getInvocations().map((r) => r.name),
   };
   recordRuntimeEvent({
     workspaceId, eventType: 'SKILL_EXECUTION', targetType: 'skill', targetId: skillId,

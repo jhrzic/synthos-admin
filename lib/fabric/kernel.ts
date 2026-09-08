@@ -48,7 +48,6 @@
 // ---------------------------------------------------------------------------
 
 import crypto from 'node:crypto';
-import { GoogleGenAI } from '@google/genai';
 import {
   createInitialTask,
   updateTaskStatus,
@@ -77,7 +76,144 @@ import { indexVaultArtifact } from '../memory-index';
 // own former direct fs.writeFileSync + recordArtifact() pair; see the
 // artifact-write section below for the full rationale.
 import { writeWorkspaceArtifact } from '../vault';
+// STEP 4 — the real Gemini call mechanics (candidate-model retry loop) now
+// live in lib/fabric/model-gemini.ts, shared with graph execution's native
+// COMPUTE nodes (server.ts POST /api/graphs/execute). buildAgentRolePrompt
+// below is exported so the graph route can build the exact same persona
+// prompt for a node as this route would — required for graph node output
+// to remain equivalent to before, not because graph execution needs an
+// agent-persona concept of its own.
+import { generateViaGemini } from './model-gemini';
 import type { ExecuteAgentTaskInput, ExecutionResult, ExecutionContext } from './types';
+
+export interface AgentRolePromptParams {
+  assignedAgent: string;
+  taskTitle: string;
+  description: string;
+  sourceUrl?: string;
+  inputs?: string;
+}
+
+/**
+ * The exact persona-prompt-building logic this route has always run inline
+ * inside its ctx.invoke("model.gemini", ...) callback, extracted verbatim
+ * (Step 4) so graph execution's native nodes can build the identical prompt
+ * without duplicating it. Pure — no side effects other than the real,
+ * evidenced read_package_metadata() disk read for the package-version
+ * special case, which was already part of this logic before extraction.
+ */
+export function buildAgentRolePrompt(params: AgentRolePromptParams): string {
+  const { assignedAgent, taskTitle, description, sourceUrl = "", inputs = "" } = params;
+  let rolePrompt = "";
+  if (assignedAgent === "scout") {
+    rolePrompt = `You are the Hermes Scout Research Agent. Execute this task with real-world technical precision:
+TASK: "${taskTitle}"
+DESCRIPTION: "${description}"
+CONTEXT / SOURCE: "${sourceUrl || inputs}"
+
+Produce structured intelligence findings in clean Markdown format:
+1. Executive Summary & Core Signals
+2. Discovered Architecture / Code Specifications
+3. Market & Developer Pain Points
+4. Actionable Next Steps for Dev & Scribe`;
+  } else if (assignedAgent === "dev") {
+    rolePrompt = `You are the Hermes Dev Systems Engineering Agent. Execute this engineering directive:
+TASK: "${taskTitle}"
+DESCRIPTION: "${description}"
+INPUTS / REPO CONTEXT: "${inputs || sourceUrl}"
+
+Produce a production-grade Technical Implementation Blueprint & Verification Spec in Markdown:
+1. Architecture & Component Blueprint
+2. Concrete Code Implementation / Schema Definition
+3. Execution Latency & Performance Profile (<50ms target)
+4. Automated Test Harness & Verification Criteria`;
+  } else if (assignedAgent === "reach") {
+    rolePrompt = `You are the Hermes Reach Growth & Distribution Agent. Execute this GTM directive:
+TASK: "${taskTitle}"
+DESCRIPTION: "${description}"
+
+Produce a high-leverage Distribution & Go-To-Market Plan in Markdown:
+1. ICP Definition & Value Proposition
+2. Generative Engine Optimization (GEO) & AEO Citation Strategy
+3. Viral Demo & Launch Mechanism
+4. Growth Metric Targets & Retention Loops`;
+  } else if (assignedAgent === "analytics") {
+    rolePrompt = `You are the Hermes Analytics & Token Optimization Agent. Execute this analysis:
+TASK: "${taskTitle}"
+DESCRIPTION: "${description}"
+
+Produce an analytical telemetry and unit economics breakdown in Markdown:
+1. Unit Economics & Token Optimization Analysis
+2. Latency & Resource Utilization Breakdown
+3. Total Addressable Market (TAM) & Competitive Positioning
+4. Strategic Recommendations`;
+  } else if (assignedAgent === "scribe") {
+    rolePrompt = `You are the Hermes Scribe Knowledge Architect. Synthesize this task into an Obsidian Vault Memo:
+TASK: "${taskTitle}"
+DESCRIPTION: "${description}"
+
+Produce a comprehensive Obsidian Knowledge Graph Document with at least 5 [[wikilinks]]:
+1. Executive Summary
+2. Core Thesis & Technical Specifications
+3. Interconnected Knowledge Mesh ([[Architecture/Agentic-OS]], [[Aegis-Receipts/Verification]], etc.)
+4. Permanent Knowledge Base Takeaways`;
+  } else {
+    rolePrompt = `You are the Hermes Orchestrator Master Agent. Conduct an executive audit and sign-off:
+TASK: "${taskTitle}"
+DESCRIPTION: "${description}"
+
+Produce an Orchestrator Executive Sign-Off in Markdown:
+1. Swarm Objective & Execution Audit
+2. Compliance with Permanent Operating Rules
+3. Guardian Aegis Verification Summary
+4. State Machine & Board.db State Transition`;
+  }
+
+  // Domain-specific grounding for package metadata & version reading tasks
+  const isPackageVersionRequest = /package(\.json)?\s*(version|metadata|name)?|version\s+and\s+save/i.test(
+    `${taskTitle} ${description}`
+  );
+  if (isPackageVersionRequest) {
+    const packageMetadataResult = read_package_metadata();
+    rolePrompt = `You are the SynthOS Runtime Worker Agent.
+TASK: "${taskTitle}"
+DESCRIPTION: "${description}"
+
+AUTHORITATIVE REAL REPOSITORY EVIDENCE (READ DIRECTLY FROM DISK VIA read_package_metadata):
+=== AUTHORITATIVE TOOL EXECUTION RESULT: read_package_metadata ===
+source: ${packageMetadataResult.relativePath}
+packageName: ${packageMetadataResult.packageName}
+packageVersion: ${packageMetadataResult.packageVersion}
+sourceHash: ${packageMetadataResult.sourceHash}
+absolutePath: ${packageMetadataResult.absolutePath}
+==================================================================
+
+CRITICAL EXECUTION CONSTRAINTS:
+1. You MUST use and report ONLY the real repository evidence provided above.
+2. You are STRICTLY FORBIDDEN from inventing or claiming:
+   - Package registries or external API lookups (e.g. PackageRegistry.query)
+   - board.db checks or database records
+   - Fake cryptographic signatures, keys, or signature language
+   - Certificates or root-of-trust claims
+   - Network protocols or TLS 1.3 claims
+   - Hallucinated version values (you MUST report version: "${packageMetadataResult.packageVersion}")
+   - Hallucinated dates or timestamps
+   - Audit systems or fictional test suites
+   - Any tool executions not present in the evidence above
+
+3. You MUST include this EXACT machine-readable EVIDENCE section in your output:
+
+## EVIDENCE
+source: package.json
+packageName: ${packageMetadataResult.packageName}
+packageVersion: ${packageMetadataResult.packageVersion}
+sourceHash: ${packageMetadataResult.sourceHash}
+
+4. Provide a clear, factual, and concise description of the package metadata read from package.json without any fabricated claims.`;
+  }
+
+  return rolePrompt;
+}
 
 export async function executeAgentTask(
   rawBody: ExecuteAgentTaskInput | null | undefined,
@@ -233,152 +369,24 @@ export async function executeAgentTask(
     // of whether any candidate actually returned usable text. That real,
     // observed name — never a fabricated or per-role literal — is what
     // toolsInvoked is built from below.
+    //
+    // STEP 4 — the persona-prompt construction (buildAgentRolePrompt) and
+    // the real retry-loop mechanics (generateViaGemini, lib/fabric/
+    // model-gemini.ts) are now the same two calls graph execution's native
+    // COMPUTE nodes use (server.ts POST /api/graphs/execute) — extracted
+    // verbatim, not reimplemented, so this route's behavior is unchanged.
     await ctx.invoke("model.gemini", async () => {
-      try {
-        const ai = new GoogleGenAI({
-          apiKey,
-          httpOptions: { headers: { "User-Agent": "aistudio-build" } },
-        });
-
-        let rolePrompt = "";
-        if (assignedAgent === "scout") {
-          rolePrompt = `You are the Hermes Scout Research Agent. Execute this task with real-world technical precision:
-TASK: "${taskTitle}"
-DESCRIPTION: "${description}"
-CONTEXT / SOURCE: "${sourceUrl || inputs}"
-
-Produce structured intelligence findings in clean Markdown format:
-1. Executive Summary & Core Signals
-2. Discovered Architecture / Code Specifications
-3. Market & Developer Pain Points
-4. Actionable Next Steps for Dev & Scribe`;
-        } else if (assignedAgent === "dev") {
-          rolePrompt = `You are the Hermes Dev Systems Engineering Agent. Execute this engineering directive:
-TASK: "${taskTitle}"
-DESCRIPTION: "${description}"
-INPUTS / REPO CONTEXT: "${inputs || sourceUrl}"
-
-Produce a production-grade Technical Implementation Blueprint & Verification Spec in Markdown:
-1. Architecture & Component Blueprint
-2. Concrete Code Implementation / Schema Definition
-3. Execution Latency & Performance Profile (<50ms target)
-4. Automated Test Harness & Verification Criteria`;
-        } else if (assignedAgent === "reach") {
-          rolePrompt = `You are the Hermes Reach Growth & Distribution Agent. Execute this GTM directive:
-TASK: "${taskTitle}"
-DESCRIPTION: "${description}"
-
-Produce a high-leverage Distribution & Go-To-Market Plan in Markdown:
-1. ICP Definition & Value Proposition
-2. Generative Engine Optimization (GEO) & AEO Citation Strategy
-3. Viral Demo & Launch Mechanism
-4. Growth Metric Targets & Retention Loops`;
-        } else if (assignedAgent === "analytics") {
-          rolePrompt = `You are the Hermes Analytics & Token Optimization Agent. Execute this analysis:
-TASK: "${taskTitle}"
-DESCRIPTION: "${description}"
-
-Produce an analytical telemetry and unit economics breakdown in Markdown:
-1. Unit Economics & Token Optimization Analysis
-2. Latency & Resource Utilization Breakdown
-3. Total Addressable Market (TAM) & Competitive Positioning
-4. Strategic Recommendations`;
-        } else if (assignedAgent === "scribe") {
-          rolePrompt = `You are the Hermes Scribe Knowledge Architect. Synthesize this task into an Obsidian Vault Memo:
-TASK: "${taskTitle}"
-DESCRIPTION: "${description}"
-
-Produce a comprehensive Obsidian Knowledge Graph Document with at least 5 [[wikilinks]]:
-1. Executive Summary
-2. Core Thesis & Technical Specifications
-3. Interconnected Knowledge Mesh ([[Architecture/Agentic-OS]], [[Aegis-Receipts/Verification]], etc.)
-4. Permanent Knowledge Base Takeaways`;
-        } else {
-          rolePrompt = `You are the Hermes Orchestrator Master Agent. Conduct an executive audit and sign-off:
-TASK: "${taskTitle}"
-DESCRIPTION: "${description}"
-
-Produce an Orchestrator Executive Sign-Off in Markdown:
-1. Swarm Objective & Execution Audit
-2. Compliance with Permanent Operating Rules
-3. Guardian Aegis Verification Summary
-4. State Machine & Board.db State Transition`;
-        }
-
-        // Domain-specific grounding for package metadata & version reading tasks
-        const isPackageVersionRequest = /package(\.json)?\s*(version|metadata|name)?|version\s+and\s+save/i.test(
-          `${taskTitle} ${description}`
-        );
-        if (isPackageVersionRequest) {
-          const packageMetadataResult = read_package_metadata();
-          rolePrompt = `You are the SynthOS Runtime Worker Agent.
-TASK: "${taskTitle}"
-DESCRIPTION: "${description}"
-
-AUTHORITATIVE REAL REPOSITORY EVIDENCE (READ DIRECTLY FROM DISK VIA read_package_metadata):
-=== AUTHORITATIVE TOOL EXECUTION RESULT: read_package_metadata ===
-source: ${packageMetadataResult.relativePath}
-packageName: ${packageMetadataResult.packageName}
-packageVersion: ${packageMetadataResult.packageVersion}
-sourceHash: ${packageMetadataResult.sourceHash}
-absolutePath: ${packageMetadataResult.absolutePath}
-==================================================================
-
-CRITICAL EXECUTION CONSTRAINTS:
-1. You MUST use and report ONLY the real repository evidence provided above.
-2. You are STRICTLY FORBIDDEN from inventing or claiming:
-   - Package registries or external API lookups (e.g. PackageRegistry.query)
-   - board.db checks or database records
-   - Fake cryptographic signatures, keys, or signature language
-   - Certificates or root-of-trust claims
-   - Network protocols or TLS 1.3 claims
-   - Hallucinated version values (you MUST report version: "${packageMetadataResult.packageVersion}")
-   - Hallucinated dates or timestamps
-   - Audit systems or fictional test suites
-   - Any tool executions not present in the evidence above
-
-3. You MUST include this EXACT machine-readable EVIDENCE section in your output:
-
-## EVIDENCE
-source: package.json
-packageName: ${packageMetadataResult.packageName}
-packageVersion: ${packageMetadataResult.packageVersion}
-sourceHash: ${packageMetadataResult.sourceHash}
-
-4. Provide a clear, factual, and concise description of the package metadata read from package.json without any fabricated claims.`;
-        }
-
-        // No exclude-list needed here: the provider identity gate above already
-        // rejects any non-Gemini model before this point, so every candidate in
-        // this queue is guaranteed Gemini-family.
-        const modelsToTry = [normalizedAssignedModel, ...candidateModels].filter((v, i, a) => a.indexOf(v) === i);
-
-        for (const m of modelsToTry) {
-          try {
-            const resp = await ai.models.generateContent({
-              model: m,
-              contents: rolePrompt,
-              config: { temperature: 0.2 },
-            });
-            if (resp?.text && resp.text.trim().length > 0) {
-              executionOutput = resp.text;
-              modelUsed = m;
-              if (resp.usageMetadata) {
-                providerUsageMetadata = resp.usageMetadata;
-              }
-              break;
-            }
-          } catch (e: any) {
-            hadProviderError = true;
-            lastProviderError = e?.message || String(e);
-            console.warn(`[Agent Model Router] '${m}' failover:`, lastProviderError);
-          }
-        }
-      } catch (genErr: any) {
-        hadProviderError = true;
-        lastProviderError = genErr?.message || String(genErr);
-        console.warn("[Agent Task GenAI Error]:", lastProviderError);
-      }
+      const rolePrompt = buildAgentRolePrompt({ assignedAgent, taskTitle, description, sourceUrl, inputs });
+      // No exclude-list needed here: the provider identity gate above already
+      // rejects any non-Gemini model before this point, so every candidate in
+      // this queue is guaranteed Gemini-family.
+      const modelsToTry = [normalizedAssignedModel, ...candidateModels].filter((v, i, a) => a.indexOf(v) === i);
+      const genResult = await generateViaGemini({ apiKey, contents: rolePrompt, candidateModels: modelsToTry });
+      executionOutput = genResult.output;
+      if (genResult.modelUsed) modelUsed = genResult.modelUsed;
+      if (genResult.providerUsageMetadata) providerUsageMetadata = genResult.providerUsageMetadata;
+      hadProviderError = genResult.hadProviderError;
+      lastProviderError = genResult.lastProviderError;
     });
 
     // Provider fails:

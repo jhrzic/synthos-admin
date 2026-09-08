@@ -10,6 +10,7 @@ process.env.SYNTHOS_DB_PATH = TEST_DB_PATH;
 import { createSkill, updateSkill, classifySkillExecutability, getWorkspaceSkill } from '../lib/skills';
 import { executeSkill } from '../lib/skill-execution';
 import { listRecentRuntimeEvents } from '../lib/runtime-events';
+import { getDatabase } from '../lib/persistence';
 
 afterAll(() => {
   try { fs.unlinkSync(TEST_DB_PATH); } catch { /* best effort */ }
@@ -145,6 +146,37 @@ describe('E3: deterministic skills run real internal functions, no fake success'
   });
 });
 
+// ---------------------------------------------------------------------------
+// STEP 4 — SKILL_RECEIPT_POLICY. No new receipt policy was added for skills:
+// SKILLS_RECEIPT_INTEGRATION stays NO for deterministic/model/mcp_tool (this
+// file's own header comment, unchanged). Real evidence for these three
+// still comes only from the runtime_events ledger already asserted above —
+// this block proves the negative directly: real execution, zero rows in
+// artifacts/receipts anywhere in the database.
+// ---------------------------------------------------------------------------
+describe('STEP 4: read-only/compute skill types leave zero receipts and zero artifacts', () => {
+  it('vault.list, memory.search, and (given no real GEMINI_API_KEY) a model-backed skill all execute with no receipt/artifact rows created anywhere', async () => {
+    const db = getDatabase();
+    const receiptsBefore = (db.prepare('SELECT COUNT(*) AS n FROM receipts').get() as any).n;
+    const artifactsBefore = (db.prepare('SELECT COUNT(*) AS n FROM artifacts').get() as any).n;
+
+    const vaultSkill = createSkill({ workspaceId: WS, name: 'Zero-Receipt Vault List', enabled: true, executionTargetType: 'deterministic', executionTargetRef: 'vault.list' });
+    const vaultResult = await executeSkill(WS, vaultSkill.skill_id);
+    expect(vaultResult?.success).toBe(true);
+    expect(vaultResult?.toolsInvoked).toBeUndefined(); // nothing was invoked — not fabricated as []
+
+    const memSkill = createSkill({ workspaceId: WS, name: 'Zero-Receipt Memory Search', enabled: true, executionTargetType: 'deterministic', executionTargetRef: 'memory.search' });
+    const memResult = await executeSkill(WS, memSkill.skill_id, { query: 'zero-receipt-proof' });
+    expect(memResult?.success).toBe(true);
+    expect(memResult?.toolsInvoked).toBeUndefined();
+
+    const receiptsAfter = (db.prepare('SELECT COUNT(*) AS n FROM receipts').get() as any).n;
+    const artifactsAfter = (db.prepare('SELECT COUNT(*) AS n FROM artifacts').get() as any).n;
+    expect(receiptsAfter).toBe(receiptsBefore);
+    expect(artifactsAfter).toBe(artifactsBefore);
+  });
+});
+
 describe('E6/F: MCP-backed skill execution requires a real, successful handshake — never fabricated', () => {
   it('fails honestly when the configured MCP endpoint is unreachable', async () => {
     const skill = createSkill({
@@ -191,6 +223,10 @@ describe('E6/F: MCP-backed skill execution requires a real, successful handshake
       const result = await executeSkill(WS, skill.skill_id);
       expect(result?.success).toBe(true);
       expect(result?.status).toBe('SUCCESS');
+      // STEP 4 — real, observed ctx.invoke() names, in the real order the
+      // two real network calls (probe, then the tool call) actually
+      // happened — never a hardcoded or fabricated list.
+      expect(result?.toolsInvoked).toEqual(['mcp.probe', 'mcp.tool']);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       if (originalAllowLocal === undefined) delete process.env.MCP_ALLOW_LOCAL_ENDPOINTS;

@@ -88,8 +88,9 @@ import {
 } from "./lib/workspaces";
 import { requireAuth, requireWorkspaceMember, requireWorkspaceAdmin, requirePlatformAdmin, requireSameOrigin, getRequestUser, fromBody, fromQuery, fromBodyOrQuery, AuthedRequest } from "./lib/authorization";
 import { recordAdminAuditEvent, listRecentAdminAuditEvents } from "./lib/audit";
-import { executeAgentTask } from "./lib/fabric/kernel";
+import { executeAgentTask, buildAgentRolePrompt } from "./lib/fabric/kernel";
 import { createExecutionContext } from "./lib/fabric/context";
+import { generateViaGemini } from "./lib/fabric/model-gemini";
 
 dotenv.config();
 
@@ -1642,9 +1643,26 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         state: initialState
       });
 
-      // 3. Step-by-step topological advancement (e.g. Node A -> Node B)
+      // STEP 4 — one shared ExecutionContext + one correlationId for the
+      // whole run's native COMPUTE portion. Every real model call for every
+      // COMPUTE node is ctx.invoke()'d on this ONE context, in execution
+      // order — not a new context per node — so the trace reads as one
+      // coherent run. Windmill EXTERNAL_ACTION nodes are untouched: they
+      // keep their own separate, already fabric-backed execution (Step 3)
+      // and their own real signed receipt.
+      const graphRunCorrelationId = `graphrun:${runId}`;
+      const graphRunCtx = createExecutionContext({ workspaceId });
+
+      // 3. Step-by-step topological advancement (e.g. Node A -> Node B) —
+      // filter, order, and previousOutput propagation are byte-for-byte
+      // unchanged from before Step 4.
       const executionResults: any[] = [];
       let previousOutput = "";
+      // STEP 4 — real per-node outputs collected for the ONE aggregate
+      // graph-run artifact built after every node succeeds. Never persisted
+      // or signed per COMPUTE node individually (that was the
+      // N-nodes-to-N-receipts problem this step fixes).
+      const nativeNodeOutputs: Array<{ nodeId: string; nodeLabel: string; order: number; agent: string; modelUsed: string | null; output: string }> = [];
 
       for (let i = 0; i < nodes.length; i++) {
         const currentNode = nodes[i];
@@ -1662,29 +1680,25 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         });
 
         const taskTitle = currentNode.name || currentNode.title || `Node ${i + 1}: ${currentNode.id}`;
-        const nodeTaskId = `task-${runId}-${currentNode.id}`;
         const nodeAgent = currentNode.assignedAgent || (currentNode.type === "scout" ? "scout" : "dev");
         const nodeModel = currentNode.assignedModel || "gemini-3.6-flash";
         const nodeDescription = `${currentNode.description || taskTitle}${previousOutput ? `\n\nUpstream Context from previous step:\n${previousOutput.slice(0, 1000)}` : ""}`;
+        const nodeStartedAt = new Date().toISOString();
 
         // ADR-006 / Workstream G — a node only ever routes to Windmill when
         // it explicitly declares both runtime:"windmill" and a
         // windmillTargetId (G2 — no hidden fallback). Every other node
-        // takes the existing native dispatch path below, byte-for-byte
-        // unchanged.
+        // takes the native COMPUTE dispatch path below.
         const isWindmillNode = currentNode.runtime === "windmill"
           && typeof currentNode.windmillTargetId === "string"
           && currentNode.windmillTargetId.trim().length > 0;
 
         let nodeExecData: any;
         if (isWindmillNode) {
-          // G4/E2 — bounded synchronous submit+await inside this one HTTP
-          // request, the same posture as the native dispatch below (this
-          // loop already blocks per node). Workspace comes from the
-          // already-authorized outer request, never from the node payload
-          // (rule 6/7) — resolveWindmillTarget re-checks the target is
-          // actually visible to this workspace regardless of what the
-          // node claims.
+          // EXTERNAL_ACTION — unchanged: its own real task, Aegis pass, and
+          // signed receipt (already fabric-backed since Step 3). This is
+          // the one node class that keeps a per-node receipt, by design.
+          const nodeTaskId = `task-${runId}-${currentNode.id}`;
           const actorUserId = (req as AuthedRequest).authUser?.user_id || "unknown";
           const execution = await submitAndAwaitExternalExecution({
             workspaceId,
@@ -1745,32 +1759,84 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
             };
           }
         } else {
-          // Dispatch through real execution spine. The internal service
-          // token proves this call originated from this same process's own
-          // graph-execution loop — the outer /api/graphs/execute request was
-          // already authorized (requireWorkspaceMember) before this ran.
-          const executionResponse = await fetch(`http://127.0.0.1:${PORT}/api/execute-agent-task`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-Internal-Service-Token": INTERNAL_SERVICE_TOKEN },
-            body: JSON.stringify({
-              taskId: nodeTaskId,
-              taskTitle,
-              description: nodeDescription,
-              assignedAgent: nodeAgent,
-              assignedModel: nodeModel,
-              inputs: previousOutput,
-              // The graph's authoritative workspace, not a hardcoded constant —
-              // a spawned task must inherit the owning graph's workspace, never
-              // a default unrelated to it.
-              workspaceId
-            })
-          });
-
-          nodeExecData = await executionResponse.json();
+          // STEP 4 — COMPUTE: a real model call through the shared
+          // graph-run ExecutionContext (ctx.invoke("model.gemini", ...)),
+          // reusing the exact same persona-prompt builder and retry
+          // mechanics /api/execute-agent-task uses (lib/fabric/kernel.ts's
+          // buildAgentRolePrompt, lib/fabric/model-gemini.ts's
+          // generateViaGemini) — so node output is unchanged from before
+          // this step. No per-node task, artifact, Aegis run, or receipt:
+          // this is the fix for the N-COMPUTE-nodes-to-N-receipts problem.
+          // The same BLOCKED_MISSING_CREDENTIAL / unsupported-provider
+          // gates the kernel enforces are preserved here verbatim.
+          const apiKey = process.env.GEMINI_API_KEY || "";
+          if (!apiKey) {
+            nodeExecData = {
+              success: false,
+              status: "BLOCKED",
+              reason: "BLOCKED_MISSING_CREDENTIAL",
+              error: "GEMINI_API_KEY environment variable is not configured on the server",
+            };
+          } else {
+            const modelClassification = classifyModelRequest(nodeModel);
+            if (modelClassification.provider === "UNSUPPORTED") {
+              nodeExecData = {
+                success: false,
+                status: "FAILED",
+                reason: modelClassification.reason,
+                error: modelClassification.message,
+              };
+            } else {
+              const normalizedModel = modelClassification.resolvedModel;
+              const candidateModels = [normalizedModel, ...DEFAULT_CANDIDATE_MODELS].filter((v, idx, a) => a.indexOf(v) === idx);
+              const genResult = await graphRunCtx.invoke("model.gemini", async () => {
+                const rolePrompt = buildAgentRolePrompt({ assignedAgent: nodeAgent, taskTitle, description: nodeDescription, inputs: previousOutput });
+                return generateViaGemini({ apiKey, contents: rolePrompt, candidateModels });
+              });
+              if (!genResult.output) {
+                nodeExecData = {
+                  success: false,
+                  status: "FAILED",
+                  reason: genResult.hadProviderError ? "MODEL_PROVIDER_UNAVAILABLE" : "EMPTY_PROVIDER_RESPONSE",
+                  error: genResult.lastProviderError || "Model provider returned an empty or unparseable response",
+                };
+              } else {
+                nodeExecData = { success: true, status: "DONE", outputs: genResult.output, modelUsed: genResult.modelUsed || nodeModel };
+              }
+            }
+          }
         }
 
-        // Strict verification gate: Node must reach DONE and have valid verified receipt
-        const isNodeVerified = nodeExecData.success && nodeExecData.status === "DONE" && nodeExecData.receipt?.verified === true;
+        const nodeFinishedAt = new Date().toISOString();
+        const classification = isWindmillNode ? "EXTERNAL_ACTION" : "COMPUTE";
+        // Gate: EXTERNAL_ACTION keeps the exact pre-existing receipt-based
+        // condition; COMPUTE's gate is real-output-produced, since COMPUTE
+        // nodes never get a receipt to check by design (Step 4).
+        const isNodeVerified = isWindmillNode
+          ? (nodeExecData.success && nodeExecData.status === "DONE" && nodeExecData.receipt?.verified === true)
+          : (nodeExecData.success && nodeExecData.status === "DONE");
+
+        // STEP 4 — the graph-run node trace: real, ordered, per-node
+        // evidence that survives without any per-node task record. Every
+        // dispatched node (including one that halts the run) gets one of
+        // these, persisted into graph_runs.state_json.nodeResults.
+        const nodeTrace = {
+          nodeId: currentNode.id,
+          graphRunId: runId,
+          order: i,
+          nodeName: taskTitle,
+          classification,
+          agentOrRuntime: isWindmillNode ? "windmill" : nodeAgent,
+          status: isNodeVerified ? "DONE" : (nodeExecData.status || "FAILED"),
+          startedAt: nodeStartedAt,
+          finishedAt: nodeFinishedAt,
+          gate: { passed: isNodeVerified, reason: isNodeVerified ? null : (nodeExecData.error || nodeExecData.reason || "Node did not pass the verification gate.") },
+          modelUsed: nodeExecData.modelUsed || null,
+          artifact: nodeExecData.artifact ? { id: nodeExecData.artifact.id, filePath: nodeExecData.artifact.filePath, contentHash: nodeExecData.artifact.contentHash } : null,
+          externalExecutionId: nodeExecData.externalExecutionId || null,
+          receiptId: nodeExecData.receipt?.receiptId || null,
+          failure: isNodeVerified ? null : { reason: nodeExecData.reason || nodeExecData.status || null, error: nodeExecData.error || null },
+        };
 
         if (!isNodeVerified) {
           // Halt execution DAG immediately on gate failure. Truthfully
@@ -1785,7 +1851,11 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
             failedNodeId: currentNode.id,
             completedNodeIds: executionResults.map((r) => r.nodeId),
             error: "Node failed verification gate. Graph execution halted.",
-            nodeResults: Object.fromEntries(executionResults.map(r => [r.nodeId, r]))
+            // The halting node's own trace is included (not just the
+            // completed ones before it) so the run can be reconstructed —
+            // including exactly why it stopped — without querying any
+            // per-node task record.
+            nodeResults: Object.fromEntries([...executionResults, nodeTrace].map(r => [r.nodeId, r]))
           };
           saveGraphRun({
             runId,
@@ -1800,32 +1870,143 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
             status: haltStatus,
             failedAtNode: currentNode.id,
             completedNodes: executionResults.length,
-            nodeExecution: nodeExecData
+            nodeExecution: nodeExecData,
+            nodeTrace
           });
         }
 
-        // Record node result and pass output forward to next node
-        executionResults.push({
-          nodeId: currentNode.id,
-          nodeName: taskTitle,
-          taskId: nodeTaskId,
-          status: "DONE",
-          receiptId: nodeExecData.receipt?.receiptId,
-          signature: nodeExecData.receipt?.signature,
-          aegisDecision: nodeExecData.review?.decision,
-          artifactHash: nodeExecData.artifact?.contentHash,
-          artifactPath: nodeExecData.artifact?.filePath
-        });
-
+        // Record node result and pass output forward to next node —
+        // unchanged propagation semantics.
+        executionResults.push(nodeTrace);
         previousOutput = nodeExecData.outputs || nodeExecData.artifact?.content || "";
+        if (!isWindmillNode) {
+          nativeNodeOutputs.push({ nodeId: currentNode.id, nodeLabel: taskTitle, order: i, agent: nodeAgent, modelUsed: nodeExecData.modelUsed || null, output: nodeExecData.outputs || "" });
+        }
       }
 
-      // 4. All nodes verified: Mark Graph Run as COMPLETED
+      // 4. All nodes verified. Build the ONE aggregate graph-run task /
+      // artifact / Aegis check / signed receipt for the native COMPUTE
+      // portion — never one per COMPUTE node. Skipped entirely when the run
+      // has no native nodes (an all-Windmill graph has nothing native to
+      // attest to; its EXTERNAL_ACTION receipts already stand on their own).
+      let graphRunReceipt: any = null;
+      if (nativeNodeOutputs.length > 0) {
+        const graphRunTaskId = `task-${runId}`;
+        const nowIso = new Date().toISOString();
+        const externalActionRefs = executionResults
+          .filter((r: any) => r.classification === "EXTERNAL_ACTION")
+          .map((r: any) => ({ nodeId: r.nodeId, externalExecutionId: r.externalExecutionId, receiptId: r.receiptId }));
+
+        // STEP 4 — deterministic, traceable structure (not an arbitrary
+        // concatenated essay): graph identity, ordered native node ids with
+        // label/agent/model/output, and explicit references to every
+        // EXTERNAL_ACTION execution/receipt this run also produced.
+        const nodeSections = nativeNodeOutputs
+          .map((n) => `## [${n.order + 1}] ${n.nodeLabel} (nodeId: ${n.nodeId})\n\n**Agent**: ${n.agent}  \n**Model used**: ${n.modelUsed || "unknown"}\n\n${n.output}\n`)
+          .join('\n---\n\n');
+        const externalActionSection = externalActionRefs.length > 0
+          ? `\n\n---\n\n## External Actions Referenced\n\n${externalActionRefs.map((r: any) => `- Node \`${r.nodeId}\`: execution \`${r.externalExecutionId}\`, receipt \`${r.receiptId}\``).join('\n')}\n`
+          : '';
+        const artifactContent =
+          `# Graph Run — ${name}\n\n` +
+          `**Graph Run ID**: ${runId}\n**Graph ID**: ${graphId}\n**Correlation ID**: ${graphRunCorrelationId}\n` +
+          `**Native COMPUTE nodes**: ${nativeNodeOutputs.length}\n**External-action nodes**: ${externalActionRefs.length}\n\n---\n\n` +
+          nodeSections + externalActionSection;
+
+        createInitialTask({ taskId: graphRunTaskId, workspaceId, title: `Graph Run — ${name}`, description: `Aggregate evidence for graph run ${runId} (${nativeNodeOutputs.length} native COMPUTE node(s)).`, assignedAgent: "graph-runtime", assignedModel: "multi", createdAt: nowIso });
+        recordActivityEvent({ taskId: graphRunTaskId, expectedWorkspaceId: workspaceId, eventType: "TASK_CREATED", agentId: "orchestrator", payload: { title: `Graph Run — ${name}`, status: "TODO" }, createdAt: nowIso });
+        updateTaskStatus(graphRunTaskId, "READY", undefined, workspaceId);
+        recordActivityEvent({ taskId: graphRunTaskId, expectedWorkspaceId: workspaceId, eventType: "AGENT_ASSIGNED", agentId: "graph-runtime", payload: { agent: "graph-runtime", model: "multi", status: "READY" } });
+        updateTaskStatus(graphRunTaskId, "RUNNING", undefined, workspaceId);
+        recordActivityEvent({ taskId: graphRunTaskId, expectedWorkspaceId: workspaceId, eventType: "EXECUTION_STARTED", agentId: "graph-runtime", payload: { status: "RUNNING", nativeNodeCount: nativeNodeOutputs.length } });
+        recordActivityEvent({ taskId: graphRunTaskId, expectedWorkspaceId: workspaceId, eventType: "PROVIDER_COMPLETED", agentId: "graph-runtime", payload: { model: "multi", outputLength: artifactContent.length } });
+
+        const persistedArtifact = writeWorkspaceArtifact({ workspaceId, taskId: graphRunTaskId, content: artifactContent, folder: "Graph-Runs", extension: "md", createdAt: nowIso });
+        recordActivityEvent({
+          taskId: graphRunTaskId, expectedWorkspaceId: workspaceId, eventType: "ARTIFACT_SAVED", agentId: "graph-runtime",
+          payload: { artifactId: persistedArtifact.artifact_id, relativePath: persistedArtifact.relative_path, diskPath: persistedArtifact.disk_path, contentHash: persistedArtifact.content_hash, sizeBytes: persistedArtifact.size_bytes },
+          createdAt: nowIso,
+        });
+
+        updateTaskStatus(graphRunTaskId, "AWAITING_VERIFICATION", undefined, workspaceId);
+        const aegisResult = runDeterministicAegisVerification(graphRunTaskId, artifactContent);
+        const persistedReview = recordQualityReview({ taskId: graphRunTaskId, reviewer: aegisResult.reviewer, method: aegisResult.method, score: aegisResult.score, decision: aegisResult.decision, checks: aegisResult.checks, evidence: aegisResult.evidence, createdAt: nowIso });
+
+        if (aegisResult.decision === "VERIFIED") {
+          updateTaskStatus(graphRunTaskId, "AWAITING_RECEIPT", undefined, workspaceId);
+          recordActivityEvent({ taskId: graphRunTaskId, expectedWorkspaceId: workspaceId, eventType: "AEGIS_REVIEWED", agentId: "aegis", payload: { reviewId: persistedReview.review_id, decision: "VERIFIED", score: aegisResult.score, checks: aegisResult.checks }, createdAt: nowIso });
+
+          const newReceiptId = `rcpt-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+          const canonicalPayload: CanonicalReceiptPayload = {
+            receiptId: newReceiptId,
+            taskId: graphRunTaskId,
+            reviewId: persistedReview.review_id,
+            workspaceId,
+            assignedAgent: "graph-runtime",
+            provider: "synthos-graph-runtime",
+            modelUsed: `graph-run:${nativeNodeOutputs.length}-nodes`,
+            artifactId: persistedArtifact.artifact_id,
+            artifactHash: persistedArtifact.content_hash,
+            aegisDecision: aegisResult.decision,
+            aegisMethod: aegisResult.method,
+            createdAt: nowIso,
+          };
+          const canonicalPayloadStr = canonicalizePayload(canonicalPayload);
+          const { signature, publicKeyPem, algorithm, fingerprint } = signReceiptPayload(canonicalPayloadStr);
+          const receiptVerificationPassed = verifyReceiptSignature(canonicalPayloadStr, signature, publicKeyPem);
+
+          if (receiptVerificationPassed) {
+            recordReceipt({ receiptId: newReceiptId, taskId: graphRunTaskId, reviewId: persistedReview.review_id, algorithm, publicKey: publicKeyPem, payloadJson: canonicalPayloadStr, signature, createdAt: nowIso });
+            recordActivityEvent({ taskId: graphRunTaskId, expectedWorkspaceId: workspaceId, eventType: "RECEIPT_CREATED", agentId: "guardian", payload: { receiptId: newReceiptId, algorithm, fingerprint, signature, verified: true }, createdAt: nowIso });
+            updateTaskStatus(graphRunTaskId, "DONE", undefined, workspaceId);
+            recordActivityEvent({ taskId: graphRunTaskId, expectedWorkspaceId: workspaceId, eventType: "TASK_COMPLETED", agentId: "graph-runtime", payload: { receiptId: newReceiptId, status: "DONE" }, createdAt: nowIso });
+
+            try {
+              const gate = verifyTaskAtGate({
+                taskId: graphRunTaskId, workspaceId, title: `Graph Run — ${name}`, description: `Aggregate evidence for graph run ${runId}`,
+                groundingContext: nodeSections.slice(0, 4000), assignedAgent: "graph-runtime", output: artifactContent,
+              });
+              if (gate.observation.promoted) {
+                try {
+                  projectKnowledgeCandidate({ workspaceId, taskId: graphRunTaskId, kilObservationId: gate.observation.observation_id, receiptId: newReceiptId, vaultPath: persistedArtifact.relative_path, label: `Graph Run — ${name}` });
+                } catch { /* non-blocking */ }
+              }
+            } catch { /* non-blocking */ }
+            try { indexVaultArtifact(workspaceId, persistedArtifact.artifact_id); } catch { /* non-blocking */ }
+
+            graphRunReceipt = {
+              taskId: graphRunTaskId,
+              receiptId: newReceiptId,
+              verified: true,
+              artifactId: persistedArtifact.artifact_id,
+              artifactPath: persistedArtifact.relative_path,
+              aegisDecision: aegisResult.decision,
+              correlationId: graphRunCorrelationId,
+            };
+          } else {
+            updateTaskStatus(graphRunTaskId, "FAILED", undefined, workspaceId);
+            recordActivityEvent({ taskId: graphRunTaskId, expectedWorkspaceId: workspaceId, eventType: "RECEIPT_VERIFICATION_FAILED", agentId: "guardian", payload: { reviewId: persistedReview.review_id }, createdAt: nowIso });
+          }
+        } else {
+          // Clarification #2 — never manufacture a verified aggregate
+          // artifact merely to create a receipt. This branch is not
+          // expected to fire in practice (every input to Aegis here was
+          // already proven real by the loop above, mirroring kernel.ts's
+          // own guaranteed-pass task lifecycle exactly) but is handled
+          // honestly rather than assumed away: FAILED, no receipt, real
+          // audit trail only.
+          updateTaskStatus(graphRunTaskId, "FAILED", undefined, workspaceId);
+          recordActivityEvent({ taskId: graphRunTaskId, expectedWorkspaceId: workspaceId, eventType: "AEGIS_REVIEWED", agentId: "aegis", payload: { reviewId: persistedReview.review_id, decision: aegisResult.decision, score: aegisResult.score }, createdAt: nowIso });
+        }
+      }
+
+      // 5. All nodes verified: Mark Graph Run as COMPLETED
       const finalState = {
         graphId,
         completedAt: new Date().toISOString(),
         totalCompletedNodes: nodes.length,
-        nodeResults: Object.fromEntries(executionResults.map(r => [r.nodeId, r]))
+        nodeResults: Object.fromEntries(executionResults.map(r => [r.nodeId, r])),
+        graphRunReceipt,
       };
       saveGraphRun({
         runId,
@@ -1842,7 +2023,8 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         status: "COMPLETED",
         nodesExecuted: executionResults.length,
         nodes: executionResults,
-        finalState
+        finalState,
+        graphRunReceipt
       });
     } catch (err: any) {
       console.error("[Graph Execution Error]:", err);

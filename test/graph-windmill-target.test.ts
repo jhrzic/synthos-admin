@@ -30,9 +30,12 @@ describe('POST /api/graphs/execute: Windmill node target (G1-G4)', () => {
     expect(executeRoute).toContain("typeof currentNode.windmillTargetId === \"string\"");
   });
 
-  it('every other node still takes the unchanged native dispatch path (byte-identical to the pre-Pass-VI fetch call)', () => {
-    expect(executeRoute).toContain('await fetch(`http://127.0.0.1:${PORT}/api/execute-agent-task`');
-    expect(executeRoute).toContain('X-Internal-Service-Token');
+  it('STEP 4: every other node takes the native COMPUTE path — a direct ctx.invoke("model.gemini", ...) call, no longer a self-HTTP round-trip through /api/execute-agent-task (that was the per-node-receipt problem Step 4 removes)', () => {
+    expect(executeRoute).not.toContain('await fetch(`http://127.0.0.1:${PORT}/api/execute-agent-task`');
+    expect(executeRoute).not.toContain('X-Internal-Service-Token');
+    expect(executeRoute).toContain('await graphRunCtx.invoke("model.gemini", async () => {');
+    expect(executeRoute).toContain('buildAgentRolePrompt({');
+    expect(executeRoute).toContain('generateViaGemini({');
   });
 
   it('the Windmill branch submits through the real control plane (submitAndAwaitExternalExecution), never a second/duplicate submission path', () => {
@@ -57,11 +60,15 @@ describe('POST /api/graphs/execute: Windmill node target (G1-G4)', () => {
     expect(branchWindow).toContain('execution.status === "SUCCEEDED" ? "FAILED" : execution.status');
   });
 
-  it('the existing verification gate applies unconditionally after the branch converges — Windmill nodes go through the exact same gate as native nodes', () => {
-    // This assertion (present verbatim in test/graph-live-execution.test.ts
-    // too) is what actually stops a graph from advancing past an
-    // unverified Windmill node — it is not re-implemented per-branch.
-    expect(executeRoute).toContain('nodeExecData.success && nodeExecData.status === "DONE" && nodeExecData.receipt?.verified === true');
+  it('STEP 4: the Windmill (EXTERNAL_ACTION) gate is preserved byte-for-byte; COMPUTE nodes deliberately get a different, receipt-free gate — they are no longer "the exact same gate" by design, not by accident', () => {
+    // The pre-Step-4 literal condition survives verbatim as the
+    // EXTERNAL_ACTION half of the new classification-aware ternary — proof
+    // the Windmill gate itself was not touched.
+    expect(executeRoute).toContain('? (nodeExecData.success && nodeExecData.status === "DONE" && nodeExecData.receipt?.verified === true)');
+    // COMPUTE nodes never carry a receipt (Step 4 removes per-node receipts
+    // for them), so their half of the gate is real-output-produced, not a
+    // receipt check.
+    expect(executeRoute).toContain(': (nodeExecData.success && nodeExecData.status === "DONE");');
   });
 
   it('the confirmation gate (confirmed: true) still runs before either dispatch path, Windmill included', () => {

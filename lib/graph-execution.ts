@@ -62,6 +62,31 @@ export function selectLiveExecutionNodes<T extends GraphExecutionNodeInput>(node
   return nodes.filter((n) => (n.type || 'agent') === 'agent');
 }
 
+export type GraphNodeClassification = 'CONTROL' | 'COMPUTE' | 'EXTERNAL_ACTION';
+
+/**
+ * STEP 4 — the Rev2 node-class taxonomy, as a pure classifier. This does
+ * NOT change what gets dispatched or how — selectLiveExecutionNodes() above
+ * still decides that, unchanged, and POST /api/graphs/execute keeps its own
+ * inline isWindmillNode check for the real dispatch decision. This exists
+ * so the classification has a real, testable definition rather than only
+ * living as a comment, for future callers — it adds no new runtime
+ * behavior on its own.
+ *
+ * Traced from actual behavior, not labels: a non-'agent' node (trigger/
+ * model/tool/logic) is never dispatched by this engine today — there is no
+ * real branch/merge/wait execution to classify as CONTROL beyond "not
+ * currently executed business work." Do not read this classifier as
+ * evidence that CONTROL nodes run; they don't, and this function does not
+ * make them.
+ */
+export function classifyGraphNode(node: GraphExecutionNodeInput): GraphNodeClassification {
+  if ((node.type || 'agent') !== 'agent') return 'CONTROL';
+  const n = node as GraphExecutionNodeInput & { runtime?: string; windmillTargetId?: string };
+  const isWindmillNode = n.runtime === 'windmill' && typeof n.windmillTargetId === 'string' && n.windmillTargetId.trim().length > 0;
+  return isWindmillNode ? 'EXTERNAL_ACTION' : 'COMPUTE';
+}
+
 export function estimateGraphExecution(nodes: GraphExecutionNodeInput[]): GraphExecutionEstimate {
   const agentNodes = selectLiveExecutionNodes(nodes);
   const nodeEstimates: GraphNodeEstimate[] = agentNodes.map((n) => {

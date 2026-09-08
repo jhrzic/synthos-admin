@@ -36,8 +36,9 @@ describe('POST /api/graphs/execute: real, paid live execution requires explicit 
     expect(executeRoute).toContain('executionResults.length > 0 ? "PARTIAL" : "FAILED"');
   });
 
-  it('a node is never marked complete without a verified receipt — gate is unchanged from the pre-existing spine (7)', () => {
-    expect(executeRoute).toContain('nodeExecData.success && nodeExecData.status === "DONE" && nodeExecData.receipt?.verified === true');
+  it('STEP 4: an EXTERNAL_ACTION (Windmill) node is never marked complete without a verified receipt — that half of the gate is byte-for-byte unchanged; a COMPUTE node is never marked complete without real output, and by design carries no receipt at all', () => {
+    expect(executeRoute).toContain('? (nodeExecData.success && nodeExecData.status === "DONE" && nodeExecData.receipt?.verified === true)');
+    expect(executeRoute).toContain(': (nodeExecData.success && nodeExecData.status === "DONE");');
   });
 
   it('the confirmed graph_run still inherits workspace from the resolved caller, not a hardcoded constant (10)', () => {
