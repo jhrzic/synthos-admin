@@ -198,14 +198,20 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
       setIsProcessing(false);
       setActiveStage(8); // Complete
 
-      // TTS playback
+      // TTS playback — speaks the same real text just logged above (line
+      // 193's honest fallback), never a separate fabricated completion
+      // claim of its own. Jarvis routing audit fix: this previously spoke a
+      // hand-authored success acknowledgment whenever `reply` were falsy —
+      // dead in practice (see the comment above), but a real risk if
+      // handleJarvisCommand()'s contract ever changes; removed rather than
+      // left as a landmine.
       setIsSpeaking(true);
       try {
         const voiceConfig: VoiceConfig = {
           provider: 'web_speech',
           speed: settings.voiceRate || 1.0,
         };
-        await speakText(reply || "Directive dispatched successfully.", voiceConfig);
+        await speakText(reply || `No response was returned for the ${target.toUpperCase()} directive.`, voiceConfig);
       } catch (err) {
         console.warn("TTS playback fallback:", err);
       } finally {

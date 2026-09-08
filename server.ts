@@ -2922,10 +2922,32 @@ sourceHash: ${packageMetadataResult.sourceHash}
         // empty model response used to silently fall back to a similarly
         // fabricated acknowledgment string. Both now fail honestly instead.
         const apiKey = process.env.GEMINI_API_KEY || "";
+        // Jarvis routing audit follow-up — the model was previously a raw
+        // hardcoded string literal here ("gemini-3.7-flash"), bypassing
+        // classifyModelRequest() entirely (the same central classifier
+        // /api/generate already uses). Jarvis's preferred model is still
+        // "gemini-3.7-flash" — that product choice is unchanged, not a
+        // redesign — but it now goes THROUGH the router instead of being a
+        // second, independent hardcoded copy of the provider decision. No
+        // behavioral effect today (Gemini is the only configured provider —
+        // see lib/model-router.ts's header), but Jarvis now asks the router
+        // rather than assuming the answer, so it follows whatever the
+        // router resolves to if that ever changes, with no Jarvis-specific
+        // edit required.
+        const jarvisClassification = classifyModelRequest("gemini-3.7-flash");
         if (!apiKey) {
           degraded = {
             reason: "API_KEY_NOT_CONFIGURED",
             error: "GEMINI_API_KEY is not configured in this deployment. No directive was processed.",
+          };
+        } else if (jarvisClassification.provider !== "GEMINI") {
+          // Structurally unreachable today (the literal above always
+          // classifies GEMINI) — kept so a future change to the classifier
+          // can't silently make Jarvis assume a provider that isn't
+          // actually configured.
+          degraded = {
+            reason: jarvisClassification.reason,
+            error: jarvisClassification.message,
           };
         } else {
           const ai = new GoogleGenAI({
@@ -2933,7 +2955,7 @@ sourceHash: ${packageMetadataResult.sourceHash}
             httpOptions: { headers: { "User-Agent": "aistudio-build" } }
           });
           const jarvisSystemInstruction = "You are Jarvis, the SynthOS Global System Service and Administrative Assistant. Answer concisely and factually based on SynthOS architecture, agent coordination, and system governance.";
-          const candidateModels = ["gemini-3.7-flash", ...DEFAULT_CANDIDATE_MODELS].filter((v, i, a) => a.indexOf(v) === i);
+          const candidateModels = [jarvisClassification.resolvedModel, ...DEFAULT_CANDIDATE_MODELS].filter((v, i, a) => a.indexOf(v) === i);
 
           jarvisFailover = await generateWithFailover(candidateModels, async (candidateModel) => {
             const response = await ai.models.generateContent({
