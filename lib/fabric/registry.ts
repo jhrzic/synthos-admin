@@ -263,6 +263,29 @@ function windmillJobCapability(report: RuntimeStatusReport): CapabilityDescripto
   };
 }
 
+// STEP 6 — distinct from windmill.job: a status/health check or a listing
+// of already-recorded external-execution rows is a real READ, never an
+// external write. Jarvis's existing (pre-Step-6) Windmill status/list
+// query is wired onto this, not windmill.job.
+function windmillReadCapability(report: RuntimeStatusReport): CapabilityDescriptor {
+  const windmill = findSystem(report, 'Windmill (External Execution Control Plane)');
+  const status: CapabilityStatus =
+    windmill?.status === 'HEALTHY' ? 'AVAILABLE' :
+    windmill?.status === 'FAILED' ? 'DEGRADED' :
+    'NOT_CONFIGURED';
+  return {
+    key: 'windmill.read',
+    runtime: 'windmill',
+    status,
+    effectClass: 'READ',
+    riskTier: 'NONE',
+    approvalPolicy: 'NONE',
+    workspaceScope: 'member',
+    reference: 'lib/windmill-client.ts::health / lib/external-executions.ts::listWorkspaceExternalExecutions',
+    reason: windmill?.detail || 'Windmill status unknown.',
+  };
+}
+
 function terminalExecCapability(): CapabilityDescriptor {
   const isProduction = process.env.NODE_ENV === 'production';
   return {
@@ -335,17 +358,27 @@ function browserCapability(): CapabilityDescriptor {
   };
 }
 
-function researchCapability(): CapabilityDescriptor {
+// STEP 6 — a real live-research capability now exists (lib/fabric/research.ts):
+// a genuinely live, grounded Gemini call (config.tools:[{googleSearch:{}}],
+// supported by the installed @google/genai 2.18.0) plus the real, public
+// GitHub REST API for structured repo metadata. It requires GEMINI_API_KEY
+// (grounding is a Gemini call); GITHUB_TOKEN is optional and only raises
+// rate limits — never required for this to work.
+function researchCapability(report: RuntimeStatusReport): CapabilityDescriptor {
+  const gemini = findSystem(report, 'Gemini Provider');
+  const configured = !!gemini && gemini.status !== 'NOT_CONFIGURED';
   return {
     key: 'research',
     runtime: 'research',
-    status: 'NOT_CONFIGURED',
+    status: configured ? 'AVAILABLE' : 'NOT_CONFIGURED',
     effectClass: 'READ',
-    riskTier: 'NONE',
+    riskTier: 'LOW',
     approvalPolicy: 'NONE',
-    workspaceScope: 'none',
-    reference: 'none',
-    reason: 'No live web/GitHub research or grounding capability exists. "perplexity"/"sonar" are recognized model identifiers with no configured execution mapping (lib/model-router.ts RECOGNIZED_UNCONFIGURED_PROVIDERS) — never silently substituted with a different provider.',
+    workspaceScope: 'member',
+    reference: 'lib/fabric/research.ts::runLiveRepositoryResearch',
+    reason: configured
+      ? 'Live Gemini Google Search grounding + the public GitHub REST API — real, evidenced sources, never model-memory-only.'
+      : 'GEMINI_API_KEY is not configured — live research grounding requires a real Gemini call.',
   };
 }
 
@@ -384,11 +417,12 @@ async function buildAllCapabilities(report: RuntimeStatusReport): Promise<Capabi
     graphExecuteCapability(report),
     skillExecuteCapability(report),
     windmillJobCapability(report),
+    windmillReadCapability(report),
     terminalExecCapability(),
     hermesExecuteCapability(report),
     scheduleCapability(),
     browserCapability(),
-    researchCapability(),
+    researchCapability(report),
     mcpConnectivityCapability(report),
   ];
 }

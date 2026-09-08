@@ -91,6 +91,8 @@ import { recordAdminAuditEvent, listRecentAdminAuditEvents } from "./lib/audit";
 import { executeAgentTask, buildAgentRolePrompt } from "./lib/fabric/kernel";
 import { createExecutionContext } from "./lib/fabric/context";
 import { generateViaGemini } from "./lib/fabric/model-gemini";
+import { classifyIntent } from "./lib/fabric/intent";
+import { executeEnvelope } from "./lib/fabric/envelope";
 
 dotenv.config();
 
@@ -2423,53 +2425,123 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         truncated: false,
       };
 
-      // Administrative Dispatch Routing
-      if (lower.includes("task") || lower.includes("show all agent tasks") || lower.includes("list tasks")) {
+      // STEP 6 — canonical classifier-driven routing (lib/fabric/intent.ts),
+      // replacing the old lower.includes("task")/"graph"/"receipt"/
+      // "windmill" substring branches entirely — no substring routing
+      // remains as an alternate path below. That routing collided on
+      // prompts like "research the latest AI task-automation repos"
+      // (contains "task" as a bare substring); classifyIntent() anchors
+      // read-intent patterns on the noun itself ("my tasks", "list
+      // tasks"), so that prompt correctly reaches the research capability
+      // instead of a task-list read. See test/jarvis-command-routing.test.ts.
+      const classification = await classifyIntent(trimmed);
+
+      if (classification.intentType === "BLOCKED_ACTION") {
+        intent = "BLOCKED_ACTION";
+        reply = `I can't do that: ${classification.reason}`;
+        spokenSummary = "I can't run that yet because the required capability isn't configured.";
+        evidence = { classification };
+      } else if (classification.intentType === "APPROVAL_REQUIRED_ACTION") {
+        // Section 8 — no real canonical held-action/approval-resume
+        // contract exists yet. Never fabricate an approval token, never a
+        // second approval queue here — an honest deferral only.
+        intent = "APPROVAL_REQUIRED_ACTION";
+        reply = `This action requires approval before I can execute it, and no approval workflow is wired up in this deployment yet: ${classification.reason}`;
+        spokenSummary = "This action requires approval before I can execute it.";
+        evidence = { classification };
+      } else if (classification.capability === "task.read") {
         intent = "ADMIN_TASK_QUERY";
         const tasks = listWorkspaceTasks(jarvisWorkspaceId, 10);
         evidence = tasks;
         reply = `Found ${tasks.length} active agent tasks in workspace ${jarvisWorkspaceId}:\n` +
           tasks.map((t: any, idx: number) => `${idx + 1}. [${t.status}] ${t.title} (${t.assigned_agent} / ${t.assigned_model}) - ID: ${t.task_id}`).join("\n");
         spokenSummary = `Found ${tasks.length} active agent task${tasks.length === 1 ? "" : "s"}.`;
-      } else if (lower.includes("graph") || lower.includes("pipeline") || lower.includes("dag")) {
+      } else if (classification.capability === "graph.read") {
         intent = "ADMIN_GRAPH_QUERY";
         const graphs = listGraphs(jarvisWorkspaceId);
         const runs = listGraphRuns(jarvisWorkspaceId);
         evidence = { graphsCount: graphs.length, runsCount: runs.length, latestRun: runs[0] };
         reply = `SynthOS Graph Control Plane for workspace ${jarvisWorkspaceId}:\n- Total Graph DAGs: ${graphs.length}\n- Total Graph Execution Runs: ${runs.length}\n- Latest Run: ${runs[0]?.run_id || 'None'} [${runs[0]?.status || 'IDLE'}]`;
         spokenSummary = `${graphs.length} graph${graphs.length === 1 ? "" : "s"} tracked, ${runs.length} execution run${runs.length === 1 ? "" : "s"} total.`;
-      } else if (lower.includes("receipt") || lower.includes("signature") || lower.includes("aegis")) {
+      } else if (classification.capability === "receipt.read") {
         intent = "ADMIN_RECEIPT_QUERY";
         const receipts = listWorkspaceReceipts(jarvisWorkspaceId, 5);
         evidence = receipts;
         reply = `Verified Cryptographic Receipts Ledger for workspace ${jarvisWorkspaceId} (${receipts.length} recent):\n` +
           receipts.map((r: any) => `• Receipt ${r.receipt_id} (Task: ${r.task_id}) - Algorithm: ${r.algorithm}`).join("\n");
         spokenSummary = `${receipts.length} verified receipt${receipts.length === 1 ? "" : "s"} found.`;
-      } else if (lower.includes("windmill") && (lower.includes("status") || lower.includes("connect") || lower.includes("health"))) {
+      } else if (classification.capability === "windmill.read") {
         // ADR-006 / U1/U2 — read-only, workspace-scoped. Jarvis never
-        // triggers a real Windmill job from natural language (U3, deferred).
-        intent = "ADMIN_WINDMILL_STATUS_QUERY";
-        const health = await windmillClient.health();
-        evidence = health;
-        reply = health.status === "NOT_CONFIGURED"
-          ? "Windmill is not configured on this deployment (WINDMILL_BASE_URL/TOKEN/WORKSPACE are unset)."
-          : health.status === "CONNECTED"
-            ? `Windmill is CONNECTED — authenticated as "${health.identity}"${health.version ? ` (version ${health.version})` : ""}.`
-            : `Windmill is ${health.status}: ${health.error || "no further detail."}`;
-        spokenSummary = reply;
-      } else if (lower.includes("windmill") || lower.includes("external job") || lower.includes("external execution")) {
-        intent = "ADMIN_EXTERNAL_EXECUTIONS_QUERY";
-        const executions = listWorkspaceExternalExecutions(jarvisWorkspaceId, 10);
-        evidence = executions;
-        const failedCount = executions.filter((e) => e.status === "FAILED").length;
-        reply = lower.includes("fail")
-          ? `${failedCount} of ${executions.length} recent external executions in workspace ${jarvisWorkspaceId} failed:\n` +
-            executions.filter((e) => e.status === "FAILED").map((e) => `• ${e.id} (${e.remote_path}) — ${e.error_message_safe || "no error detail recorded"}`).join("\n")
-          : `${executions.length} recent external execution(s) in workspace ${jarvisWorkspaceId}:\n` +
-            executions.map((e) => `• [${e.status}] ${e.remote_path} — ${e.id}`).join("\n");
-        spokenSummary = lower.includes("fail")
-          ? `${failedCount} of ${executions.length} recent external executions failed.`
-          : `${executions.length} recent external execution${executions.length === 1 ? "" : "s"} found.`;
+        // triggers a real Windmill job from natural language (U3, deferred;
+        // and Step 6 Section 7 blocks windmill.job from Jarvis outright —
+        // no real Guardian enforcement wraps it).
+        if (lower.includes("status") || lower.includes("connect") || lower.includes("health")) {
+          intent = "ADMIN_WINDMILL_STATUS_QUERY";
+          const health = await windmillClient.health();
+          evidence = health;
+          reply = health.status === "NOT_CONFIGURED"
+            ? "Windmill is not configured on this deployment (WINDMILL_BASE_URL/TOKEN/WORKSPACE are unset)."
+            : health.status === "CONNECTED"
+              ? `Windmill is CONNECTED — authenticated as "${health.identity}"${health.version ? ` (version ${health.version})` : ""}.`
+              : `Windmill is ${health.status}: ${health.error || "no further detail."}`;
+          spokenSummary = reply;
+        } else {
+          intent = "ADMIN_EXTERNAL_EXECUTIONS_QUERY";
+          const executions = listWorkspaceExternalExecutions(jarvisWorkspaceId, 10);
+          evidence = executions;
+          const failedCount = executions.filter((e) => e.status === "FAILED").length;
+          reply = lower.includes("fail")
+            ? `${failedCount} of ${executions.length} recent external executions in workspace ${jarvisWorkspaceId} failed:\n` +
+              executions.filter((e) => e.status === "FAILED").map((e) => `• ${e.id} (${e.remote_path}) — ${e.error_message_safe || "no error detail recorded"}`).join("\n")
+            : `${executions.length} recent external execution(s) in workspace ${jarvisWorkspaceId}:\n` +
+              executions.map((e) => `• [${e.status}] ${e.remote_path} — ${e.id}`).join("\n");
+          spokenSummary = lower.includes("fail")
+            ? `${failedCount} of ${executions.length} recent external executions failed.`
+            : `${executions.length} recent external execution${executions.length === 1 ? "" : "s"} found.`;
+        }
+      } else if (classification.capability) {
+        // Section 3/4 — every other real capability the classifier named
+        // (vault.read, vault.write, memory.search, research, schedule, ...)
+        // goes through the one canonical execution envelope. Jarvis
+        // constructs the request; it never calls a model/Vault/Windmill/
+        // MCP/Hermes or signs a receipt directly here. Deliberately gated
+        // on "a capability was named" rather than intentType alone — a
+        // live-data question the classifier left as CONVERSATIONAL_QUERY
+        // (because the capability turned out to be AVAILABLE, so rule 3
+        // never had to downgrade it to BLOCKED_ACTION) must still reach
+        // the real capability, not fall through to the plain conversation
+        // branch below and answer from stale model memory.
+        intent = "ACTION_REQUEST";
+        const envelopeResult = await executeEnvelope({
+          workspaceId: jarvisWorkspaceId,
+          actorUserId: jarvisUserId || "unknown",
+          capability: classification.capability,
+          action: classification.action,
+          parameters: classification.parameters,
+          rawText: trimmed,
+        });
+        evidence = envelopeResult;
+        if (envelopeResult.outcome === "SUCCESS" && classification.capability === "research") {
+          reply = envelopeResult.artifact
+            ? `Research complete. Saved report to the Vault at ${envelopeResult.artifact.path}. Receipt: ${envelopeResult.receipt?.receiptId}.`
+            : "Research completed.";
+          spokenSummary = "Research complete. I reviewed current repositories and saved the report to the Vault.";
+        } else if (envelopeResult.outcome === "SUCCESS" && classification.capability === "vault.write") {
+          reply = `Saved to the Vault at ${envelopeResult.artifact?.path}.`;
+          spokenSummary = "Saved to the Vault.";
+        } else if (envelopeResult.outcome === "READ_OK") {
+          reply = JSON.stringify(envelopeResult.data ?? {}, null, 2);
+          spokenSummary = `${classification.capability} lookup complete.`;
+        } else if (envelopeResult.outcome === "NOT_CONFIGURED" || envelopeResult.outcome === "BLOCKED") {
+          reply = `I can't do that yet — ${envelopeResult.reason}`;
+          spokenSummary = "I can't run that yet because the required capability isn't configured.";
+        } else if (envelopeResult.outcome === "APPROVAL_REQUIRED") {
+          reply = `This requires approval — ${envelopeResult.reason}`;
+          spokenSummary = "This action requires approval before I can execute it.";
+        } else {
+          reply = `That didn't complete — ${envelopeResult.reason}`;
+          spokenSummary = "That didn't complete successfully.";
+        }
       } else {
         // Natural Language Directive via Live Model — Pass X follow-up
         // (Jarvis routing stabilization). Real bounded retry + real

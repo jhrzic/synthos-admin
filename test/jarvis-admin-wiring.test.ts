@@ -117,16 +117,31 @@ describe('5. conversational prompts remain on real generic chat — no broad key
     expect(route).toContain('ai.models.generateContent');
   });
 
-  it('no new intent types were invented beyond the three the backend already supported (tasks/graphs/receipts)', () => {
+  it('STEP 6: routing is now classifier-driven (lib/fabric/intent.ts), not lower.includes() substring matching — the old collision-prone routing is gone', () => {
+    const route = serverContent.slice(
+      serverContent.indexOf('app.post("/api/jarvis/command"'),
+      serverContent.indexOf('app.get("/api/apollo/status"')
+    );
+    expect(route).toContain('const classification = await classifyIntent(trimmed);');
+    // None of the old routing-decision substring checks remain as the
+    // mechanism that picks a branch (lower.includes("task") etc. are gone
+    // entirely — the only lower.includes() calls left, if any, are
+    // formatting nuances inside an already-classifier-selected branch,
+    // e.g. windmill status-vs-list disambiguation and the receipts count
+    // preface, never the outer routing decision).
+    expect(route).not.toMatch(/if \(lower\.includes\("task"\)/);
+    expect(route).not.toMatch(/if \(lower\.includes\("graph"\)/);
+    expect(route).not.toMatch(/if \(lower\.includes\("receipt"\)/);
+    expect(route).not.toMatch(/if \(lower\.includes\("windmill"\)/);
+  });
+
+  it('STEP 6: the intent set intentionally grew beyond the original three ADMIN_* queries — classification/registry/envelope intents were added deliberately, not accidentally', () => {
     const route = serverContent.slice(
       serverContent.indexOf('app.post("/api/jarvis/command"'),
       serverContent.indexOf('app.get("/api/apollo/status"')
     );
     const intents = route.match(/intent = "([A-Z_]+)"/g) || [];
     const uniqueIntents = new Set(intents);
-    // GENERAL_DIRECTIVE is the pre-existing default (conversational) state,
-    // not a new intent type — the three ADMIN_* values are the only real
-    // classified intents, exactly matching what was already supported.
     expect(uniqueIntents).toEqual(new Set([
       'intent = "GENERAL_DIRECTIVE"',
       'intent = "ADMIN_TASK_QUERY"',
@@ -134,6 +149,9 @@ describe('5. conversational prompts remain on real generic chat — no broad key
       'intent = "ADMIN_RECEIPT_QUERY"',
       'intent = "ADMIN_WINDMILL_STATUS_QUERY"',
       'intent = "ADMIN_EXTERNAL_EXECUTIONS_QUERY"',
+      'intent = "BLOCKED_ACTION"',
+      'intent = "APPROVAL_REQUIRED_ACTION"',
+      'intent = "ACTION_REQUEST"',
     ]));
   });
 });

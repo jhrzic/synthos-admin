@@ -17,10 +17,11 @@ import path from 'path';
 // reaches speakText(); reply stays exactly what it was for the transcript,
 // vault notes, and activity ledger.
 //
-// This repo has no separate "Executing..."/"Researching..." live-status
-// broadcast and no approval-request voice path today — nothing to assert
-// against for those two items on the task's own checklist; noted rather
-// than fabricating coverage for code that doesn't exist.
+// This repo still has no separate "Executing..."/"Researching..." live-status
+// broadcast (UI may show that text; Fish Audio never speaks it — see
+// Step 6). A real approval-required voice path was added in Step 6 (see
+// the "4 (STEP 6)" describe block below) — the exact canonical spoken
+// lines for SUCCESS/BLOCKED/APPROVAL are asserted there.
 // ---------------------------------------------------------------------------
 
 const serverContent = fs.readFileSync(path.resolve(process.cwd(), 'server.ts'), 'utf-8');
@@ -72,10 +73,18 @@ describe('2: internal planning narration is instructed out of spokenSummary at t
   });
 });
 
-describe('4: approval-required actions are out of scope for this pass — no such path exists to route through TTS yet', () => {
-  it('sanity: no dedicated approval-request voice path exists in the Jarvis command route (documents the current absence rather than asserting nothing)', () => {
+describe('4 (STEP 6): a real approval-required voice path now exists, with the exact canonical short spoken line — no execution, no raw reason text spoken', () => {
+  it('APPROVAL_REQUIRED_ACTION sets the exact canonical spokenSummary, never the classification reason itself', () => {
     const slice = jarvisCommandRouteSlice();
-    expect(slice).not.toContain('APPROVAL_REQUIRED');
+    expect(slice).toContain('intent = "APPROVAL_REQUIRED_ACTION"');
+    expect(slice).toContain('spokenSummary = "This action requires approval before I can execute it.";');
+  });
+
+  it('BLOCKED_ACTION and a NOT_CONFIGURED/BLOCKED envelope outcome both speak the same short canonical line, never the raw reason', () => {
+    const slice = jarvisCommandRouteSlice();
+    expect(slice).toContain('intent = "BLOCKED_ACTION"');
+    const occurrences = (slice.match(/spokenSummary = "I can't run that yet because the required capability isn't configured\.";/g) || []).length;
+    expect(occurrences).toBeGreaterThanOrEqual(2); // BLOCKED_ACTION branch + envelope NOT_CONFIGURED/BLOCKED branch
   });
 });
 

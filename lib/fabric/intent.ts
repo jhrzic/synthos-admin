@@ -78,8 +78,21 @@ const HIGH_STAKES_TARGET_PATTERN = /\b(production|prod|live (database|data|syste
 // matches — this is the literal fix for the keyword-collision bug.
 const TASK_READ_PATTERN = /\b(my|show( me)?|list|view|see|get|what are my|check)\b[^.!?]{0,20}\btasks?\b|\btasks?\b[^.!?]{0,20}\b(status|board|list)\b/i;
 const GRAPH_READ_PATTERN = /\b(my|show( me)?|list|view|see|get|what are my|check)\b[^.!?]{0,20}\b(graphs?|graph runs?|pipelines?)\b/i;
-const RECEIPT_READ_PATTERN = /\b(my|show( me)?|list|view|see|get|what are my|check)\b[^.!?]{0,20}\b(receipts?|signatures?)\b/i;
+const RECEIPT_READ_PATTERN = /\b(my|show( me)?|list|view|see|get|what are my|recent|check)\b[^.!?]{0,20}\b(receipts?|signatures?)\b/i;
 const MEMORY_SEARCH_PATTERN = /\b(search|find|look (up|for))\b[^.!?]{0,25}\b(memory|notes?|vault)\b/i;
+const VAULT_READ_PATTERN = /\b(my|show( me)?|list|view|see|what'?s in|check)\b[^.!?]{0,20}\bvault\b/i;
+
+// STEP 6 — Windmill status/list is a real READ (lib/fabric/registry.ts
+// windmill.read), distinct from windmill.job's real external submission,
+// which no natural-language pattern here ever maps to (Jarvis never
+// triggers a real Windmill job from a chat message).
+const WINDMILL_READ_PATTERN = /\bwindmill\b|\bexternal (job|execution)s?\b/i;
+
+// STEP 6 — "Hermes do X" is an explicit request to execute something via
+// the dedicated Hermes runtime, which is honestly UNSUPPORTED (a stub —
+// see lib/fabric/registry.ts hermes.execute). This must reach that
+// capability and refuse honestly, never fall through to plain conversation.
+const HERMES_ACTION_PATTERN = /\bhermes\b[^.!?]{0,30}\b(do|run|execute|start|trigger|use|handle)\b|\b(do|run|execute|start|trigger|use|handle)\b[^.!?]{0,20}\bhermes\b/i;
 
 // A bare question about a stable concept, no live-data words, no action
 // verb — "what is a transformer?" shaped.
@@ -175,6 +188,17 @@ function classifyBase(text: string): BaseClassification {
     };
   }
 
+  if (VAULT_READ_PATTERN.test(text)) {
+    return {
+      intentType: 'ACTION_REQUEST',
+      capability: 'vault.read',
+      action: 'vault.read',
+      riskTier: 'NONE',
+      reason: 'Read/list pattern anchored on "vault" — internal-state read.',
+      confidence: 'MEDIUM',
+    };
+  }
+
   if (TASK_READ_PATTERN.test(text)) {
     return {
       intentType: 'ACTION_REQUEST',
@@ -216,6 +240,28 @@ function classifyBase(text: string): BaseClassification {
       riskTier: 'NONE',
       reason: 'Search-the-vault/memory pattern — internal-state read.',
       confidence: 'MEDIUM',
+    };
+  }
+
+  if (WINDMILL_READ_PATTERN.test(text)) {
+    return {
+      intentType: 'ACTION_REQUEST',
+      capability: 'windmill.read',
+      action: 'windmill.read',
+      riskTier: 'NONE',
+      reason: 'Windmill status/execution mention — real READ, never a job submission from natural language.',
+      confidence: 'HIGH',
+    };
+  }
+
+  if (HERMES_ACTION_PATTERN.test(text)) {
+    return {
+      intentType: 'ACTION_REQUEST',
+      capability: 'hermes.execute',
+      action: 'hermes.execute',
+      riskTier: 'MEDIUM',
+      reason: 'Explicit request to execute something via the Hermes runtime.',
+      confidence: 'HIGH',
     };
   }
 
