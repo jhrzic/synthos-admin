@@ -228,6 +228,26 @@ export const MAX_PRIOR_TURNS = 10;
  *  never counted against this budget. */
 export const MAX_CONTEXT_CHARS = 6000;
 
+/**
+ * True only for an assistant message that is nothing but the honest
+ * runtime/provider-failure marker src/App.tsx writes on a DEGRADED command
+ * (e.g. "[STATUS: DEGRADED - JARVIS_COMMAND_UNAVAILABLE]\n<error>") — never
+ * for a real reply that happens to mention the word "degraded" in passing.
+ * The visible transcript keeps these messages (truthful failure history the
+ * user should see); this only decides what re-enters the model's own
+ * reasoning context, where a stale "the model was unreachable" turn adds
+ * noise and no signal for the next request.
+ *
+ * Deliberately a prefix match, not a substring search: every producer of
+ * this marker (src/App.tsx's four DEGRADED branches) puts it at the very
+ * start of the message with nothing else ahead of it. A substantive reply
+ * that happened to discuss degraded systems would not start with the
+ * literal marker and so would never match.
+ */
+export function isRuntimeFailureOnlyMessage(content: string): boolean {
+  return content.trimStart().startsWith('[STATUS: DEGRADED');
+}
+
 export interface BoundedContextResult {
   /** Chronological (oldest first), ready to map into provider-native chat roles. Never includes the current message. */
   turns: JarvisMessageRecord[];
@@ -253,9 +273,18 @@ export function selectBoundedContext(
   const maxChars = opts?.maxChars ?? MAX_CONTEXT_CHARS;
 
   // Malformed/empty rows are skipped, not fatal — a single corrupted row
-  // must never take down context construction for the whole request.
+  // must never take down context construction for the whole request. A
+  // pure runtime/provider-failure assistant turn is also skipped here: it
+  // stays in the visible transcript (this function never touches storage
+  // or display), but it is not real conversational content and carries
+  // nothing useful into the next reasoning call.
   const clean = history.filter(
-    (m) => m && typeof m.content === 'string' && m.content.trim().length > 0 && (m.role === 'user' || m.role === 'assistant')
+    (m) =>
+      m &&
+      typeof m.content === 'string' &&
+      m.content.trim().length > 0 &&
+      (m.role === 'user' || m.role === 'assistant') &&
+      !(m.role === 'assistant' && isRuntimeFailureOnlyMessage(m.content))
   );
 
   // Dedup guard: the caller persists the current user turn via a separate,
