@@ -398,7 +398,7 @@ async function startServer() {
           success: false,
           status: "DEGRADED",
           reason: "API_KEY_NOT_CONFIGURED",
-          error: "GEMINI_API_KEY environment variable is not configured in AI Studio Secrets.",
+          error: "GEMINI_API_KEY environment variable is not configured. Set it in .env or the deployment shell's environment.",
           modelUsed: model,
           timestamp: new Date().toISOString(),
         });
@@ -2165,7 +2165,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
           success: false,
           status: "DEGRADED",
           reason: "API_KEY_NOT_CONFIGURED",
-          error: `Missing ${provider || "Fish Audio"} API key. Please configure FISH_AUDIO_API_KEY in AI Studio Secrets.`,
+          error: `Missing ${provider || "Fish Audio"} API key. Set FISH_AUDIO_API_KEY in .env or the deployment shell's environment.`,
         });
       }
 
@@ -2275,7 +2275,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
             success: false,
             status: "DEGRADED",
             reason: "API_KEY_NOT_CONFIGURED",
-            error: "Missing OPENAI_API_KEY in AI Studio Secrets.",
+            error: "Missing OPENAI_API_KEY. Set it in .env or the deployment shell's environment.",
           });
         }
 
@@ -2316,7 +2316,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
             success: false,
             status: "DEGRADED",
             reason: "API_KEY_NOT_CONFIGURED",
-            error: "Missing ELEVENLABS_API_KEY in AI Studio Secrets.",
+            error: "Missing ELEVENLABS_API_KEY. Set it in .env or the deployment shell's environment.",
           });
         }
 
@@ -4662,7 +4662,7 @@ Rules for spokenSummary specifically:
         success: true,
         timestamp: new Date().toISOString(),
         platform: {
-          runtime: "Node.js (AI Studio Container)",
+          runtime: "Node.js",
           nodeVersion: process.version,
           port: 3000,
           platform: process.platform,
@@ -4748,7 +4748,13 @@ Rules for spokenSummary specifically:
           connectivity: "NOT_CONNECTED",
           activeWorkers: 0,
           cronEngine: "Windmill External Orchestration Required",
-          notice: "Autonomous cron scheduling must be executed via Windmill worker pool."
+          // STEP 8 — this field is specifically about a DISTRIBUTED/remote
+          // worker-pool cron engine, which still does not exist (Windmill
+          // remains NOT_CONNECTED). It is not a claim that no scheduling
+          // exists at all: lib/fabric/scheduler.ts is a real, separate,
+          // in-process scheduler for this deployment's own capabilities
+          // (Step 7), reported honestly via GET /api/schedules, not here.
+          notice: "Autonomous, distributed cron across a worker pool still requires Windmill (not connected). This deployment's own in-process scheduler for its own capabilities (research, vault.write, etc.) is real and separate — see GET /api/schedules."
         },
         // Pass IV / N — real, cheap counts (no mock totals). Omitted
         // entirely, not zero-filled, if the underlying query fails.

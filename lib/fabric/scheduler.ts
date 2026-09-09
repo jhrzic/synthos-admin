@@ -33,7 +33,7 @@ import {
 } from '../persistence';
 import { resolveCapability } from './registry';
 import { classifyIntent } from './intent';
-import { executeEnvelope, type ExecutionEnvelopeResult, type EnvelopeOutcome } from './envelope';
+import { executeEnvelope, type ExecutionEnvelopeResult, type EnvelopeOutcome, EXTERNAL_ACTION_EXEMPT_FROM_GUARDIAN_RULE } from './envelope';
 
 // ---------------------------------------------------------------------------
 // Time-phrase parsing. Deterministic, regex-based — no model call, so
@@ -70,10 +70,17 @@ export interface AmbiguousSchedule {
 }
 
 const WEEKDAY_PATTERN = /\bevery\s+(mon|tues?|wed(nes)?|thur?s?|fri|sat(ur)?|sun)(day)?\b/i;
-const IN_DURATION_PATTERN = /\bin\s+(\d+)\s+(minute|hour|day)s?\b/i;
+// STEP 8 — narrowly-scoped hedging-word tolerance ("in approximately 1
+// minute", "every about 2 hours"). A non-capturing, purely optional filler
+// between the keyword and the number — it never changes what's computed
+// (still exactly N minutes/hours from now, never a fuzzy range), so this
+// stays fully deterministic; it just tolerates one specific class of real
+// phrasing the original pattern rejected outright.
+const HEDGE = '(?:approximately|about|around)?\\s*';
+const IN_DURATION_PATTERN = new RegExp(`\\bin\\s+${HEDGE}(\\d+)\\s+(minute|hour|day)s?\\b`, 'i');
 const TOMORROW_AT_PATTERN = /\btomorrow\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i;
 const BARE_TOMORROW_PATTERN = /\btomorrow\b/i;
-const EVERY_N_PATTERN = /\bevery\s+(\d+)\s+(minute|hour|day)s?\b/i;
+const EVERY_N_PATTERN = new RegExp(`\\bevery\\s+${HEDGE}(\\d+)\\s+(minute|hour|day)s?\\b`, 'i');
 const EVERY_BARE_PATTERN = /\bevery\s+(minute|hour|day)\b/i;
 
 const UNIT_SECONDS: Record<string, number> = { minute: 60, hour: 3600, day: 86400 };
@@ -222,7 +229,7 @@ export async function createValidatedSchedule(params: {
     cap.status !== 'UNSUPPORTED' &&
     cap.effectClass === 'EXTERNAL_ACTION' &&
     cap.approvalPolicy !== 'GUARDIAN_ENFORCED' &&
-    cap.key !== 'vault.write' // mirrors envelope.ts's EXTERNAL_ACTION_EXEMPT_FROM_GUARDIAN_RULE — kept in sync there, not duplicated as logic
+    !EXTERNAL_ACTION_EXEMPT_FROM_GUARDIAN_RULE.has(cap.key) // STEP 8 — imports the real set from envelope.ts; no longer a hand-synced duplicate
   ) {
     status = 'BLOCKED';
     statusReason = `"${cap.key}" is an external action without real, wired Guardian enforcement (approvalPolicy: ${cap.approvalPolicy}) — refusing to schedule it rather than executing on advisory policy alone, same rule the envelope enforces for direct calls.`;

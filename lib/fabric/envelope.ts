@@ -102,7 +102,7 @@ export interface ExecutionEnvelopeResult {
 // writes directly, no Aegis/receipt/approval gate) already treats a
 // caller's own workspace as approval-free; recorded here rather than
 // silently special-cased inline in the dispatch switch below.
-const EXTERNAL_ACTION_EXEMPT_FROM_GUARDIAN_RULE = new Set<string>(['vault.write']);
+export const EXTERNAL_ACTION_EXEMPT_FROM_GUARDIAN_RULE = new Set<string>(['vault.write']);
 
 export async function executeEnvelope(input: ExecutionEnvelopeInput): Promise<ExecutionEnvelopeResult> {
   const capability = await resolveCapability(input.capability);

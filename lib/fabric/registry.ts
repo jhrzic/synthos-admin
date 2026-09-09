@@ -364,12 +364,16 @@ function browserCapability(): CapabilityDescriptor {
   };
 }
 
-// STEP 6 — a real live-research capability now exists (lib/fabric/research.ts):
-// a genuinely live, grounded Gemini call (config.tools:[{googleSearch:{}}],
-// supported by the installed @google/genai 2.18.0) plus the real, public
-// GitHub REST API for structured repo metadata. It requires GEMINI_API_KEY
-// (grounding is a Gemini call); GITHUB_TOKEN is optional and only raises
-// rate limits — never required for this to work.
+// STEP 6 corrective pass (Part A) — a real live-research capability exists
+// (lib/fabric/research.ts): live discovery via the real, public GitHub
+// Search REST API (GITHUB_TOKEN is optional and only raises rate limits —
+// never required), then a real Gemini call that synthesizes ONLY the
+// already-retrieved GitHub facts (evidence-constrained prompt, no free
+// invention). Google Search grounding was REMOVED in this corrective pass
+// (it hit a real account quota during live acceptance) — there is no
+// config.tools:[{googleSearch:{}}] call anywhere in this path anymore.
+// GEMINI_API_KEY is still required because the synthesis step is a real
+// Gemini call, not because grounding is.
 function researchCapability(report: RuntimeStatusReport): CapabilityDescriptor {
   const gemini = findSystem(report, 'Gemini Provider');
   const configured = !!gemini && gemini.status !== 'NOT_CONFIGURED';
@@ -383,8 +387,8 @@ function researchCapability(report: RuntimeStatusReport): CapabilityDescriptor {
     workspaceScope: 'member',
     reference: 'lib/fabric/research.ts::runLiveRepositoryResearch',
     reason: configured
-      ? 'Live Gemini Google Search grounding + the public GitHub REST API — real, evidenced sources, never model-memory-only.'
-      : 'GEMINI_API_KEY is not configured — live research grounding requires a real Gemini call.',
+      ? 'Live GitHub Search discovery + a Gemini synthesis call constrained to those real, retrieved facts — real, evidenced sources, never model-memory-only, never Google Search grounding.'
+      : 'GEMINI_API_KEY is not configured — the synthesis step requires a real Gemini call.',
   };
 }
 

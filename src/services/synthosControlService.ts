@@ -248,7 +248,12 @@ class SynthOsControlLayer {
       eventType: 'RECEIPT_ISSUED',
       actorRole: task.assignedAgent || 'orchestrator',
       actorModel: modelUsed,
-      summary: `Cryptographic Execution Receipt ${receipt.id} issued (${isSimulated ? 'SIMULATED' : 'LIVE VERIFIED'}).`,
+      // STEP 8 truth fix — this receipt is never cryptographically signed
+      // (see this function's own docstring above); the log line must never
+      // claim otherwise. isSimulated describes whether the underlying
+      // content was itself real-model output or simulated fallback text —
+      // a different question from "was this receipt verified."
+      summary: `Local execution receipt ${receipt.id} issued (${isSimulated ? 'simulated content' : 'real content'}).`,
       payload: receipt,
       isSimulated
     });

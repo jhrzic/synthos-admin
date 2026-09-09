@@ -149,3 +149,19 @@ opportunistically.
   built-in `crypto.createCipheriv('aes-256-gcm', ...)` rather than a KMS/vault library. `tar@^7`
   (added in Pass II, for `lib/backup.ts`) remains the only third-party dependency introduced
   across all five platform-completion passes.
+
+## Separate track: the SynthOS Execution Fabric (Steps 4–8)
+
+A second body of work — the canonical real-execution/scheduling layer under `lib/fabric/*.ts` —
+was built and closed across "Step 4" through "Step 8," **a different numbering scheme from the
+Pass numbering above**, tracked separately because it addresses a different concern (what actually
+executes and how, rather than identity/authorization/admin surfaces). Canonical reference:
+`docs/EXECUTION-FABRIC.md`. In one paragraph: every real ingress (Jarvis, graph runs, the new
+in-process scheduler, admin/manual execution, skills) now routes through one dispatcher
+(`executeEnvelope()`) that enforces capability availability, Guardian/approval eligibility, and a
+single atomic idempotency mechanism (`execution_claims`) shared by all of them; a failed execution
+never fabricates an artifact, Aegis review, or receipt. Step 8 also closed several stale-wording and
+dead-code items found while consolidating this — see `docs/EXECUTION-FABRIC.md`'s own "known
+limitation carried forward" section for what was found but deliberately not touched (the legacy
+client-side `synthosControlService.ts` Kanban demo pipeline, and three client-side direct-provider
+API calls) because fixing either is a real migration project, not cleanup.

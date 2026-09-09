@@ -4,7 +4,6 @@ import path from 'path';
 
 describe('SYNTHOS NON-DEMO RULE: Hermes admin surfaces must never fabricate operational evidence', () => {
   const serverContent = fs.readFileSync(path.resolve(process.cwd(), 'server.ts'), 'utf-8');
-  const hermesDbContent = fs.readFileSync(path.resolve(process.cwd(), 'src/lib/hermes-db.ts'), 'utf-8');
   const hermesManageContent = fs.readFileSync(path.resolve(process.cwd(), 'src/components/HermesManageView.tsx'), 'utf-8');
 
   it('1. /api/hermes/db-state never returns fabricated table/agent/task/log/synapse counts', () => {
@@ -46,9 +45,13 @@ describe('SYNTHOS NON-DEMO RULE: Hermes admin surfaces must never fabricate oper
   it('3. unavailable Hermes local-database access produces a truthful NOT_IMPLEMENTED state, not a fabricated fallback', () => {
     // Server route
     expect(serverContent).not.toContain('classification: isFullyConnected');
-    // Client helper (src/lib/hermes-db.ts) must not silently claim connected:true on failure
-    expect(hermesDbContent).not.toContain('connected: true');
-    expect(hermesDbContent).toContain('connected: false');
+    // STEP 8 — src/lib/hermes-db.ts (queryHermesState/fetchHermesLogs) was
+    // removed: zero real callers anywhere (confirmed via repo-wide grep
+    // before deletion), and neither /api/hermes/db-state nor
+    // /api/hermes/logs ever called it — both routes independently return
+    // NOT_IMPLEMENTED without it (covered by tests 1/2 above via
+    // serverContent directly). Its own "connected: false" honesty no
+    // longer has any live route depending on it to check.
   });
 
   it('4. no route claims dailyCronActive (or any cron-active claim) without a real scheduler behind it', () => {

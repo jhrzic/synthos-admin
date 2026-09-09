@@ -82,6 +82,31 @@ describe('parseSchedulePhrase: deterministic, regex-based — never a model call
     expect(result.nextRunAt).toBe('2026-09-08T14:00:00.000Z');
   });
 
+  it('STEP 8: "in approximately 1 minute" -> ONE_TIME, exactly 1 minute ahead — hedging word is tolerated, never changes what is computed (deterministic, not a fuzzy range)', () => {
+    const result = parseSchedulePhrase('research the latest AI agent repos once in approximately 1 minute', NOW);
+    if ('ambiguous' in result) throw new Error('expected a parsed schedule');
+    expect(result.recurrenceType).toBe('ONCE');
+    expect(result.nextRunAt).toBe('2026-09-08T12:01:00.000Z');
+  });
+
+  it('STEP 8: "in about 10 minutes" and "in around 10 minutes" parse identically to "in 10 minutes"', () => {
+    const bare = parseSchedulePhrase('do it in 10 minutes', NOW);
+    const about = parseSchedulePhrase('do it in about 10 minutes', NOW);
+    const around = parseSchedulePhrase('do it in around 10 minutes', NOW);
+    if ('ambiguous' in bare || 'ambiguous' in about || 'ambiguous' in around) throw new Error('expected all three to parse');
+    expect(about.nextRunAt).toBe(bare.nextRunAt);
+    expect(around.nextRunAt).toBe(bare.nextRunAt);
+  });
+
+  it('STEP 8: "every approximately 2 hours" -> INTERVAL, identical to "every 2 hours"', () => {
+    const bare = parseSchedulePhrase('run the check every 2 hours', NOW);
+    const hedged = parseSchedulePhrase('run the check every approximately 2 hours', NOW);
+    if ('ambiguous' in bare || 'ambiguous' in hedged) throw new Error('expected both to parse');
+    if (bare.recurrenceType !== 'INTERVAL' || hedged.recurrenceType !== 'INTERVAL') throw new Error('expected INTERVAL');
+    expect(hedged.intervalSeconds).toBe(bare.intervalSeconds);
+    expect(hedged.nextRunAt).toBe(bare.nextRunAt);
+  });
+
   it('"tomorrow at 9am" -> ONE_TIME at 09:00 UTC the next day (UTC default policy, since no workspace/user timezone exists anywhere in this repo)', () => {
     const result = parseSchedulePhrase('research the latest AI agent repos tomorrow at 9am', NOW);
     if ('ambiguous' in result) throw new Error('expected a parsed schedule');

@@ -76,7 +76,12 @@ const SCHEDULE_PATTERN = /\b(schedule|set up a recurring|remind me|run (this|it)
 // pattern only needs to detect "some real future time is named," not parse
 // it — that parsing (and the honest ambiguous/ "no time attached" refusal)
 // lives in scheduler.ts's parseSchedulePhrase, not duplicated here.
-const SCHEDULE_TIME_PHRASE_PATTERN = /\b(tomorrow|tonight)\b|\bin\s+\d+\s+(minute|hour|day)s?\b|\bevery\s+\d*\s*(minute|hour|day)s?\b/i;
+// STEP 8 — tolerates the same narrow hedging words ("approximately"/
+// "about"/"around") lib/fabric/scheduler.ts's own parser now accepts, so a
+// phrase like "in approximately 1 minute" is recognized as schedule-shaped
+// here BEFORE it ever reaches that parser — otherwise the parser's own
+// widened vocabulary would never be reached at all.
+const SCHEDULE_TIME_PHRASE_PATTERN = /\b(tomorrow|tonight)\b|\bin\s+(?:approximately|about|around)?\s*\d+\s+(minute|hour|day)s?\b|\bevery\s+(?:approximately|about|around)?\s*\d*\s*(minute|hour|day)s?\b/i;
 
 // Destructive verb + a high-stakes target — mirrors the same BLOCKED-vs-
 // APPROVAL_REQUIRED distinction lib/kil-gate.ts's checkGuardianRules already

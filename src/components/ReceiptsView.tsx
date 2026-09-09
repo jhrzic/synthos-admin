@@ -18,13 +18,14 @@ export const ReceiptsView: React.FC<ReceiptsViewProps> = ({ receipts }) => {
             </div>
             <div>
               <h1 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
-                Deterministic Execution Receipts
+                Kanban Execution Receipts
                 <span className="text-xs px-2 py-0.5 rounded-full bg-[#615EFF]/15 text-[#8C8AFF] border border-[#615EFF]/30 font-mono">
-                  PROVENANCE PROOFS
+                  LOCAL / DEMO
                 </span>
               </h1>
               <p className="text-xs text-[#8E94B8] mt-0.5">
-                Cryptographically signed receipts proving Guardian authority, Aegis quality scoring, latency metrics, and vault artifact lineage.
+                Local receipts for this Kanban board's own Guardian/Aegis heuristic checks and a non-cryptographic integrity hash — not the real,
+                independently verifiable Ed25519 receipts SynthOS's server pipeline signs (see the Costs &amp; Tokens / Execution views for those).
               </p>
             </div>
           </div>
@@ -43,7 +44,7 @@ export const ReceiptsView: React.FC<ReceiptsViewProps> = ({ receipts }) => {
           <FileCheck className="w-10 h-10 mx-auto mb-3 opacity-30 text-[#00D26A]" />
           <h3 className="text-sm font-semibold text-white">No Receipts Generated Yet</h3>
           <p className="text-xs text-[#8E94B8] max-w-md mx-auto mt-1">
-            Execute a task from the Kanban Board or Master Operations command center to trigger the Guardian policy engine, Aegis verification, and automatic receipt signing.
+            Execute a task from the Kanban Board or Master Operations command center to generate a local receipt for this board's own Guardian/Aegis heuristic checks.
           </p>
         </div>
       ) : (
@@ -57,10 +58,13 @@ export const ReceiptsView: React.FC<ReceiptsViewProps> = ({ receipts }) => {
                   </span>
                   <span className="text-xs font-mono font-bold text-white tracking-tight">{rcpt.id}</span>
                 </div>
+                {/* Neutral (not the platform's green/violet "verified" tones) —
+                    this receipt is never cryptographically verified, so it
+                    must never visually read as if it were. */}
                 <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold ${
-                  rcpt.isSimulated ? 'bg-[#EAB308]/15 text-[#EAB308] border border-[#EAB308]/30' : 'bg-[#00D26A]/15 text-[#00D26A] border border-[#00D26A]/30'
+                  rcpt.isSimulated ? 'bg-[#EAB308]/15 text-[#EAB308] border border-[#EAB308]/30' : 'bg-[#8E94B8]/15 text-[#8E94B8] border border-[#8E94B8]/30'
                 }`}>
-                  {rcpt.isSimulated ? 'SIMULATED RECEIPT' : 'VERIFIED PROOF'}
+                  {rcpt.isSimulated ? 'SIMULATED CONTENT' : 'LOCAL RECEIPT'}
                 </span>
               </div>
 
@@ -76,7 +80,9 @@ export const ReceiptsView: React.FC<ReceiptsViewProps> = ({ receipts }) => {
               <div className="bg-[#141628] rounded-xl p-3 border border-[#2D3352]/70 space-y-2 text-xs font-mono">
                 <div className="flex justify-between">
                   <span className="text-[#8E94B8]">Guardian Policy Gate:</span>
-                  <span className="text-[#00D26A] font-bold">PASSED</span>
+                  <span className={`font-bold ${rcpt.guardianPolicyPassed ? 'text-[#00D26A]' : 'text-[#EAB308]'}`}>
+                    {rcpt.guardianPolicyPassed ? 'PASSED' : 'HELD'}
+                  </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-[#8E94B8]">Aegis Quality Score:</span>
@@ -87,8 +93,8 @@ export const ReceiptsView: React.FC<ReceiptsViewProps> = ({ receipts }) => {
                   <span className="text-white">{rcpt.latencyMs}ms</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-[#8E94B8]">Cryptographic Hash:</span>
-                  <span className="text-[#EAB308] truncate max-w-[180px]">{rcpt.signatureHash}</span>
+                  <span className="text-[#8E94B8]">Local Integrity Hash:</span>
+                  <span className="text-[#8E94B8] truncate max-w-[180px]">{rcpt.signatureHash}</span>
                 </div>
               </div>
 
