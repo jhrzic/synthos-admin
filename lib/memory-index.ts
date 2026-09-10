@@ -71,6 +71,40 @@ export function removeFromMemoryIndex(workspaceId: string, artifactId: string): 
  * never throw a query-syntax error or be interpreted as anything but a
  * literal phrase search.
  */
+/**
+ * Browse the indexed corpus with no search term.
+ *
+ * searchWorkspaceMemory() deliberately returns [] for an empty query (FTS5
+ * MATCH has nothing to match on), which is correct for SEARCH but makes a
+ * document-list UI claim "no indexed memory" when the index is in fact
+ * populated. This is a plain ordered read of the same memory_index rows —
+ * same table, same workspace scoping, no FTS5 involved — so the list panel
+ * can show what is really there before anyone types.
+ */
+export function listWorkspaceMemory(workspaceId: string, limit = 50): MemorySearchResult[] {
+  const db = getDatabase();
+  const rows = db.prepare(`
+    SELECT artifact_id, workspace_id, title, source_path, updated_at,
+           substr(content, 1, 240) AS snip
+    FROM memory_index
+    WHERE workspace_id = ?
+    ORDER BY updated_at DESC
+    LIMIT ?
+  `).all(workspaceId, Math.min(Math.max(limit, 1), 200)) as Array<{
+    artifact_id: string; workspace_id: string; title: string; source_path: string; updated_at: string; snip: string;
+  }>;
+  return rows.map((r) => ({
+    artifact_id: r.artifact_id,
+    workspace_id: r.workspace_id,
+    title: r.title,
+    // No FTS5 markers in a browse result — nothing was matched, so nothing
+    // is highlighted. The snippet is a plain content prefix.
+    snippet: r.snip || '',
+    source_path: r.source_path,
+    updated_at: r.updated_at,
+  }));
+}
+
 export function searchWorkspaceMemory(workspaceId: string, query: string, limit = 20): MemorySearchResult[] {
   const trimmed = (query || '').trim();
   if (!trimmed) return [];

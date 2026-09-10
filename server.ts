@@ -59,7 +59,7 @@ import { probeTonReadiness } from "./lib/ton-probe";
 import { tonAnalyticsSnapshot, recordTonTelemetry } from "./lib/ton-analytics";
 import { tonGuardianViews, installTonGuardians } from "./lib/ton-guardians";
 import { listWorkspaceVaultEntries, getWorkspaceVaultEntry, previewWorkspaceVaultEntry, writeWorkspaceArtifact } from "./lib/vault";
-import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory } from "./lib/memory-index";
+import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory, listWorkspaceMemory } from "./lib/memory-index";
 import { estimateGraphExecution, selectLiveExecutionNodes } from "./lib/graph-execution";
 import { listWorkspaceSkills, getWorkspaceSkill, createSkill, updateSkill, testSkill, discoverRepoSkillFiles, isValidMcpEndpointRef, classifySkillExecutability, getRawCredentialCiphertext, ExecutionTargetType } from "./lib/skills";
 import { executeSkill } from "./lib/skill-execution";
@@ -3956,6 +3956,23 @@ Rules for spokenSummary specifically:
       return res.json({ success: true, workspaceId: resolved.workspaceId, query: q, count: results.length, results });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Memory search failed" });
+    }
+  });
+
+  // Browse the indexed corpus with no query. Separate from /search so the
+  // FTS5 contract ("an empty query matches nothing") stays exactly as tested.
+  app.get("/api/memory/documents", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const resolved = resolveWorkspaceId(req.query.workspaceId);
+      if ("error" in resolved) {
+        return res.status(400).json({ success: false, error: resolved.error });
+      }
+      const limitRaw = Number(req.query.limit);
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 50;
+      const results = listWorkspaceMemory(resolved.workspaceId, limit);
+      return res.json({ success: true, workspaceId: resolved.workspaceId, count: results.length, results });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Memory listing failed" });
     }
   });
 
