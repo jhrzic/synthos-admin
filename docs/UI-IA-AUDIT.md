@@ -139,3 +139,45 @@ Treat every `RECOMMENDED_DOMAIN` in the inventory table above as a still-open pr
 decision — that part of this document is unchanged by Pass XI. Findings #4, #5, #7, and #8 above
 also remain open, as does Workstream H (task → graph run → execution cross-linking), which this
 pass did not reach.
+
+---
+
+## Unlinked-screen review (P1-C, restoration pass)
+
+Three screens have a render block in `src/App.tsx` but are reachable from no navigation surface.
+Git shows **no nav entry ever existed** for any of them (`git log -S "setActiveTab('<id>')"` and
+`-S "id: '<id>'"` return nothing across all refs), so these are orphaned-at-import from the
+`f6a2083` baseline — **not** casualties of the later cleanup that removed the Obsidian Knowledge
+Mesh and Context Governor Telemetry.
+
+Each was compared against current navigation and against its own data sources before deciding.
+**None were wired in this pass**, and the reason for each is recorded so the next session does not
+re-derive it.
+
+| Screen | Tab id | Size | Data source | Duplicate of | Decision |
+|---|---|---|---|---|---|
+| `GuideWalkthroughView` | `guide-walkthrough` | 353 L | `GUIDE_CURRICULUM` (static curriculum), user progress in localStorage | **Yes** — `master-admin-walkthrough` "Setup Walkthrough (12 Steps)" is already in the sidebar and is *computed from real diagnostic data* (`MasterAdminView.tsx:801`) | `DO_NOT_WIRE_DUPLICATE` |
+| `EcosystemReposView` | `ecosystem-repos` | 252 L | A hardcoded `repos` array inside the component; zero `fetch` calls | No | `KEEP_UNLINKED_INTERNAL` |
+| `MasterOperationsView` | `master-ops` | 617 L | Real props (agents, models, tasks, messages, audit checks) and real handlers (`handleRunAudit`, fleet standup, execute prompt) — **but also fabricated telemetry** | No — "Master Operations / Chief of Staff" is a distinct concept with no current nav entry | `KEEP_UNLINKED_INTERNAL` (blocked) |
+
+### Why `MasterOperationsView` was not wired
+
+It is the strongest candidate of the three — a distinct product concept, substantial, and already
+fed real data by `App.tsx`. It is blocked on truthfulness, not on value:
+
+- `Latency: 42ms` is hardcoded (`MasterOperationsView.tsx:374`).
+- The fleet-standup broadcast asserts invented results, e.g. *"Sandbox test harness 100% green.
+  Fish Audio dual-channel buffer verified at 78ms latency."* (line 69).
+
+Wiring it as-is would put fabricated telemetry back into product navigation, which `AGENTS.md` §3
+forbids and which the restoration brief explicitly rules out. The correct disposition is
+`PRESERVE_AND_REWIRE` at **P2**: keep the Chief-of-Staff UX, replace the invented figures with real
+runtime data or `UNKNOWN`, then wire it. That is a separate, scoped piece of work — not something
+to fold into a restoration pass.
+
+### Also checked, not a problem
+
+`master-admin` and the 14 `master-admin-*` ids resolve through `activeTab.startsWith('master-admin')`
+to `MasterAdminView`, and the agent tabs resolve through `getAgentRoleFromTab(activeTab)`. Both are
+reachable and correctly rendered — an earlier count of "declared ActiveTab ids without a render
+block" over-reported because it did not account for these catch-all blocks.
