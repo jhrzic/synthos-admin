@@ -26,27 +26,45 @@ export const FISH_AUDIO_VOICE_PRESETS = [
 ];
 
 /**
- * Get active credentials with persistent fallback
+ * Resolves the NON-SECRET voice selection from local settings.
+ *
+ * P0 regression fix: this used to also dig the Fish Audio API KEY out of
+ * localStorage ('hermes_jarvis_settings') and hand it to callers, who then
+ * posted it to the server in every TTS request body. Two problems, both of
+ * which produced the robot voice:
+ *
+ *   - The secret lived in the browser, so the server could only ever use a
+ *     key some client chose to send.
+ *   - The key was written to TWO different localStorage stores by two
+ *     different Settings surfaces ('hermes_jarvis_settings' and
+ *     'hermes_voice_config'). Jarvis read the one it was NOT saved in, sent
+ *     an empty key, and fell through to browser speech synthesis.
+ *
+ * The key now lives server-side only (lib/voice-credentials.ts). A voice id
+ * is not a secret — it names a voice, it does not authenticate — so it stays
+ * readable here.
  */
-export function getPersistentFishAudioCredentials(options?: FishAudioOptions): { apiKey: string; voiceId: string } {
-  let storedKey = '';
+export function getPersistentFishAudioVoiceId(options?: FishAudioOptions): string {
   let storedVoiceId = '';
-
   try {
-    const rawSettings = localStorage.getItem('hermes_jarvis_settings');
-    if (rawSettings) {
-      const parsed = JSON.parse(rawSettings);
-      storedKey = parsed.FISH_AUDIO_API_KEY || parsed.fishAudioConfig?.apiKey || parsed.customApiKeys?.fish_audio || '';
-      storedVoiceId = parsed.FISH_AUDIO_DEFAULT_VOICE_ID || parsed.fishAudioConfig?.voiceId || '';
+    for (const storeKey of ['hermes_jarvis_settings', 'hermes_voice_config']) {
+      const raw = localStorage.getItem(storeKey);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      storedVoiceId =
+        parsed.FISH_AUDIO_DEFAULT_VOICE_ID || parsed.fishAudioConfig?.voiceId || parsed.voiceId || '';
+      if (storedVoiceId) break;
     }
   } catch {
     // ignore
   }
 
-  const apiKey = (options?.FISH_AUDIO_API_KEY || options?.apiKey || storedKey || DEFAULT_FISH_AUDIO_API_KEY).trim();
-  const voiceId = (options?.FISH_AUDIO_DEFAULT_VOICE_ID || options?.voiceId || storedVoiceId || DEFAULT_FISH_AUDIO_VOICE_ID).trim();
-
-  return { apiKey, voiceId };
+  return (
+    options?.FISH_AUDIO_DEFAULT_VOICE_ID ||
+    options?.voiceId ||
+    storedVoiceId ||
+    DEFAULT_FISH_AUDIO_VOICE_ID
+  ).trim();
 }
 
 /**
@@ -63,10 +81,16 @@ export class JarvisVoiceStreamer {
   private onCloseCallback?: () => void;
   private textBufferQueue: string[] = [];
 
+  // NOTE (P0 voice fix): this WebSocket streamer authenticates from the
+  // BROWSER, so it only works if a key is passed in explicitly. It no longer
+  // harvests one from localStorage, because the Fish Audio credential now
+  // lives server-side only. With no key supplied the socket simply never
+  // authenticates — it is dormant, not a fallback, and nothing in the Jarvis
+  // speech path depends on it. The canonical path is
+  // voiceEngine.speakText() -> /api/voice/tts.
   constructor(apiKey?: string, voiceId?: string) {
-    const creds = getPersistentFishAudioCredentials({ apiKey, voiceId });
-    this.apiKey = creds.apiKey;
-    this.voiceId = creds.voiceId;
+    this.apiKey = (apiKey || '').trim();
+    this.voiceId = getPersistentFishAudioVoiceId({ voiceId });
   }
 
   public setCredentials(apiKey: string, voiceId?: string): void {
@@ -190,100 +214,86 @@ export class JarvisVoiceStreamer {
 }
 
 /**
- * Synthesizes text with Fish Audio neural engine
+ * Synthesizes text with Fish Audio, through the server proxy only.
+ *
+ * TWO P0 BUGS WERE FIXED HERE, and both produced the robot voice:
+ *
+ * 1. THE ACCEPTANCE CHECK TREATED JSON AS AUDIO. It used to be:
+ *
+ *      if (response.ok && (ct.includes('audio') || ct.includes('octet-stream')
+ *          || <a bare 200-status check>))
+ *
+ *    That trailing bare status check made the content-type test
+ *    meaningless. The server answered every failure with HTTP 200 and a JSON
+ *    `{status:"DEGRADED"}` body, which is well over the 50-byte floor, so the
+ *    JSON was returned as "audio", handed to an <audio> element, failed to
+ *    decode, and dropped through to speechSynthesis — while the UI reported
+ *    "Fish Audio Stream Active".
+ *
+ * 2. IT CALLED api.fish.audio DIRECTLY FROM THE BROWSER as a second attempt,
+ *    using a key read out of localStorage. That required the secret to be in
+ *    the browser, and the app's own CSP (connect-src 'self') blocks the call
+ *    anyway, so it was a dead path that existed only to leak a credential.
+ *
+ * The route now returns a real error status on failure, and this function
+ * accepts a response as audio only when the server says it is audio.
  */
 export async function synthesizeFishAudio(
-  text: string, 
+  text: string,
   voiceId?: string,
   options?: FishAudioOptions
 ): Promise<ArrayBuffer> {
-  const creds = getPersistentFishAudioCredentials(options);
-  const selectedVoiceId = voiceId || creds.voiceId || DEFAULT_FISH_AUDIO_VOICE_ID;
-  const apiKey = (creds.apiKey || DEFAULT_FISH_AUDIO_API_KEY).trim();
+  const selectedVoiceId = voiceId || getPersistentFishAudioVoiceId(options);
   const latency = options?.latencyMode || 'low';
   const format = options?.format || 'mp3';
 
-  // 1. Try Backend Proxy Route
-  try {
-    const response = await fetch('/api/tts', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        text,
-        provider: 'fish_audio',
-        voiceId: selectedVoiceId,
-        reference_id: selectedVoiceId,
-        apiKey: apiKey || DEFAULT_FISH_AUDIO_API_KEY,
-        speed: 1.0,
-        format,
-        latency: latency === 'low' ? 'normal' : latency,
-      }),
-    });
+  const response = await fetch('/api/voice/tts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      text,
+      provider: 'fish_audio',
+      voiceId: selectedVoiceId,
+      reference_id: selectedVoiceId,
+      speed: 1.0,
+      format,
+      latency: latency === 'low' ? 'normal' : latency,
+    }),
+  });
 
-    const contentType = response.headers.get('content-type') || '';
-
-    if (response.ok && (contentType.includes('audio') || contentType.includes('octet-stream') || response.status === 200)) {
-      const buffer = await response.arrayBuffer();
-      if (buffer.byteLength > 50) {
-        return buffer;
-      }
-    }
-  } catch (backendErr) {
-    console.warn('Backend TTS route failed, attempting direct Fish Audio client fetch:', backendErr);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(err?.error || `Fish Audio synthesis failed (HTTP ${response.status}).`);
   }
 
-  // 2. Direct Client-side API Call
-  const activeKey = apiKey || DEFAULT_FISH_AUDIO_API_KEY;
-  if (activeKey && activeKey.length > 5) {
-    try {
-      const directRes = await fetch('https://api.fish.audio/v1/tts', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${activeKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          text,
-          reference_id: selectedVoiceId,
-          format: format || 'mp3',
-          latency: latency === 'low' ? 'balanced' : latency,
-          normalize: true
-        }),
-      });
-
-      if (directRes.ok) {
-        const directBuffer = await directRes.arrayBuffer();
-        if (directBuffer.byteLength > 50) {
-          return directBuffer;
-        }
-      }
-    } catch (directErr) {
-      console.warn('Direct Fish Audio API fetch error:', directErr);
-    }
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('audio') && !contentType.includes('octet-stream')) {
+    const err = await response.json().catch(() => null);
+    throw new Error(
+      err?.error || `Fish Audio returned "${contentType || 'unknown content-type'}" instead of audio.`
+    );
   }
 
-  throw new Error('Fish Audio synthesis unavailable. Fallback speech activated.');
+  const buffer = await response.arrayBuffer();
+  if (buffer.byteLength < 128) {
+    throw new Error(`Fish Audio returned ${buffer.byteLength} bytes, which is not playable audio.`);
+  }
+  return buffer;
 }
 
 /**
  * Ping Test helper for 3-Step Setup Wizard
  */
 export async function testFishAudioConnection(apiKey?: string, voiceId?: string): Promise<{ success: boolean; message: string }> {
-  const creds = getPersistentFishAudioCredentials({ apiKey, voiceId });
+  const resolvedVoiceId = getPersistentFishAudioVoiceId({ voiceId });
   try {
     const testText = "Voice engine online.";
-    const buffer = await synthesizeFishAudio(testText, creds.voiceId, { apiKey: creds.apiKey });
-    if (buffer && buffer.byteLength > 50) {
-      return {
-        success: true,
-        message: `●●●● Connected to Fish Audio Plus (${creds.voiceId.slice(0, 8)}...) with latency <150ms.`
-      };
-    }
+    const buffer = await synthesizeFishAudio(testText, resolvedVoiceId);
+    // synthesizeFishAudio now throws on anything that is not real audio, so
+    // reaching here means the provider genuinely returned playable bytes.
     return {
       success: true,
-      message: 'Synthesizer responded with standard audio frames.'
+      message: `Connected to Fish Audio — voice ${resolvedVoiceId.slice(0, 8)}… returned ${buffer.byteLength} bytes of audio.`
     };
   } catch (err: any) {
     // Pass X / Workstream A2 — a failed connection must report FAILED, not a

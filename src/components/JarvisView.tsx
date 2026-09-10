@@ -11,6 +11,7 @@ import {
   testFishAudioConnection,
   JarvisVoiceStreamer
 } from '../services/fishAudio';
+import { speakText as speakViaVoiceEngine, stopSpeaking as stopVoiceEngine } from '../services/voiceEngine';
 import { SetupWizardCard } from './SetupWizardCard';
 import VoiceSettingsModal from './VoiceSettingsModal';
 import { 
@@ -18,7 +19,7 @@ import {
   Cpu, Sliders, Play, Save, CheckCircle2, RefreshCw, 
   Terminal, Zap, Radio, Database, Lock, Eye, AlertCircle,
   RadioTower, Layers, ArrowRight, ShieldCheck, Check, Send, Key, Settings,
-  History, Plus, X, Loader2
+  History, Plus, X, Loader2, AlertTriangle
 } from 'lucide-react';
 
 interface JarvisViewProps {
@@ -65,6 +66,17 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
   // remains for rendering (disabling the button, showing a spinner).
   const isLoadingRef = useRef(false);
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
+  // Rule 9 — a degraded voice provider is a reported state, never a silent
+  // substitution. When this is set, the UI says Fish Audio failed and that
+  // browser speech is a FALLBACK, so robotic speech is never mistaken for
+  // the configured Jarvis voice.
+  const [voiceStatus, setVoiceStatus] = useState<{ degraded: boolean; reason: string; detail: string } | null>(null);
+  // Presence-only view of the SERVER-side credential. The key value itself is
+  // never sent back to the browser, so "configured" is answered by the server
+  // rather than by looking for a secret in local state.
+  const [credentialStatus, setCredentialStatus] = useState<{ apiKeyPresent: boolean; referenceId: string | null } | null>(null);
+  // Transient, in-memory only. Never written to localStorage or settings.
+  const [keyDraft, setKeyDraft] = useState('');
   const [transientCaption, setTransientCaption] = useState<string | null>(null);
   const [hudLogs, setHudLogs] = useState<string[]>([
     "[KERNEL]: AI Assistant OS initialized.",
@@ -149,7 +161,11 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
 
   // Active Key and Voice ID with persistent fallback
   const activeVoiceId = settings.FISH_AUDIO_DEFAULT_VOICE_ID || settings.fishAudioConfig?.voiceId || DEFAULT_FISH_AUDIO_VOICE_ID;
-  const activeApiKey = settings.FISH_AUDIO_API_KEY || settings.fishAudioConfig?.apiKey || settings.customApiKeys?.fish_audio || DEFAULT_FISH_AUDIO_API_KEY;
+  // P0 fix: Jarvis no longer reads a Fish Audio key from settings/localStorage.
+  // The credential lives server-side (lib/voice-credentials.ts) and is applied
+  // by /api/voice/tts. DEFAULT_FISH_AUDIO_API_KEY is the empty string and is
+  // referenced only to keep the import meaningful.
+  const activeApiKey = DEFAULT_FISH_AUDIO_API_KEY;
 
   // Auto-dismiss transient speech captions after 3.5s
   const showCaptionWithAutoDismiss = useCallback((caption: string) => {
@@ -234,49 +250,87 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
     }
   };
 
+  const refreshCredentialStatus = React.useCallback(async () => {
+    try {
+      const res = await fetch('/api/voice/credentials');
+      if (!res.ok) return;
+      const data = await res.json();
+      setCredentialStatus({ apiKeyPresent: Boolean(data.apiKeyPresent || data.environmentKeyPresent), referenceId: data.referenceId ?? null });
+    } catch {
+      // Presence unknown; the UI shows "Key Needed" rather than claiming configured.
+    }
+  }, []);
+
+  useEffect(() => { refreshCredentialStatus(); }, [refreshCredentialStatus]);
+
+  /** Persists the Fish Audio key to the encrypted server-side store. It never touches localStorage. */
+  const saveVoiceCredential = React.useCallback(async (apiKey?: string, referenceId?: string) => {
+    const res = await fetch('/api/voice/credentials', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...(apiKey && apiKey.trim().length > 0 ? { apiKey: apiKey.trim() } : {}),
+        ...(referenceId ? { referenceId } : {}),
+      }),
+    });
+    setKeyDraft('');
+    await refreshCredentialStatus();
+    return res.ok;
+  }, [refreshCredentialStatus]);
+
   // Neural Voice Synthesis: Fish Audio -> ElevenLabs -> Browser Fallback
   const speakText = async (text: string) => {
     if (!settings.voiceEnabled) return;
     stopActiveSpeech();
 
-    // 1. Fish Audio Neural Voice Provider
+    // 1. Fish Audio Neural Voice Provider.
+    //
+    // P0 fix: this branch used to be a SECOND, Jarvis-only Fish Audio
+    // implementation (synthesizeFishAudio + playFishAudioBuffer + its own
+    // fallback), separate from the shared voiceEngine every other surface
+    // used. It carried its own copy of the acceptance bug, so it reported
+    // "Fish Audio Stream Active" while browser speech synthesis actually
+    // spoke. Jarvis now goes through the one canonical path:
+    //   spokenSummary -> voiceEngine.speakText() -> /api/voice/tts -> Fish.
+    // The outcome is inspected, so a fallback is shown as a FAILURE rather
+    // than presented as the configured Jarvis voice.
     if (settings.voiceProvider === 'fish_audio') {
       const targetVoiceId = activeVoiceId;
-      const targetApiKey = activeApiKey;
 
-      setVoiceNotice(`Synthesizing with Fish Audio model (${targetVoiceId.slice(0, 8)}...)...`);
+      setVoiceStatus(null);
+      setVoiceNotice(`Synthesizing with Fish Audio voice ${targetVoiceId.slice(0, 8)}…`);
       setIsSpeaking(true);
       try {
-        const buffer = await synthesizeFishAudio(text, targetVoiceId, {
-          apiKey: targetApiKey,
-          FISH_AUDIO_API_KEY: targetApiKey,
-          FISH_AUDIO_DEFAULT_VOICE_ID: targetVoiceId,
-          latencyMode: settings.fishAudioConfig?.latencyMode || 'low',
-          format: settings.fishAudioConfig?.format || 'mp3',
+        const outcome = await speakViaVoiceEngine(text, {
+          provider: 'fish_audio',
+          voiceId: targetVoiceId,
+          speed: settings.voiceRate || 1.0,
         });
 
-        if (buffer && buffer.byteLength > 50) {
-          setVoiceNotice(`●●●● Fish Audio Stream Active (${targetVoiceId.slice(0, 8)}...)`);
-          const audio = await playFishAudioBuffer(buffer);
-          currentAudioRef.current = audio;
-          audio.onended = () => {
-            setIsSpeaking(false);
-            setVoiceNotice(null);
-          };
-          audio.onerror = () => {
-            setIsSpeaking(false);
-            setVoiceNotice('Audio playback error.');
-            fallbackBrowserSpeak(text);
-          };
-          return;
+        if (outcome.ok && !outcome.fellBackToWebSpeech) {
+          setVoiceNotice(null);
         } else {
-          throw new Error('Empty audio stream received');
+          // Never imply the robot voice was Fish Audio.
+          setVoiceStatus({
+            degraded: true,
+            reason: outcome.reason || 'UNKNOWN',
+            detail: outcome.detail || 'Fish Audio did not return audio.',
+          });
+          setVoiceNotice(
+            `VOICE DEGRADED — Fish Audio unavailable (${outcome.reason || 'UNKNOWN'}). Browser speech is standing in.`
+          );
         }
       } catch (err: any) {
-        console.warn('Fish Audio streaming fallback to Web Speech:', err);
-        const errMsg = err?.message || 'Offline mode';
-        setVoiceNotice(`●●●● Fish Audio: ${errMsg} (Web Speech active)`);
+        console.warn('Fish Audio speech failed:', err);
+        setVoiceStatus({
+          degraded: true,
+          reason: 'SPEECH_ERROR',
+          detail: err?.message || 'Speech request failed.',
+        });
+        setVoiceNotice(`VOICE DEGRADED — ${err?.message || 'speech request failed'} (browser speech active).`);
         fallbackBrowserSpeak(text);
+      } finally {
+        setIsSpeaking(false);
       }
       return;
     }
@@ -469,9 +523,9 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
             <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold uppercase text-[#615EFF] border border-[#615EFF]/30 bg-[#615EFF]/10">
               AI ASSISTANT OS & NEURAL SYNAPSE
             </span>
-            {activeApiKey && activeApiKey.length > 5 ? (
+            {credentialStatus?.apiKeyPresent ? (
               <span className="text-xs font-mono text-[#00D26A]">
-                ●●●● Fish Audio credentials configured ({activeVoiceId.slice(0, 8)}...)
+                Fish Audio credential stored server-side ({activeVoiceId.slice(0, 8)}...)
               </span>
             ) : (
               <span className="text-xs font-mono text-[#7E8BB5]">
@@ -612,27 +666,22 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
         sectionTitle="Jarvis Voice & Fish Audio Setup"
         sectionSubtitle="3-Step persistent neural TTS setup. Sub-150ms duplex streaming without browser prompt interruptions."
         statusBadge={{
-          isConnected: Boolean(activeApiKey && activeApiKey.length > 5),
-          connectedLabel: `Connected: Fish Audio (${activeVoiceId.slice(0, 8)}...)`,
+          isConnected: Boolean(credentialStatus?.apiKeyPresent),
+          connectedLabel: `Stored server-side: Fish Audio (${activeVoiceId.slice(0, 8)}...)`,
           pendingLabel: "Key Needed",
         }}
         inputConfig={{
           label: "FISH_AUDIO_API_KEY",
-          value: activeApiKey,
-          placeholder: "Enter Fish Audio Key (e.g. sk-fish-...)",
+          value: keyDraft,
+          placeholder: credentialStatus?.apiKeyPresent ? "Key stored server-side — type to replace" : "Enter Fish Audio Key",
           type: "password",
-          helperText: "Automatically bound to environment state. Never prompts browser popups.",
+          helperText: "Saved encrypted on the server. It is never written to browser storage and never sent back to the browser.",
           externalDocLink: {
             url: "https://fish.audio",
             label: "Get API Key & Voice IDs",
           },
-          onChange: (val) => {
-            onUpdateSettings({
-              FISH_AUDIO_API_KEY: val,
-              fishAudioConfig: { ...settings.fishAudioConfig!, apiKey: val },
-              customApiKeys: { ...settings.customApiKeys, fish_audio: val },
-            });
-          },
+          // Held in component state only until Save. No localStorage, no settings.
+          onChange: (val) => setKeyDraft(val),
         }}
         secondaryConfig={{
           label: "DEFAULT VOICE MODEL PRESET",
@@ -650,21 +699,30 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
               voiceName: `Fish Audio (${val.slice(0, 8)})`,
               fishAudioConfig: { ...settings.fishAudioConfig!, voiceId: val },
             });
+            // The reference voice must reach the server, or /api/voice/tts has
+            // no cloned voice to synthesize with.
+            void saveVoiceCredential(undefined, val);
           },
         }}
-        onTestConnection={() => testFishAudioConnection(activeApiKey, activeVoiceId)}
-        onSave={handleSaveSettings}
+        onTestConnection={async () => {
+          await saveVoiceCredential(keyDraft, activeVoiceId);
+          return testFishAudioConnection(undefined, activeVoiceId);
+        }}
+        onSave={async () => {
+          await saveVoiceCredential(keyDraft, activeVoiceId);
+          handleSaveSettings();
+        }}
         howToGuide={{
           title: "Configuring Low-Latency Fish Audio for Hermes OS",
           steps: [
             "Create a free account at fish.audio to generate your API token.",
-            "Paste your key into FISH_AUDIO_API_KEY (automatically saved to localStorage & environment).",
+            "Paste your key into FISH_AUDIO_API_KEY, then Save — it is stored encrypted on the server, never in the browser.",
             "Choose a voice model preset (Adrian, Evelyn, or Dexter) or enter a custom trained clone ID.",
             "Click 'Test & Save Config' to run a 1-second ping test and verify streaming audio output."
           ],
           troubleshooting: [
             "If offline, Hermes OS automatically degrades gracefully to the native Web Speech API.",
-            "Latency is kept below 150ms using WebSocket and direct MP3 chunk streaming."
+            "If the voice is degraded, the banner names the real provider error (for example insufficient Fish Audio API credit) rather than silently using the browser voice."
           ]
         }}
       />
@@ -678,7 +736,28 @@ export const JarvisView: React.FC<JarvisViewProps> = ({
         </div>
       )}
 
-      {voiceNotice && (
+      {/* Rule 9 — a degraded voice provider is stated plainly. Browser speech
+          is labelled FALLBACK so it is never mistaken for the configured
+          Fish Audio voice, and the real provider error is shown. */}
+      {voiceStatus?.degraded && (
+        <div className="p-3 bg-[#E8A845]/10 border border-[#E8A845]/40 rounded-xl text-xs font-mono text-[#E8A845] flex items-start gap-2 animate-fadeIn">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <div className="space-y-0.5">
+            <div className="font-bold uppercase tracking-wide">
+              Voice degraded — browser speech FALLBACK in use, not your Fish Audio voice
+            </div>
+            <div className="text-[#C9A05E]">{voiceStatus.reason}: {voiceStatus.detail}</div>
+            <button
+              onClick={() => setVoiceStatus(null)}
+              className="text-[10px] underline text-[#C9A05E] hover:text-[#E8A845] cursor-pointer"
+            >
+              dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
+      {voiceNotice && !voiceStatus?.degraded && (
         <div className="p-3 bg-[#615EFF]/15 border border-[#615EFF]/40 rounded-xl text-xs font-mono text-[#A5A2FF] flex items-center gap-2 animate-fadeIn">
           <RadioTower className="w-4 h-4 animate-pulse" />
           <span>{voiceNotice}</span>

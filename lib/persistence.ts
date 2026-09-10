@@ -784,6 +784,26 @@ export function getDatabase(): any {
       CREATE INDEX IF NOT EXISTS idx_external_executions_workspace ON external_executions(workspace_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_external_executions_correlation ON external_executions(correlation_id);
       CREATE INDEX IF NOT EXISTS idx_external_executions_remote_job ON external_executions(remote_job_id);
+
+      -- P0 voice regression fix. The TTS provider credential now has a real
+      -- server-side home instead of living in browser localStorage and
+      -- travelling in every /api/voice/tts request body. api_key_encrypted
+      -- holds an AES-256-GCM envelope (see lib/voice-credentials.ts) — never
+      -- plaintext. reference_id and model are NOT secrets: a voice id names a
+      -- voice and a model id names a tier, neither authenticates anything, so
+      -- both are stored in the clear and may be read back by the UI.
+      -- One row per provider: this is install-level configuration, not
+      -- per-workspace data.
+      CREATE TABLE IF NOT EXISTS voice_credentials (
+        provider TEXT PRIMARY KEY,
+        api_key_encrypted TEXT,
+        reference_id TEXT,
+        model TEXT,
+        format TEXT,
+        updated_by_user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
   }
   return dbInstance;

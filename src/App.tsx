@@ -176,14 +176,85 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
     return INITIAL_JARVIS_SETTINGS;
   });
 
-  // Save settings changes to localStorage
+  // Save settings changes to localStorage.
+  //
+  // P0 voice fix: the Fish Audio API key is deliberately STRIPPED before
+  // writing. It now lives only in the server-side encrypted credential store
+  // (lib/voice-credentials.ts). Persisting it here is what created two
+  // competing browser copies of the secret — Jarvis read the store it was not
+  // saved in, sent an empty key, and fell back to the robot voice.
   useEffect(() => {
     try {
-      localStorage.setItem('hermes_jarvis_settings', JSON.stringify(jarvisSettings));
+      const { FISH_AUDIO_API_KEY, ...safeSettings } = jarvisSettings as any;
+      const redacted = {
+        ...safeSettings,
+        fishAudioConfig: safeSettings.fishAudioConfig
+          ? { ...safeSettings.fishAudioConfig, apiKey: undefined }
+          : safeSettings.fishAudioConfig,
+        customApiKeys: safeSettings.customApiKeys
+          ? { ...safeSettings.customApiKeys, fish_audio: undefined }
+          : safeSettings.customApiKeys,
+      };
+      localStorage.setItem('hermes_jarvis_settings', JSON.stringify(redacted));
     } catch (e) {
       console.warn('Could not persist settings to localStorage:', e);
     }
   }, [jarvisSettings]);
+
+  // ---------------------------------------------------------------------
+  // One-time migration of a Fish Audio key that an earlier build saved into
+  // browser storage. It is handed to the server's encrypted store and then
+  // erased from localStorage, so an existing install keeps working without
+  // the owner re-typing the key, and the browser stops holding the secret.
+  // ---------------------------------------------------------------------
+  useEffect(() => {
+    const MIGRATION_FLAG = 'synthos_voice_credential_migrated';
+    if (localStorage.getItem(MIGRATION_FLAG) === 'done') return;
+
+    const scrub = () => {
+      for (const storeKey of ['hermes_jarvis_settings', 'hermes_voice_config']) {
+        try {
+          const raw = localStorage.getItem(storeKey);
+          if (!raw) continue;
+          const parsed = JSON.parse(raw);
+          delete parsed.apiKey;
+          delete parsed.FISH_AUDIO_API_KEY;
+          if (parsed.fishAudioConfig) delete parsed.fishAudioConfig.apiKey;
+          if (parsed.customApiKeys) delete parsed.customApiKeys.fish_audio;
+          localStorage.setItem(storeKey, JSON.stringify(parsed));
+        } catch { /* best effort */ }
+      }
+      localStorage.setItem(MIGRATION_FLAG, 'done');
+    };
+
+    let foundKey = '';
+    let foundVoiceId = '';
+    for (const storeKey of ['hermes_voice_config', 'hermes_jarvis_settings']) {
+      try {
+        const raw = localStorage.getItem(storeKey);
+        if (!raw) continue;
+        const parsed = JSON.parse(raw);
+        foundKey = foundKey || parsed.apiKey || parsed.FISH_AUDIO_API_KEY || parsed.fishAudioConfig?.apiKey || parsed.customApiKeys?.fish_audio || '';
+        foundVoiceId = foundVoiceId || parsed.voiceId || parsed.FISH_AUDIO_DEFAULT_VOICE_ID || parsed.fishAudioConfig?.voiceId || '';
+      } catch { /* ignore */ }
+    }
+
+    if (!foundKey && !foundVoiceId) {
+      localStorage.setItem(MIGRATION_FLAG, 'done');
+      return;
+    }
+
+    fetch('/api/voice/credentials', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...(foundKey ? { apiKey: foundKey } : {}),
+        ...(foundVoiceId ? { referenceId: foundVoiceId } : {}),
+      }),
+    })
+      .then((res) => { if (res.ok) scrub(); })
+      .catch(() => { /* retried on next load */ });
+  }, []);
 
   const [voiceConfig, setVoiceConfig] = useState<any>(() => {
     try {

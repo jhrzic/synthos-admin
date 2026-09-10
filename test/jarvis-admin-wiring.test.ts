@@ -169,9 +169,17 @@ describe('8. Apollo remains completely unaffected by this wiring', () => {
 });
 
 describe('Workstream F truth sweep: JarvisView header no longer claims an unconditional Fish Audio connection', () => {
-  it('the header badge is gated on real activeApiKey evidence, not an unconditional "Connected" claim', () => {
+  it('the header badge is gated on real server-side credential evidence, not an unconditional "Connected" claim', () => {
+    // Originally this asserted the badge was gated on `activeApiKey.length > 5`
+    // — a key read out of browser storage. The P0 voice fix moved the Fish
+    // Audio credential to the server's encrypted store, so the browser no
+    // longer holds a key to check. The badge is now gated on the server's
+    // presence-only answer, which is a stronger source of truth for the same
+    // property this test protects: the header must never claim a connection
+    // it cannot evidence.
+    expect(jarvisViewContent).toContain('credentialStatus?.apiKeyPresent ? (');
+    expect(jarvisViewContent).toContain("fetch('/api/voice/credentials')");
+    // And the claim itself stays conditional, never hardcoded.
     expect(jarvisViewContent).not.toContain('●●●● Connected to Fish Audio Plus');
-    expect(jarvisViewContent).toContain('activeApiKey && activeApiKey.length > 5 ?');
-    expect(jarvisViewContent).toContain('NOT_CONFIGURED — falls back to browser speech synthesis');
   });
 });

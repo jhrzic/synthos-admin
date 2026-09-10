@@ -126,19 +126,52 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setTimeout(() => setSaveToast(false), 3000);
   };
 
+  // Presence-only view of the server-side Fish Audio credential. The value is
+  // never returned to the browser (P0 voice fix — see lib/voice-credentials.ts).
+  const [credentialStatus, setCredentialStatus] = React.useState<{ apiKeyPresent: boolean } | null>(null);
+  // Transient. Never persisted to localStorage or into `settings`.
+  const [keyDraft, setKeyDraft] = React.useState('');
+
+  const refreshCredentialStatus = React.useCallback(async () => {
+    try {
+      const res = await fetch('/api/voice/credentials');
+      if (!res.ok) return;
+      const data = await res.json();
+      setCredentialStatus({ apiKeyPresent: Boolean(data.apiKeyPresent || data.environmentKeyPresent) });
+    } catch { /* presence unknown; UI does not claim configured */ }
+  }, []);
+
+  React.useEffect(() => { refreshCredentialStatus(); }, [refreshCredentialStatus]);
+
+  /** Sends the Fish Audio key and reference voice to the encrypted server store. */
+  const persistVoiceCredential = React.useCallback(async (apiKey?: string, referenceId?: string) => {
+    await fetch('/api/voice/credentials', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...(apiKey && apiKey.trim().length > 0 ? { apiKey: apiKey.trim() } : {}),
+        ...(referenceId ? { referenceId } : {}),
+      }),
+    });
+    setKeyDraft('');
+    await refreshCredentialStatus();
+  }, [refreshCredentialStatus]);
+
   const handleTestFishAudio = async () => {
     const targetVoiceId = settings.FISH_AUDIO_DEFAULT_VOICE_ID || settings.fishAudioConfig?.voiceId || DEFAULT_FISH_AUDIO_VOICE_ID;
-    const targetApiKey = settings.FISH_AUDIO_API_KEY || settings.fishAudioConfig?.apiKey || settings.customApiKeys.fish_audio || '';
 
     setTestVoiceStatus(`Synthesizing with Fish Audio model (${targetVoiceId})...`);
     setIsPlayingAudio(true);
 
     try {
+      // Whatever is typed in the key field is committed to the SERVER first,
+      // otherwise the test would pass while the credential Jarvis actually
+      // uses stayed unset — the exact split that caused the P0 regression.
+      await persistVoiceCredential(keyDraft, targetVoiceId);
+
       const sampleText = "Fish Audio neural text-to-speech online. Low-latency conversational stream active and ready.";
 
       const buffer = await synthesizeFishAudio(sampleText, targetVoiceId, {
-        apiKey: targetApiKey,
-        FISH_AUDIO_API_KEY: targetApiKey,
         FISH_AUDIO_DEFAULT_VOICE_ID: targetVoiceId,
         latencyMode: settings.fishAudioConfig?.latencyMode || 'low',
         format: settings.fishAudioConfig?.format || 'mp3',
@@ -302,24 +335,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         sectionTitle="Global Swarm & Security Configuration"
         sectionSubtitle="3-Step global configuration for Fish Audio neural voice, OpenRouter API keys, and Obsidian vault security policies."
         statusBadge={{
-          isConnected: Boolean(settings.FISH_AUDIO_API_KEY || settings.customApiKeys?.openrouter || settings.security?.vault_permissions.write_access),
+          isConnected: Boolean(credentialStatus?.apiKeyPresent || settings.customApiKeys?.openrouter || settings.security?.vault_permissions.write_access),
           connectedLabel: "Swarm Credentials Configured",
           pendingLabel: "Default Config",
         }}
         inputConfig={{
           label: "DEFAULT VOICE / FISH AUDIO API KEY",
-          value: settings.FISH_AUDIO_API_KEY || settings.fishAudioConfig?.apiKey || settings.customApiKeys?.fish_audio || '',
-          placeholder: "Enter Fish Audio Key or leave blank for local synthesis",
+          value: keyDraft,
+          placeholder: credentialStatus?.apiKeyPresent ? "Key stored server-side — type to replace" : "Enter Fish Audio Key",
           type: "password",
-          helperText: "Used by Jarvis voice agent and real-time audio streamer.",
-          onChange: (val) => {
-            setSettings(s => ({
-              ...s,
-              FISH_AUDIO_API_KEY: val,
-              customApiKeys: { ...s.customApiKeys, fish_audio: val },
-              fishAudioConfig: { ...s.fishAudioConfig!, apiKey: val }
-            }));
-          },
+          helperText: "Saved encrypted on the server and used by Jarvis. Never written to browser storage.",
+          // In-memory until Save/Test. Writing the key into `settings` is what
+          // used to persist it to localStorage in two competing stores.
+          onChange: (val) => setKeyDraft(val),
         }}
         secondaryConfig={{
           label: "AGENT EXECUTION MODE",
@@ -549,23 +577,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                         <span>FISH_AUDIO_API_KEY</span>
                       </label>
                       <span className="text-[9px] text-[#8E94B8] font-mono">
-                        {settings.FISH_AUDIO_API_KEY ? 'Key Set' : 'Optional / Free Fallback'}
+                        {credentialStatus?.apiKeyPresent ? 'Key Set (server-side)' : 'Not Configured'}
                       </span>
                     </div>
                     <div className="relative">
                       <input
                         type={showKeys['fish_audio'] ? 'text' : 'password'}
-                        value={settings.FISH_AUDIO_API_KEY || settings.fishAudioConfig?.apiKey || settings.customApiKeys.fish_audio || ''}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          setSettings(s => ({
-                            ...s,
-                            FISH_AUDIO_API_KEY: val,
-                            customApiKeys: { ...s.customApiKeys, fish_audio: val },
-                            fishAudioConfig: { ...s.fishAudioConfig!, apiKey: val }
-                          }));
-                        }}
-                        placeholder="Enter Fish Audio API Key (e.g. fa-sk-...)"
+                        value={keyDraft}
+                        onChange={(e) => setKeyDraft(e.target.value)}
+                        onBlur={() => { if (keyDraft.trim()) void persistVoiceCredential(keyDraft); }}
+                        placeholder={credentialStatus?.apiKeyPresent ? 'Key stored server-side — type to replace' : 'Enter Fish Audio API Key'}
                         className="w-full bg-[#090A16] border border-[#1E223D] rounded-lg px-3 py-2 text-xs text-white placeholder-[#4C5274] focus:outline-none focus:border-[#615EFF] font-mono"
                       />
                       <button
@@ -819,12 +840,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                         const val = e.target.value;
                         setSettings(s => ({
                           ...s,
-                          customApiKeys: { ...s.customApiKeys, [item.key]: val },
-                          ...(item.key === 'fish_audio' ? { 
-                            FISH_AUDIO_API_KEY: val,
-                            fishAudioConfig: { ...s.fishAudioConfig!, apiKey: val } 
-                          } : {})
+                          // fish_audio deliberately omitted: the Fish Audio key
+                          // is server-side state, not settings state.
+                          customApiKeys: { ...s.customApiKeys, [item.key]: item.key === 'fish_audio' ? '' : val },
                         }));
+                        if (item.key === 'fish_audio' && val.trim()) {
+                          void persistVoiceCredential(val);
+                        }
                       }}
                       placeholder={item.placeholder}
                       className="w-full bg-[#090A16] border border-[#1E223D] rounded-lg px-3 py-2 text-xs text-white placeholder-[#4C5274] focus:outline-none focus:border-[#615EFF]"

@@ -124,16 +124,40 @@ describe('6/7/8: Fish Audio / TTS never fabricates a response and never destroys
   it('a TTS failure is caught and does not throw back up through the directive-dispatch flow (the real text response already landed)', () => {
     const ttsIdx = globalVoiceOverlayContent.indexOf('setIsSpeaking(true);\n      try {\n        const voiceConfig');
     expect(ttsIdx).toBeGreaterThan(-1);
-    const slice = globalVoiceOverlayContent.slice(ttsIdx, ttsIdx + 400);
+    // Window widened from 400 to 700 chars: the P0 voice fix added a
+    // `voiceId` line to voiceConfig (the overlay used to be hardcoded to
+    // 'web_speech'), which pushed the catch a little further down the same
+    // try block. What is asserted is unchanged — the catch and its warn must
+    // still be part of this try block, not somewhere else in the file.
+    const slice = globalVoiceOverlayContent.slice(ttsIdx, ttsIdx + 700);
     expect(slice).toContain('catch (err) {');
     expect(slice).toContain('console.warn("TTS playback fallback:", err)');
   });
 
   it('voiceEngine.speakText() falls back to Web Speech on any real TTS failure, never silently dropping the text', () => {
-    expect(voiceEngineContent).toContain('return playWebSpeech(text, config.speed)');
-    // Every real failure branch (bad response, wrong content-type, empty blob, playback error) falls back — never just swallows the text.
-    const fallbackCount = (voiceEngineContent.match(/playWebSpeech\(text, config\.speed\)/g) || []).length;
-    expect(fallbackCount).toBeGreaterThanOrEqual(4);
+    // The P0 voice fix replaced four copy-pasted `return playWebSpeech(text,
+    // config.speed)` branches with ONE shared fallback() helper that every
+    // failure path routes through. The intent this test protects is
+    // unchanged and now checked more strictly: the helper must speak the
+    // text, and every failure branch must go through it.
+    expect(voiceEngineContent).toContain('await playWebSpeech(text, config.speed)');
+
+    const fallbackCallSites = (voiceEngineContent.match(/fallback\(\s*\n?\s*text,|fallback\(text,/g) || []).length;
+    expect(fallbackCallSites).toBeGreaterThanOrEqual(4);
+
+    // Each named failure mode is genuinely handled, not just present in a comment.
+    for (const reason of ['NETWORK_ERROR', 'NON_AUDIO_RESPONSE', 'EMPTY_AUDIO_RESPONSE', 'PLAYBACK_ERROR']) {
+      expect(voiceEngineContent).toContain(reason);
+    }
+  });
+
+  it('a fallback is REPORTED, so robotic browser speech is never presented as the configured provider', () => {
+    // This is the regression itself: the old code fell back silently while
+    // the UI still said "Fish Audio Stream Active".
+    expect(voiceEngineContent).toContain('fellBackToWebSpeech');
+    expect(voiceEngineContent).toContain("actualSource: 'web_speech'");
+    expect(jarvisViewContent).toContain('VOICE DEGRADED');
+    expect(jarvisViewContent).toContain('browser speech FALLBACK in use, not your Fish Audio voice');
   });
 
   it('JarvisView\'s local speakText also falls back through providers on failure rather than losing the response', () => {

@@ -227,10 +227,16 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
       // spokenSummary is only ever null when the caller has nothing safe to
       // say automatically, which gets an honest generic line here rather
       // than falling back to reading `reply` aloud.
+      // P0 voice fix: voiceConfig below was hardcoded to 'web_speech', so the
+      // global overlay spoke with the browser robot voice no matter what the
+      // workspace had configured. It now honours the configured provider and
+      // voice, through the same canonical /api/voice/tts path Jarvis uses.
+      // speakText() reports a fallback rather than hiding one.
       setIsSpeaking(true);
       try {
         const voiceConfig: VoiceConfig = {
-          provider: 'web_speech',
+          provider: settings.voiceProvider === 'browser' ? 'web_speech' : (settings.voiceProvider || 'web_speech'),
+          voiceId: settings.FISH_AUDIO_DEFAULT_VOICE_ID || settings.fishAudioConfig?.voiceId,
           speed: settings.voiceRate || 1.0,
         };
         await speakText(spokenSummary || `${target.toUpperCase()} directive complete — see the response log.`, voiceConfig);

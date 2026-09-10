@@ -100,6 +100,17 @@ import { generateViaGemini } from "./lib/fabric/model-gemini";
 import { classifyIntent } from "./lib/fabric/intent";
 import { executeEnvelope } from "./lib/fabric/envelope";
 import {
+  saveVoiceCredential,
+  getVoiceCredentialStatus,
+  resolveFishConfig,
+  sanitizeProviderError,
+  voiceEncryptionKeySource,
+  isFishAudioModel,
+  FISH_AUDIO_MODELS,
+  FISH_AUDIO_DEFAULT_MODEL,
+  FISH_AUDIO_FREE_MODEL,
+} from "./lib/voice-credentials";
+import {
   startScheduler,
   createValidatedSchedule,
   parseSchedulePhrase,
@@ -2137,14 +2148,82 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
     }
   });
 
+  // --------------------------------------------------------------------------
+  // Voice credentials — the canonical, server-side home for the TTS provider
+  // key. GET reports PRESENCE ONLY; the key value is never in a response.
+  // --------------------------------------------------------------------------
+  app.get("/api/voice/credentials", requireAuth, (_req, res) => {
+    try {
+      const status = getVoiceCredentialStatus("fish_audio");
+      return res.json({
+        success: true,
+        ...status,
+        // Env is still honoured as a fallback source, so the UI can tell the
+        // difference between "nothing configured anywhere" and "configured by
+        // the deployment environment rather than through this screen".
+        environmentKeyPresent: Boolean((process.env.FISH_AUDIO_API_KEY || "").trim()),
+        encryptionKeySource: voiceEncryptionKeySource(),
+        supportedModels: FISH_AUDIO_MODELS,
+        defaultModel: FISH_AUDIO_DEFAULT_MODEL,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to read voice credential status" });
+    }
+  });
+
+  app.post("/api/voice/credentials", requireAuth, (req, res) => {
+    try {
+      const { apiKey, referenceId, voiceId, model, format } = req.body || {};
+      const user = (req as any).authUser;
+
+      if (model !== undefined && model !== null && !isFishAudioModel(model)) {
+        return res.status(400).json({
+          success: false,
+          error: `Unsupported Fish Audio model. Allowed: ${FISH_AUDIO_MODELS.join(", ")}.`,
+        });
+      }
+
+      const status = saveVoiceCredential({
+        provider: "fish_audio",
+        apiKey: apiKey === null ? null : typeof apiKey === "string" ? apiKey : undefined,
+        referenceId: referenceId ?? voiceId ?? undefined,
+        model: model ?? undefined,
+        format: format ?? undefined,
+        userId: user?.user_id || "unknown",
+      });
+
+      // Presence only — the response deliberately cannot echo the key back,
+      // so a saved secret has no route back into browser memory.
+      return res.json({ success: true, ...status });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to save voice credential" });
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // TTS synthesis.
+  //
+  // Two contract rules this route now holds, both of which were the P0
+  // robot-voice regression:
+  //
+  //  1. A FAILURE IS NEVER HTTP 200. It previously returned 200 with a JSON
+  //     body on every failure, and the client's acceptance check
+  //     (`response.status === 200`) then handed that JSON to the audio player
+  //     as if it were an MP3. The UI said "Fish Audio Stream Active" while the
+  //     browser's speechSynthesis robot voice actually spoke. Failures are now
+  //     4xx/5xx with a machine-readable `reason`.
+  //  2. THE BROWSER NEVER SUPPLIES THE KEY. The credential is resolved
+  //     server-side (encrypted store, then environment). A client-sent apiKey
+  //     is ignored.
+  // --------------------------------------------------------------------------
   app.post(["/api/voice/tts", "/api/tts"], requireAuth, async (req, res) => {
     try {
       const {
         text = "",
         provider = "fish_audio",
-        apiKey: clientKey,
         voiceId,
         reference_id,
+        model: requestedModel,
         speed = 1.0,
         format = "mp3",
         latency = "normal",
@@ -2154,124 +2233,160 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         return res.json({ status: "client_handled", provider: "web_speech" });
       }
 
-      const effectiveKey = (
-        clientKey && typeof clientKey === "string" && clientKey.trim().length > 3
-          ? clientKey.trim()
-          : process.env.FISH_AUDIO_API_KEY || process.env.OPENROUTER_API_KEY || ""
-      ).trim();
-
-      if (!effectiveKey) {
-        return res.status(200).json({
+      if (typeof text !== "string" || text.trim().length === 0) {
+        return res.status(400).json({
           success: false,
-          status: "DEGRADED",
-          reason: "API_KEY_NOT_CONFIGURED",
-          error: `Missing ${provider || "Fish Audio"} API key. Set FISH_AUDIO_API_KEY in .env or the deployment shell's environment.`,
+          status: "FAILED",
+          reason: "EMPTY_TEXT",
+          error: "No text supplied to synthesize.",
         });
       }
 
       if (provider === "fish_audio" || provider === "fishaudio" || !provider) {
-        const effectiveVoiceId =
-          voiceId || reference_id || process.env.FISH_AUDIO_VOICE_ID || process.env.FISH_AUDIO_DEFAULT_VOICE_ID || "7f92f8afb8ec43bf81429cc1c9199cb1";
+        const resolved = resolveFishConfig({
+          referenceId: voiceId || reference_id,
+          model: requestedModel,
+        });
 
-        if (effectiveKey.startsWith("sk-or-")) {
-          try {
-            const orRes = await fetch("https://openrouter.ai/api/v1/audio/speech", {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${effectiveKey}`,
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://ai.studio",
-                "X-Title": "Hermes AgentOS",
-              },
-              body: JSON.stringify({
-                model: "fishaudio/fish-speech-1.5",
-                input: text,
-                voice: effectiveVoiceId,
-                response_format: format || "mp3",
-              }),
-            });
+        if (!resolved.apiKey) {
+          return res.status(503).json({
+            success: false,
+            status: "DEGRADED",
+            reason: "API_KEY_NOT_CONFIGURED",
+            provider: "fish_audio",
+            error:
+              "No Fish Audio API key is configured on the server. Save it in Settings → Voice (stored encrypted server-side) or set FISH_AUDIO_API_KEY in the environment.",
+            keySource: resolved.keySource,
+          });
+        }
 
-            if (orRes.ok) {
-              const arrayBuf = await orRes.arrayBuffer();
-              res.setHeader("Content-Type", "audio/mpeg");
-              res.setHeader("Cache-Control", "no-cache");
-              return res.send(Buffer.from(arrayBuf));
-            }
-          } catch (orErr) {
-            console.warn("OpenRouter TTS attempt error:", orErr);
-          }
+        if (!resolved.referenceId) {
+          // A generic Fish default voice is NOT success for this product —
+          // the configured cloned voice is the whole point, so a missing
+          // reference_id is reported rather than quietly synthesized with
+          // whatever stock voice the provider picks.
+          return res.status(503).json({
+            success: false,
+            status: "DEGRADED",
+            reason: "REFERENCE_ID_NOT_CONFIGURED",
+            provider: "fish_audio",
+            error:
+              "No Fish Audio reference voice is configured. Save the cloned voice's reference_id in Settings → Voice.",
+          });
         }
 
         const effectiveFormat = format || process.env.FISH_AUDIO_AUDIO_FORMAT || "mp3";
         const effectiveLatency = latency || process.env.FISH_AUDIO_LATENCY_MODE || "normal";
 
-        const response = await fetch("https://api.fish.audio/v1/tts", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${effectiveKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            text: text,
-            reference_id: effectiveVoiceId,
-            format: effectiveFormat,
-            latency: effectiveLatency,
-            prosody: {
-              speed: Number(speed) || 1.0,
-              volume: 0,
+        // `model` is an HTTP HEADER on POST /v1/tts, not a body field. Sending
+        // it in the body (as this route used to, on its retry path) silently
+        // does nothing.
+        const callFish = (fishModel: string) =>
+          fetch("https://api.fish.audio/v1/tts", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${resolved.apiKey}`,
+              "Content-Type": "application/json",
+              model: fishModel,
             },
-          }),
-        });
+            body: JSON.stringify({
+              text: text,
+              reference_id: resolved.referenceId,
+              format: effectiveFormat,
+              latency: effectiveLatency,
+              prosody: {
+                speed: Number(speed) || 1.0,
+                volume: 0,
+              },
+            }),
+          });
+
+        let usedModel: string = resolved.model;
+        let response = await callFish(usedModel);
+
+        // Fish Audio meters API credit SEPARATELY from platform credit, so a
+        // live account with an active subscription still 402s here once the
+        // API balance runs out. The free tier is a real, documented model on
+        // the same endpoint and honours the same reference_id, so it is worth
+        // one automatic retry before declaring the voice unavailable.
+        if (response.status === 402 && usedModel !== FISH_AUDIO_FREE_MODEL) {
+          console.warn(
+            `[Fish Audio TTS] 402 on model ${usedModel} (API credit exhausted) — retrying on ${FISH_AUDIO_FREE_MODEL}.`
+          );
+          const retry = await callFish(FISH_AUDIO_FREE_MODEL);
+          if (retry.ok) {
+            usedModel = FISH_AUDIO_FREE_MODEL;
+            response = retry;
+          } else {
+            // Keep the ORIGINAL 402 as the reported cause — the free-tier
+            // failure is a consequence, not the diagnosis.
+            const retryText = sanitizeProviderError(await retry.text());
+            const originalText = sanitizeProviderError(await response.text());
+            console.error("[Fish Audio TTS Error]:", response.status, originalText, "| free-tier retry:", retry.status, retryText);
+            return res.status(502).json({
+              success: false,
+              status: "DEGRADED",
+              reason: "PROVIDER_INSUFFICIENT_CREDIT",
+              provider: "fish_audio",
+              providerStatus: response.status,
+              error: `Fish Audio API error (${response.status}): ${originalText}`,
+              freeTierRetry: { status: retry.status, error: retryText },
+              model: resolved.model,
+              referenceId: resolved.referenceId,
+              keySource: resolved.keySource,
+            });
+          }
+        }
 
         if (!response.ok) {
-          const errorText = await response.text();
+          const errorText = sanitizeProviderError(await response.text());
           console.error("[Fish Audio TTS Error]:", response.status, errorText);
-
-          try {
-            const oaRes = await fetch("https://api.fish.audio/v1/audio/speech", {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${effectiveKey}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                model: "s2.1-pro",
-                input: text,
-                voice: effectiveVoiceId,
-                response_format: effectiveFormat === "opus" ? "opus" : "mp3",
-              }),
-            });
-
-            if (oaRes.ok) {
-              const arrayBuf = await oaRes.arrayBuffer();
-              res.setHeader("Content-Type", effectiveFormat === "opus" ? "audio/ogg" : "audio/mpeg");
-              res.setHeader("Cache-Control", "no-cache");
-              return res.send(Buffer.from(arrayBuf));
-            }
-          } catch (oaErr) {
-            // ignore
-          }
-
-          return res.status(200).json({
+          return res.status(502).json({
             success: false,
             status: "DEGRADED",
-            reason: "MODEL_PROVIDER_UNAVAILABLE",
+            reason: response.status === 401 || response.status === 403 ? "PROVIDER_AUTH_REJECTED" : "MODEL_PROVIDER_UNAVAILABLE",
+            provider: "fish_audio",
+            providerStatus: response.status,
             error: `Fish Audio API error (${response.status}): ${errorText}`,
-            voiceId: effectiveVoiceId,
+            model: usedModel,
+            referenceId: resolved.referenceId,
+            keySource: resolved.keySource,
           });
         }
 
         const audioBuffer = await response.arrayBuffer();
+
+        // A 200 with no meaningful body is not audio. Catch it here rather
+        // than shipping an empty blob the player will silently fail on.
+        if (audioBuffer.byteLength < 128) {
+          return res.status(502).json({
+            success: false,
+            status: "DEGRADED",
+            reason: "EMPTY_AUDIO_RESPONSE",
+            provider: "fish_audio",
+            error: `Fish Audio returned ${audioBuffer.byteLength} bytes, which is not playable audio.`,
+            model: usedModel,
+            referenceId: resolved.referenceId,
+          });
+        }
+
         const mimeType = effectiveFormat === "opus" ? "audio/ogg; codecs=opus" : effectiveFormat === "wav" ? "audio/wav" : "audio/mpeg";
         res.setHeader("Content-Type", mimeType);
         res.setHeader("Cache-Control", "no-cache");
+        // Non-secret provenance headers so the client can PROVE which provider,
+        // voice and model actually produced the audio it is about to play —
+        // rather than inferring "it must be Fish" from a 200.
+        res.setHeader("X-Voice-Provider", "fish_audio");
+        res.setHeader("X-Voice-Model", usedModel);
+        res.setHeader("X-Voice-Reference-Id", resolved.referenceId);
+        res.setHeader("X-Voice-Key-Source", resolved.keySource);
         return res.send(Buffer.from(audioBuffer));
       }
 
       if (provider === "openai") {
-        const oaKey = clientKey || process.env.OPENAI_API_KEY || effectiveKey;
+        const oaKey = process.env.OPENAI_API_KEY || "";
         if (!oaKey) {
-          return res.status(200).json({
+          return res.status(503).json({
             success: false,
             status: "DEGRADED",
             reason: "API_KEY_NOT_CONFIGURED",
@@ -2294,8 +2409,8 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         });
 
         if (!oaRes.ok) {
-          const errText = await oaRes.text();
-          return res.status(200).json({
+          const errText = sanitizeProviderError(await oaRes.text());
+          return res.status(502).json({
             success: false,
             status: "DEGRADED",
             reason: "MODEL_PROVIDER_UNAVAILABLE",
@@ -2310,9 +2425,9 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       }
 
       if (provider === "elevenlabs") {
-        const elKey = clientKey || process.env.ELEVENLABS_API_KEY || effectiveKey;
+        const elKey = (process.env.ELEVENLABS_API_KEY || "").trim();
         if (!elKey) {
-          return res.status(200).json({
+          return res.status(503).json({
             success: false,
             status: "DEGRADED",
             reason: "API_KEY_NOT_CONFIGURED",
@@ -2338,8 +2453,8 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         });
 
         if (!elRes.ok) {
-          const errText = await elRes.text();
-          return res.status(200).json({
+          const errText = sanitizeProviderError(await elRes.text());
+          return res.status(502).json({
             success: false,
             status: "DEGRADED",
             reason: "MODEL_PROVIDER_UNAVAILABLE",
