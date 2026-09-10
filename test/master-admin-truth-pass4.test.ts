@@ -38,7 +38,13 @@ describe('H: a real fabrication found during this pass — Aegis signing algorit
   });
 
   it('the diagnostics response reports the real algorithm (Ed25519) used by lib/persistence.ts', () => {
-    const idx = serverContent.indexOf('aegis: {');
+    // Anchored on the multi-line `aegis: {` block of the MASTER-ADMIN
+    // DIAGNOSTICS response specifically. The previous anchor took the first
+    // `aegis: {` anywhere in server.ts, which silently moved when another
+    // route added an `aegis: { ... }` field to its own JSON response earlier
+    // in the file. The property under test never changed — only the anchor.
+    const idx = serverContent.indexOf('aegis: {\n');
+    expect(idx).toBeGreaterThan(-1);
     const slice = serverContent.slice(idx, idx + 500);
     expect(slice).toContain('signingAlgorithm: "Ed25519"');
   });

@@ -60,6 +60,8 @@ import { tonAnalyticsSnapshot, recordTonTelemetry } from "./lib/ton-analytics";
 import { tonGuardianViews, installTonGuardians } from "./lib/ton-guardians";
 import { listWorkspaceVaultEntries, getWorkspaceVaultEntry, previewWorkspaceVaultEntry, writeWorkspaceArtifact } from "./lib/vault";
 import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory, listWorkspaceMemory } from "./lib/memory-index";
+import { crawlSite } from "./lib/aeo/crawler";
+import { analyze as analyzeAudit, renderReport as renderAuditReport } from "./lib/aeo/analyzer";
 import { estimateGraphExecution, selectLiveExecutionNodes } from "./lib/graph-execution";
 import { listWorkspaceSkills, getWorkspaceSkill, createSkill, updateSkill, testSkill, discoverRepoSkillFiles, isValidMcpEndpointRef, classifySkillExecutability, getRawCredentialCiphertext, ExecutionTargetType } from "./lib/skills";
 import { executeSkill } from "./lib/skill-execution";
@@ -2136,6 +2138,231 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
   // written by the execution fabric. Each row is re-verified here with
   // verifyReceipt() rather than trusting a stored "verified" flag, so the
   // screen reports signature validity it actually checked.
+  // ==========================================================================
+  // AEO / GEO / SEO AUDIT PIPELINE
+  //
+  // Every observation is read from the live site over HTTP by lib/aeo/crawler.
+  // There is no sample data path. Scores come from ONE documented formula in
+  // lib/aeo/analyzer (dimensionScore) and a dimension with no applicable checks
+  // reports null -> UNKNOWN rather than a fabricated number.
+  //
+  // AI-visibility (GEO) is only asserted when a provider was actually queried.
+  // With no provider configured the route reports NOT_CONFIGURED and the report
+  // says plainly that no claim is made about ChatGPT/Perplexity/Gemini.
+  //
+  // Persistence reuses the canonical spine exactly as the graph runtime does:
+  // createInitialTask -> writeWorkspaceArtifact -> indexVaultArtifact ->
+  // runDeterministicAegisVerification -> recordQualityReview -> signed receipt.
+  // No second report database is introduced.
+  // ==========================================================================
+
+  /** Which AI/search provider (if any) can answer visibility questions right now. */
+  function resolveGeoProvider(): { providerStatus: "USED" | "NOT_CONFIGURED" | "UNAVAILABLE"; providerDetail: string } {
+    const candidates: Array<[string, string | undefined]> = [
+      ["GEMINI_API_KEY", process.env.GEMINI_API_KEY],
+      ["SERPAPI_KEY", process.env.SERPAPI_KEY],
+      ["DATAFORSEO_LOGIN", process.env.DATAFORSEO_LOGIN],
+      ["BRIGHTDATA_API_KEY", process.env.BRIGHTDATA_API_KEY],
+      ["OPENSEO_API_KEY", process.env.OPENSEO_API_KEY],
+    ];
+    const present = candidates.filter(([, v]) => Boolean(v && String(v).trim()));
+    if (present.length === 0) {
+      return {
+        providerStatus: "NOT_CONFIGURED",
+        providerDetail:
+          "No AI/search visibility provider is configured (checked GEMINI_API_KEY, SERPAPI_KEY, DATAFORSEO_LOGIN, BRIGHTDATA_API_KEY, OPENSEO_API_KEY).",
+      };
+    }
+    // A key exists but no adapter is wired yet — say that, do not pretend to query.
+    return {
+      providerStatus: "UNAVAILABLE",
+      providerDetail: `Credential present (${present.map(([k]) => k).join(", ")}) but no visibility query adapter is wired in this build, so no AI query was executed.`,
+    };
+  }
+
+  app.post("/api/aeo/audit", requireWorkspaceMember(fromBody), async (req, res) => {
+    const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+    const nowIso = new Date().toISOString();
+    try {
+      const { domain, businessName, location, targetService, targetKeywords, maxPages } = req.body || {};
+      if (!domain || typeof domain !== "string" || !domain.trim()) {
+        return res.status(400).json({ success: false, error: "domain is required (e.g. example.com or https://example.com)." });
+      }
+
+      let crawl;
+      try {
+        crawl = await crawlSite({ domain: domain.trim(), maxPages: Number(maxPages) || 12 });
+      } catch (err: any) {
+        return res.status(422).json({
+          success: false, status: "FAILED", reason: "CRAWL_FAILED",
+          error: err?.message || "The site could not be crawled.",
+        });
+      }
+
+      if (crawl.pages.every((p) => p.status === null || p.status >= 400)) {
+        return res.status(422).json({
+          success: false, status: "FAILED", reason: "SITE_UNREACHABLE",
+          error: `No page of ${crawl.origin} returned a success status. Nothing can be analysed.`,
+          crawl: { origin: crawl.origin, failures: crawl.fetchFailures.slice(0, 5) },
+        });
+      }
+
+      const geoProvider = resolveGeoProvider();
+      const analysis = analyzeAudit({
+        crawl,
+        domain: domain.trim(),
+        businessName: typeof businessName === "string" ? businessName : undefined,
+        location: typeof location === "string" ? location : undefined,
+        targetService: typeof targetService === "string" ? targetService : undefined,
+        targetKeywords: Array.isArray(targetKeywords) ? targetKeywords.filter((k: unknown) => typeof k === "string") : undefined,
+        geo: { queries: [], ...geoProvider },
+      });
+
+      const reportMarkdown = renderAuditReport(analysis, { businessName, location, targetService });
+
+      // --- canonical persistence spine (same as graph runtime) ---
+      const taskId = `aeo-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+      const title = `SEO/AEO/GEO Audit — ${businessName || analysis.origin}`;
+      createInitialTask({
+        taskId, workspaceId, title,
+        description: `Live audit of ${analysis.origin}: ${analysis.crawl.pagesAnalyzed} page(s) crawled, ${analysis.checks.length} checks evaluated.`,
+        assignedAgent: "aeo-auditor", assignedModel: "deterministic-crawl", createdAt: nowIso,
+      });
+      // Aegis requires the canonical lifecycle TODO -> READY -> RUNNING ->
+      // AWAITING_VERIFICATION plus PROVIDER_COMPLETED and ARTIFACT_SAVED events.
+      // Walked here for the same reason the graph runtime walks it: the receipt
+      // is only meaningful if the ledger really shows the work happening.
+      recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: "TASK_CREATED", agentId: "aeo-auditor", payload: { domain: analysis.origin }, createdAt: nowIso });
+      updateTaskStatus(taskId, "READY", undefined, workspaceId);
+      recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: "AGENT_ASSIGNED", agentId: "aeo-auditor", payload: { agent: "aeo-auditor" }, createdAt: nowIso });
+      updateTaskStatus(taskId, "RUNNING", undefined, workspaceId);
+      recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: "EXECUTION_STARTED", agentId: "aeo-auditor", payload: { pages: analysis.crawl.pagesAnalyzed }, createdAt: nowIso });
+      recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: "PROVIDER_COMPLETED", agentId: "aeo-auditor", payload: { provider: "synthos-aeo-audit", pagesAnalyzed: analysis.crawl.pagesAnalyzed, checks: analysis.checks.length, durationMs: analysis.crawl.durationMs }, createdAt: nowIso });
+
+      const frontmatter = [
+        "---",
+        `type: "aeo-audit"`,
+        `domain: ${JSON.stringify(analysis.origin)}`,
+        `businessName: ${JSON.stringify(businessName || null)}`,
+        `location: ${JSON.stringify(location || null)}`,
+        `generatedAt: ${JSON.stringify(analysis.generatedAt)}`,
+        `pagesAnalyzed: ${analysis.crawl.pagesAnalyzed}`,
+        `scoreSeo: ${analysis.scores.seo.score ?? "null"}`,
+        `scoreAeo: ${analysis.scores.aeo.score ?? "null"}`,
+        `scoreGeo: ${analysis.scores.geo.score ?? "null"}`,
+        `scoreOverall: ${analysis.scores.overall.score ?? "null"}`,
+        `taskId: ${JSON.stringify(taskId)}`,
+        "---",
+        "",
+      ].join("\n");
+
+      const artifact = writeWorkspaceArtifact({
+        workspaceId, taskId, content: frontmatter + reportMarkdown,
+        folder: "AEO-Audits", extension: "md", createdAt: nowIso,
+      });
+      try { indexVaultArtifact(workspaceId, artifact.artifact_id); } catch { /* index best-effort */ }
+      recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: "ARTIFACT_SAVED", agentId: "aeo-auditor", payload: { artifactId: artifact.artifact_id, relativePath: artifact.relative_path, contentHash: artifact.content_hash }, createdAt: nowIso });
+      updateTaskStatus(taskId, "AWAITING_VERIFICATION", undefined, workspaceId);
+
+      const aegisResult = runDeterministicAegisVerification(taskId, frontmatter + reportMarkdown);
+      const persistedReview = recordQualityReview({
+        taskId, reviewer: aegisResult.reviewer, method: aegisResult.method, score: aegisResult.score,
+        decision: aegisResult.decision, checks: aegisResult.checks, evidence: aegisResult.evidence, createdAt: nowIso,
+      });
+
+      let receiptId: string | null = null;
+      if (aegisResult.decision === "VERIFIED") {
+        updateTaskStatus(taskId, "AWAITING_RECEIPT", undefined, workspaceId);
+        recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: "AEGIS_REVIEWED", agentId: "aegis", payload: { reviewId: persistedReview.review_id, decision: aegisResult.decision, score: aegisResult.score }, createdAt: nowIso });
+        const newReceiptId = `rcpt-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+        const canonicalPayload: CanonicalReceiptPayload = {
+          receiptId: newReceiptId, taskId, reviewId: persistedReview.review_id, workspaceId,
+          assignedAgent: "aeo-auditor", provider: "synthos-aeo-audit",
+          modelUsed: `crawl:${analysis.crawl.pagesAnalyzed}-pages`,
+          artifactId: artifact.artifact_id, artifactHash: artifact.content_hash,
+          aegisDecision: aegisResult.decision, aegisMethod: aegisResult.method, createdAt: nowIso,
+        };
+        const canonicalPayloadStr = canonicalizePayload(canonicalPayload);
+        const { signature, publicKeyPem, algorithm, fingerprint } = signReceiptPayload(canonicalPayloadStr);
+        if (verifyReceiptSignature(canonicalPayloadStr, signature, publicKeyPem)) {
+          recordReceipt({ receiptId: newReceiptId, taskId, reviewId: persistedReview.review_id, algorithm, publicKey: publicKeyPem, payloadJson: canonicalPayloadStr, signature, createdAt: nowIso });
+          recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: "RECEIPT_CREATED", agentId: "guardian", payload: { receiptId: newReceiptId, algorithm, fingerprint, verified: true }, createdAt: nowIso });
+          receiptId = newReceiptId;
+        }
+      }
+      updateTaskStatus(taskId, "DONE", undefined, workspaceId);
+
+      return res.json({
+        success: true, workspaceId, taskId,
+        artifact: { id: artifact.artifact_id, path: artifact.relative_path, contentHash: artifact.content_hash },
+        aegis: { decision: aegisResult.decision, score: aegisResult.score, reviewId: persistedReview.review_id },
+        receiptId,
+        analysis, report: reportMarkdown,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Audit failed" });
+    }
+  });
+
+  /** Audit history — reads the Vault artifacts already written; no second store. */
+  app.get("/api/aeo/audits", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const entries = listWorkspaceVaultEntries(workspaceId).filter((e: any) =>
+        typeof e.relative_path === "string" && e.relative_path.includes("AEO-Audits/")
+      );
+      const audits = entries.map((e: any) => {
+        const preview = previewWorkspaceVaultEntry(workspaceId, e.artifact_id);
+        const raw = (preview && (preview as any).content) || (preview as any)?.preview || "";
+        const field = (k: string) => {
+          const m = String(raw).match(new RegExp(`^${k}:\\s*(.+)$`, "m"));
+          if (!m) return null;
+          try { return JSON.parse(m[1].trim()); } catch { return m[1].trim() === "null" ? null : m[1].trim(); }
+        };
+        return {
+          artifactId: e.artifact_id, taskId: e.task_id, path: e.relative_path, createdAt: e.created_at,
+          domain: field("domain"), businessName: field("businessName"), location: field("location"),
+          scoreSeo: field("scoreSeo"), scoreAeo: field("scoreAeo"), scoreGeo: field("scoreGeo"), scoreOverall: field("scoreOverall"),
+          pagesAnalyzed: field("pagesAnalyzed"),
+        };
+      });
+      return res.json({ success: true, workspaceId, count: audits.length, audits });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list audits" });
+    }
+  });
+
+  /** Create real SynthOS tasks from selected audit recommendations. */
+  app.post("/api/aeo/missions", requireWorkspaceMember(fromBody), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const { auditTaskId, domain, items } = req.body || {};
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ success: false, error: "items[] is required — nothing to create." });
+      }
+      const nowIso = new Date().toISOString();
+      const created = items.slice(0, 25).map((it: any, idx: number) => {
+        const id = `aeo-task-${Date.now()}-${idx}-${crypto.randomBytes(2).toString("hex")}`;
+        createInitialTask({
+          taskId: id, workspaceId,
+          title: String(it?.title || "AEO remediation").slice(0, 200),
+          description: [
+            String(it?.recommendation || ""),
+            it?.evidence ? `\n\n**Evidence:** ${String(it.evidence)}` : "",
+            domain ? `\n\n**Domain:** ${String(domain)}` : "",
+            auditTaskId ? `\n\n**From audit task:** ${String(auditTaskId)}` : "",
+          ].join(""),
+          assignedAgent: String(it?.category || "web").slice(0, 40),
+          assignedModel: "n/a", createdAt: nowIso,
+        });
+        return { taskId: id, title: it?.title };
+      });
+      return res.json({ success: true, workspaceId, created, count: created.length });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to create mission tasks" });
+    }
+  });
+
   app.get("/api/execution/receipts", requireWorkspaceMember(fromBodyOrQuery), (req, res) => {
     try {
       const workspaceId = (req as AuthedRequest).authWorkspaceId!;

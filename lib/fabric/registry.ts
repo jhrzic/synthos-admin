@@ -393,6 +393,30 @@ function researchCapability(report: RuntimeStatusReport): CapabilityDescriptor {
 }
 
 /** MCP itself is a transport, not a capability with one status — see mcpConnectivityCapability + classifyMcpOperation below. */
+/**
+ * AEO/GEO/SEO audit. Always AVAILABLE because it needs no credential: every
+ * observation comes from a live HTTP crawl of a public site (lib/aeo/crawler).
+ * The AI-visibility (GEO) dimension inside it degrades to UNKNOWN on its own
+ * when no search/AI provider is configured — the capability itself still runs
+ * and still produces evidence, which is why it is not gated NOT_CONFIGURED.
+ *
+ * READ effect class: it fetches public pages and writes only into the caller's
+ * own workspace Vault through the canonical artifact path.
+ */
+function aeoAuditCapability(): CapabilityDescriptor {
+  return {
+    key: 'aeo.audit',
+    runtime: 'aeo',
+    status: 'AVAILABLE',
+    effectClass: 'READ',
+    riskTier: 'LOW',
+    approvalPolicy: 'NONE',
+    workspaceScope: 'member',
+    reference: 'lib/aeo/crawler.ts::crawlSite + lib/aeo/analyzer.ts::analyze',
+    reason: 'Deterministic live HTTP crawl of a public domain; no external credential required. AI-visibility findings are only emitted when a provider was genuinely queried.',
+  };
+}
+
 function mcpConnectivityCapability(report: RuntimeStatusReport): CapabilityDescriptor {
   const mcp = findSystem(report, 'MCP Connectivity');
   const status: CapabilityStatus =
@@ -433,6 +457,7 @@ async function buildAllCapabilities(report: RuntimeStatusReport): Promise<Capabi
     scheduleCapability(),
     browserCapability(),
     researchCapability(report),
+    aeoAuditCapability(),
     mcpConnectivityCapability(report),
   ];
 }
