@@ -102,6 +102,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
         { id: 'guardian-aegis' as ActiveTab, label: 'Approvals', icon: ShieldCheck, color: '#F59E0B' },
         { id: 'receipts' as ActiveTab, label: 'Receipts', icon: FileCheck, color: '#38BDF8' },
         { id: 'scheduler' as ActiveTab, label: 'Scheduler', icon: Clock, color: '#EC4899' },
+        { id: 'external-executions' as ActiveTab, label: 'External Executions', icon: Server, color: '#38BDF8' },
       ]
     },
     {

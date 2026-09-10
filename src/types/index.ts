@@ -22,6 +22,7 @@ export type ActiveTab =
   | 'activity-ledger'
   | 'receipts'
   | 'scheduler'
+  | 'external-executions'
   | 'dev-kanban-receipts'
   | 'guardian-aegis'
   | 'workspaces'

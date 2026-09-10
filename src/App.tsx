@@ -64,6 +64,7 @@ import { ActivityLedgerView } from './components/ActivityLedgerView';
 import { ReceiptsView } from './components/ReceiptsView';
 import { CanonicalReceiptsView } from './components/CanonicalReceiptsView';
 import { SchedulerView } from './components/SchedulerView';
+import { ExternalExecutionsView } from './components/ExternalExecutionsView';
 import { GuardianAegisControlView } from './components/GuardianAegisControlView';
 import { WorkspacesView } from './components/WorkspacesView';
 import { KanbanDependencyDAG } from './components/KanbanDependencyDAG';
@@ -1639,6 +1640,12 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               scheduling engine — every control calls the server's own route. */}
           {activeTab === 'scheduler' && (
             <SchedulerView activeWorkspaceId={activeWorkspaceId} />
+          )}
+
+          {/* External execution history over the existing Windmill control
+              plane (ADR-006). No second execution mechanism. */}
+          {activeTab === 'external-executions' && (
+            <ExternalExecutionsView activeWorkspaceId={activeWorkspaceId} />
           )}
 
           {/* Legacy Kanban demo receipts, kept for developer reference only.
