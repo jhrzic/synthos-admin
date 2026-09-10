@@ -102,7 +102,11 @@ export const REQUIRED_FIELD_KEYS: (keyof AgentRequiredFields)[] = [
 export interface GraphNode {
   id: string;
   label: string;
-  type: 'agent' | 'model' | 'tool' | 'trigger' | 'logic';
+  type: 'agent' | 'model' | 'tool' | 'trigger' | 'logic' | 'capability';
+  /** For type==='capability': the SynthOS capability key this node dispatches. Never a vendor name. */
+  capability?: string;
+  /** Free-form parameters passed to the capability executor (e.g. { domain: '$input' }). */
+  parameters?: Record<string, unknown>;
   subType: string;
   x: number;
   y: number;
@@ -410,6 +414,140 @@ export const GraphBuilderView: React.FC<GraphBuilderViewProps> = ({
   const [zoomLevel, setZoomLevel] = useState<number>(1);
   const [isDraggingNode, setIsDraggingNode] = useState<string | null>(null);
   const [dragStartPos, setDragStartPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  // ---- real capability registry (GET /api/capabilities) ----
+  const [capabilities, setCapabilities] = useState<Array<{ key: string; status: string; graphExecutable: boolean; effectClass?: string }>>([]);
+  // ---- server-backed graph persistence ----
+  const [graphId, setGraphId] = useState<string>('');
+  const [graphName, setGraphName] = useState<string>('Untitled Graph');
+  const [savedGraphs, setSavedGraphs] = useState<Array<{ graph_id: string; name: string }>>([]);
+  const [saveNotice, setSaveNotice] = useState<string | null>(null);
+  const [validationErrors, setValidationErrors] = useState<string[]>([]);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [graphInputValue, setGraphInputValue] = useState<string>('');
+  const [pendingCapability, setPendingCapability] = useState<string>('');
+  const workspaceIdForGraphs = 'ws-synthos-primary';
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch('/api/capabilities');
+        const d = await r.json();
+        if (r.ok && d?.success) setCapabilities(d.capabilities || []);
+      } catch { /* picker degrades to empty, never a fake list */ }
+    })();
+    void refreshSavedGraphs();
+  }, []);
+
+  const refreshSavedGraphs = async () => {
+    try {
+      const r = await fetch(`/api/graphs?workspaceId=${encodeURIComponent(workspaceIdForGraphs)}`);
+      const d = await r.json();
+      if (r.ok && d?.success) setSavedGraphs((d.graphs || []).map((g: any) => ({ graph_id: g.graph_id, name: g.name })));
+    } catch { /* list stays as-is */ }
+  };
+
+  /**
+   * Real structural validation. Reports the exact problem — never a generic
+   * "graph invalid" — and refuses to silently repair the graph into a valid
+   * shape, because that would hide what the author actually built.
+   */
+  const validateGraph = (ns: GraphNode[], es: GraphEdge[]): string[] => {
+    const errs: string[] = [];
+    const ids = ns.map((n) => n.id);
+    const dupes = ids.filter((id, i) => ids.indexOf(id) !== i);
+    if (dupes.length) errs.push(`Duplicate node id(s): ${[...new Set(dupes)].join(', ')}`);
+    for (const n of ns) {
+      if (n.type === 'capability' && !n.capability) errs.push(`Capability node "${n.label}" has no capability selected.`);
+      if (n.type === 'capability' && n.capability) {
+        const cap = capabilities.find((c) => c.key === n.capability);
+        if (cap && !cap.graphExecutable) errs.push(`Capability "${n.capability}" on "${n.label}" is registered but not executable from a graph node yet.`);
+      }
+    }
+    for (const e of es) {
+      if (!ids.includes(e.source)) errs.push(`Edge ${e.id} has a source node that does not exist: ${e.source}`);
+      if (!ids.includes(e.target)) errs.push(`Edge ${e.id} has a target node that does not exist: ${e.target}`);
+      if (e.source === e.target) errs.push(`Edge ${e.id} is a self-loop; the executor requires a DAG.`);
+    }
+    // Cycle detection (the executor runs a linear/DAG order).
+    const adj = new Map<string, string[]>();
+    for (const e of es) adj.set(e.source, [...(adj.get(e.source) || []), e.target]);
+    const state = new Map<string, number>();
+    const walk = (id: string): boolean => {
+      if (state.get(id) === 1) return true;
+      if (state.get(id) === 2) return false;
+      state.set(id, 1);
+      for (const nx of adj.get(id) || []) if (walk(nx)) return true;
+      state.set(id, 2);
+      return false;
+    };
+    for (const id of ids) if (walk(id)) { errs.push('Graph contains a cycle; the executor requires a DAG.'); break; }
+    if (!ns.some((n) => n.type === 'agent' || n.type === 'capability')) {
+      errs.push('Graph has no agent or capability node, so nothing would execute.');
+    }
+    return errs;
+  };
+
+  /** Save through the SAME canonical contract an AI-generated graph would use. */
+  const handleSaveGraph = async () => {
+    const errs = validateGraph(nodes, edges);
+    setValidationErrors(errs);
+    if (errs.length) { setSaveNotice(`NOT SAVED — ${errs.length} validation error(s).`); return; }
+    const id = graphId || `graph-${Date.now()}`;
+    try {
+      const r = await fetch('/api/graphs', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId: workspaceIdForGraphs, graphId: id, name: graphName, description: 'Authored in Graph Builder', nodes, edges }),
+      });
+      const d = await r.json();
+      if (r.ok && d?.success) {
+        setGraphId(d.graph.graph_id);
+        setSaveNotice(`Saved ${d.graph.graph_id} — ${nodes.length} node(s), ${edges.length} edge(s).`);
+        await refreshSavedGraphs();
+      } else setSaveNotice(`FAILED — ${d?.error || `HTTP ${r.status}`}`);
+    } catch (err: any) { setSaveNotice(`FAILED — ${err?.message || 'network error'}`); }
+  };
+
+  /** Load a stored graph back onto the canvas, hydrating layout where present. */
+  const handleLoadGraph = async (id: string) => {
+    if (!id) return;
+    try {
+      const r = await fetch(`/api/graphs/${encodeURIComponent(id)}?workspaceId=${encodeURIComponent(workspaceIdForGraphs)}`);
+      const d = await r.json();
+      if (!r.ok || !d?.success) { setSaveNotice(`FAILED to load — ${d?.error || `HTTP ${r.status}`}`); return; }
+      const loaded: GraphNode[] = (d.graph.nodes || []).map((n: any, i: number) => ({
+        id: n.id,
+        label: n.label || n.name || n.id,
+        type: n.type || 'agent',
+        subType: n.subType || n.capability || n.type || 'node',
+        capability: n.capability,
+        parameters: n.parameters,
+        // Layout is stored on the node when present; otherwise lay out
+        // deterministically rather than stacking everything at 0,0.
+        x: typeof n.x === 'number' ? n.x : 160 + (i % 3) * 240,
+        y: typeof n.y === 'number' ? n.y : 140 + Math.floor(i / 3) * 170,
+        agentRole: n.assignedAgent || n.agentRole,
+        modelId: n.assignedModel || n.modelId,
+        status: 'ready',
+        requiredFields: n.requiredFields || { role_purpose: n.description || n.label || n.id },
+        missingFields: [],
+        description: n.description || '',
+        config: n.config || {},
+      }));
+      setNodes(loaded);
+      setEdges((d.graph.edges || []).map((e: any) => ({ id: e.id, source: e.source, target: e.target, label: e.label, animated: e.animated })));
+      setGraphId(d.graph.graph_id);
+      setGraphName(d.graph.name || id);
+      setValidationErrors([]);
+      setSaveNotice(`Loaded ${d.graph.graph_id} — ${loaded.length} node(s), ${(d.graph.edges || []).length} edge(s).`);
+    } catch (err: any) { setSaveNotice(`FAILED to load — ${err?.message || 'network error'}`); }
+  };
+
+  /** Delete the selected edge. */
+  const handleDeleteEdge = (edgeId: string) => {
+    setEdges((prev) => prev.filter((e) => e.id !== edgeId));
+    setSelectedEdgeId(null);
+    setExecutionLogs((prev) => [...prev, `[GraphBuilder]: Deleted edge ${edgeId}.`]);
+  };
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('tmpl-1');
   const [showPromptsModal, setShowPromptsModal] = useState<boolean>(false);
   const [showValidationModal, setShowValidationModal] = useState<boolean>(false);
@@ -550,6 +688,28 @@ export const GraphBuilderView: React.FC<GraphBuilderViewProps> = ({
   };
 
   // Add new node
+  /** Adds a capability node bound to a real registry key. */
+  const handleAddCapabilityNode = (capabilityKey: string) => {
+    const newNodeId = `cap-${Date.now().toString().slice(-6)}`;
+    const newNode: GraphNode = {
+      id: newNodeId,
+      label: capabilityKey,
+      type: 'capability',
+      subType: capabilityKey,
+      capability: capabilityKey,
+      parameters: capabilityKey === 'aeo.audit' ? { domain: '$input' } : {},
+      x: 160 + (nodes.length % 3) * 240,
+      y: 140 + Math.floor(nodes.length / 3) * 170,
+      status: 'ready',
+      description: `Dispatches the SynthOS capability "${capabilityKey}".`,
+      requiredFields: { role_purpose: `Dispatch capability ${capabilityKey}` },
+      missingFields: [],
+      config: {},
+    };
+    setNodes((prev) => [...prev, newNode]);
+    setExecutionLogs((prev) => [...prev, `[GraphBuilder]: Added capability node ${capabilityKey}.`]);
+  };
+
   const handleAddNode = (type: GraphNode['type'], label: string, subType: string) => {
     const newNodeId = `node-${Date.now().toString().slice(-4)}`;
     const isAgent = type === 'agent';
@@ -913,7 +1073,10 @@ Please research and resolve all missing fields according to the Required Field S
   // the route itself rejects an unconfirmed request.
   // --------------------------------------------------------------------
 
-  const agentNodesForLiveRun = () => nodes.filter((n) => n.type === 'agent');
+  // Dispatchable nodes: agent (model call) and capability (SynthOS capability).
+  // Mirrors lib/graph-execution.ts::selectLiveExecutionNodes so the estimate and
+  // the run never disagree about what will actually execute.
+  const agentNodesForLiveRun = () => nodes.filter((n) => n.type === 'agent' || n.type === 'capability');
 
   const handleRequestLiveRun = async () => {
     const draftNodes = nodes.filter((n) => n.type === 'agent' && n.status === 'draft');
@@ -971,15 +1134,25 @@ Please research and resolve all missing fields according to the Required Field S
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           workspaceId,
-          name: template?.name || 'Untitled Graph',
-          nodes: agentNodes.map((n) => ({
+          graphId: graphId || undefined,
+          name: graphName || template?.name || 'Untitled Graph',
+          // Send the FULL canvas. The server persists all of it and executes
+          // only the dispatchable subset (agent + capability), so running from
+          // the Builder can never strip presentational nodes.
+          nodes: nodes.map((n) => ({
             id: n.id,
             type: n.type,
             name: n.label,
             description: n.description,
             assignedAgent: n.agentRole || 'dev',
+            // Capability nodes carry their key + params; layout travels too so
+            // a reload restores exactly what the author positioned.
+            ...(n.capability ? { capability: n.capability } : {}),
+            ...(n.parameters ? { parameters: n.parameters } : {}),
+            x: n.x, y: n.y, label: n.label, subType: n.subType,
           })),
           edges,
+          input: graphInputValue,
           confirmed: true,
         }),
       });
@@ -1179,6 +1352,97 @@ Please research and resolve all missing fields according to the Required Field S
         {/* Left Toolbar / Node Library Drawer */}
         <div className="w-60 bg-[#090A13] border-r border-[#161828] p-3 flex flex-col justify-between shrink-0 overflow-y-auto">
           <div className="space-y-4">
+            {/* ---- Graph persistence: the SAME canonical contract an
+                 AI-generated graph definition would use (POST /api/graphs). ---- */}
+            <div className="space-y-1.5 pb-3 border-b border-[#161828]">
+              <div className="text-[10px] font-bold text-[#636B95] uppercase tracking-wider px-1">Graph</div>
+              <input
+                data-testid="graph-name-input"
+                value={graphName}
+                onChange={(e) => setGraphName(e.target.value)}
+                placeholder="Graph name"
+                className="w-full bg-[#05060B] border border-[#1E223D] rounded-lg px-2 py-1.5 text-[11px] text-white placeholder-[#4C5274] focus:outline-none focus:border-[#615EFF]"
+              />
+              <select
+                data-testid="graph-load-select"
+                value={graphId}
+                onChange={(e) => handleLoadGraph(e.target.value)}
+                className="w-full bg-[#05060B] border border-[#1E223D] rounded-lg px-2 py-1.5 text-[11px] text-white focus:outline-none focus:border-[#615EFF]"
+              >
+                <option value="">Load saved graph…</option>
+                {savedGraphs.map((g) => <option key={g.graph_id} value={g.graph_id}>{g.name}</option>)}
+              </select>
+              <div className="flex gap-1.5">
+                <button
+                  data-testid="graph-save-btn"
+                  onClick={handleSaveGraph}
+                  className="flex-1 px-2 py-1.5 rounded-lg bg-[#615EFF] text-white text-[11px] font-bold cursor-pointer hover:bg-[#7B79FF] transition"
+                >SAVE</button>
+                <button
+                  data-testid="graph-new-btn"
+                  onClick={() => { setGraphId(''); setGraphName('Untitled Graph'); setNodes([]); setEdges([]); setValidationErrors([]); setSaveNotice('New empty graph.'); }}
+                  className="px-2 py-1.5 rounded-lg bg-[#0B0D1B] border border-[#1F2442] text-[#8E94B8] text-[11px] font-bold cursor-pointer"
+                >NEW</button>
+              </div>
+              {saveNotice && (
+                <div data-testid="graph-save-notice" className={`text-[10px] px-1 ${saveNotice.startsWith('FAILED') || saveNotice.startsWith('NOT SAVED') ? 'text-[#FF5E8E]' : 'text-[#00D26A]'}`}>{saveNotice}</div>
+              )}
+              {validationErrors.length > 0 && (
+                <div data-testid="graph-validation-errors" className="text-[10px] text-[#FF5E8E] px-1 space-y-0.5">
+                  {validationErrors.map((e, i) => <div key={i}>• {e}</div>)}
+                </div>
+              )}
+            </div>
+
+            {/* ---- Capability nodes from the REAL registry ---- */}
+            <div className="space-y-1.5 pb-3 border-b border-[#161828]">
+              <div className="text-[10px] text-[#20B2AA] font-semibold px-1">SynthOS Capability</div>
+              <select
+                data-testid="capability-picker"
+                value={pendingCapability}
+                onChange={(e) => setPendingCapability(e.target.value)}
+                className="w-full bg-[#05060B] border border-[#1E223D] rounded-lg px-2 py-1.5 text-[11px] text-white focus:outline-none focus:border-[#20B2AA]"
+              >
+                <option value="">Select a capability…</option>
+                {capabilities.map((c) => (
+                  <option key={c.key} value={c.key} disabled={!c.graphExecutable}>
+                    {c.key}{c.graphExecutable ? '' : ' — not graph-executable'}
+                  </option>
+                ))}
+              </select>
+              <button
+                data-testid="capability-add-btn"
+                disabled={!pendingCapability}
+                onClick={() => { if (pendingCapability) { handleAddCapabilityNode(pendingCapability); setPendingCapability(''); } }}
+                className="w-full px-2 py-1.5 rounded-lg bg-[#20B2AA] text-black text-[11px] font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              >+ ADD CAPABILITY NODE</button>
+              <div className="text-[9px] text-[#636B95] px-1">
+                Stores the capability key, never a vendor. {capabilities.length} registered.
+              </div>
+              {/* Run input — the value a capability node receives as $input
+                  (e.g. the prospect domain for aeo.audit). */}
+              <input
+                data-testid="graph-input-value"
+                value={graphInputValue}
+                onChange={(e) => setGraphInputValue(e.target.value)}
+                placeholder="Run input (e.g. https://example.com)"
+                className="w-full bg-[#05060B] border border-[#1E223D] rounded-lg px-2 py-1.5 text-[11px] text-white placeholder-[#4C5274] focus:outline-none focus:border-[#20B2AA]"
+              />
+            </div>
+
+            {/* ---- Edge selection ---- */}
+            {selectedEdgeId && (
+              <div className="space-y-1.5 pb-3 border-b border-[#161828]">
+                <div className="text-[10px] text-[#FF5E8E] font-semibold px-1">Edge selected</div>
+                <div className="text-[10px] text-[#8E94B8] px-1 break-all">{selectedEdgeId}</div>
+                <button
+                  data-testid="edge-delete-btn"
+                  onClick={() => handleDeleteEdge(selectedEdgeId)}
+                  className="w-full px-2 py-1.5 rounded-lg bg-[#FF5E8E]/15 border border-[#FF5E8E]/40 text-[#FF5E8E] text-[11px] font-bold cursor-pointer"
+                >DELETE EDGE</button>
+              </div>
+            )}
+
             <div className="text-[10px] font-bold text-[#636B95] uppercase tracking-wider px-1">
               + Add Node to Canvas
             </div>
@@ -1444,7 +1708,7 @@ Please research and resolve all missing fields according to the Required Field S
           )}
 
           {/* Canvas SVG Container for Edges */}
-          <svg className="absolute inset-0 w-full h-full pointer-events-none z-0">
+          <svg className="absolute inset-0 w-full h-full z-0" style={{ pointerEvents: 'none' }}>
             <defs>
               <marker
                 id="arrow"
@@ -1473,12 +1737,23 @@ Please research and resolve all missing fields according to the Required Field S
 
               return (
                 <g key={edge.id}>
+                  {/* Wide invisible hit-path: a 2.5px stroke is unclickable in
+                      practice, so edge selection needs its own target. */}
                   <path
                     d={pathD}
                     fill="none"
-                    stroke="#615EFF"
-                    strokeWidth="2.5"
-                    strokeOpacity="0.8"
+                    stroke="transparent"
+                    strokeWidth="18"
+                    style={{ pointerEvents: 'stroke', cursor: 'pointer' }}
+                    data-testid={`edge-hit-${edge.id}`}
+                    onClick={(ev) => { ev.stopPropagation(); setSelectedEdgeId(selectedEdgeId === edge.id ? null : edge.id); }}
+                  />
+                  <path
+                    d={pathD}
+                    fill="none"
+                    stroke={selectedEdgeId === edge.id ? '#FF5E8E' : '#615EFF'}
+                    strokeWidth={selectedEdgeId === edge.id ? '4' : '2.5'}
+                    strokeOpacity="0.9"
                     markerEnd="url(#arrow)"
                     strokeDasharray={edge.animated || isRunning ? '6,6' : undefined}
                     className={isRunning ? 'animate-[dash_1s_linear_infinite]' : undefined}

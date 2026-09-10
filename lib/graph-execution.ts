@@ -121,3 +121,19 @@ export function estimateGraphExecution(nodes: GraphExecutionNodeInput[]): GraphE
       'No live per-token pricing metadata is wired into this deployment. Token cost is only observable after execution, from real provider usage metadata (see executionMetrics.tokensConsumed on each completed task).',
   };
 }
+
+/**
+ * Capability keys a graph `capability` node can actually dispatch today.
+ *
+ * This is the single source of truth shared by the executor and the Builder's
+ * capability picker, so the UI can never offer a capability the runtime would
+ * refuse. Registered-but-not-graph-executable capabilities still appear in the
+ * picker — marked unavailable — rather than being hidden, so the gap is
+ * visible instead of mysterious.
+ */
+export const GRAPH_EXECUTABLE_CAPABILITIES: string[] = [
+  'aeo.audit',
+  'opportunity.review',
+  'create_mission',
+  'schedule_recheck',
+];

@@ -417,6 +417,46 @@ function aeoAuditCapability(): CapabilityDescriptor {
   };
 }
 
+/**
+ * Graph-composition capabilities.
+ *
+ * These are real, executable capabilities with real executors in the graph
+ * runtime — they turn a completed audit into prioritised opportunities, into
+ * SynthOS tasks, and into a recurring recheck. They were previously wired into
+ * the execute loop without being registered, which made them invisible to the
+ * Graph Builder's capability picker and absent from the registry that is meant
+ * to be the honest inventory of what the system can do.
+ *
+ * Each is READ/LOW except create_mission and schedule_recheck, which write
+ * into the caller's own workspace through the canonical task/scheduler paths.
+ */
+function opportunityReviewCapability(): CapabilityDescriptor {
+  return {
+    key: 'opportunity.review', runtime: 'aeo', status: 'AVAILABLE',
+    effectClass: 'READ', riskTier: 'LOW', approvalPolicy: 'NONE', workspaceScope: 'member',
+    reference: 'server.ts::/api/graphs/execute capability node "opportunity.review"',
+    reason: 'Prioritises opportunities from a completed upstream audit. Deterministic; preserves UNKNOWN rather than scoring it.',
+  };
+}
+
+function createMissionCapability(): CapabilityDescriptor {
+  return {
+    key: 'create_mission', runtime: 'aeo', status: 'AVAILABLE',
+    effectClass: 'READ', riskTier: 'LOW', approvalPolicy: 'NONE', workspaceScope: 'member',
+    reference: 'lib/aeo/service.ts::createAuditMissionTasks',
+    reason: 'Creates real SynthOS tasks in the caller\'s own workspace from prioritised audit findings.',
+  };
+}
+
+function scheduleRecheckCapability(): CapabilityDescriptor {
+  return {
+    key: 'schedule_recheck', runtime: 'aeo', status: 'AVAILABLE',
+    effectClass: 'READ', riskTier: 'LOW', approvalPolicy: 'NONE', workspaceScope: 'member',
+    reference: 'lib/fabric/scheduler.ts::createValidatedSchedule (capability aeo.audit)',
+    reason: 'Creates a recurring re-audit through the canonical SynthOS scheduler. No second scheduler.',
+  };
+}
+
 function mcpConnectivityCapability(report: RuntimeStatusReport): CapabilityDescriptor {
   const mcp = findSystem(report, 'MCP Connectivity');
   const status: CapabilityStatus =
@@ -458,6 +498,9 @@ async function buildAllCapabilities(report: RuntimeStatusReport): Promise<Capabi
     browserCapability(),
     researchCapability(report),
     aeoAuditCapability(),
+    opportunityReviewCapability(),
+    createMissionCapability(),
+    scheduleRecheckCapability(),
     mcpConnectivityCapability(report),
   ];
 }

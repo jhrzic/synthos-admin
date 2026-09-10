@@ -61,6 +61,8 @@ import { tonGuardianViews, installTonGuardians } from "./lib/ton-guardians";
 import { listWorkspaceVaultEntries, getWorkspaceVaultEntry, previewWorkspaceVaultEntry, writeWorkspaceArtifact } from "./lib/vault";
 import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory, listWorkspaceMemory } from "./lib/memory-index";
 import { runAeoAudit, createAuditMissionTasks, resolveGeoProvider } from "./lib/aeo/service";
+import { listCapabilities } from "./lib/fabric/registry";
+import { GRAPH_EXECUTABLE_CAPABILITIES } from "./lib/graph-execution";
 import { estimateGraphExecution, selectLiveExecutionNodes } from "./lib/graph-execution";
 import { listWorkspaceSkills, getWorkspaceSkill, createSkill, updateSkill, testSkill, discoverRepoSkillFiles, isValidMcpEndpointRef, classifySkillExecutability, getRawCredentialCiphertext, ExecutionTargetType } from "./lib/skills";
 import { executeSkill } from "./lib/skill-execution";
@@ -1498,6 +1500,28 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to list graphs" });
+    }
+  });
+
+  // The real capability registry, exposed so the Graph Builder can offer
+  // actual capability keys instead of a hardcoded vendor list. A capability
+  // node stores this key; the resolver decides what runs underneath.
+  app.get("/api/capabilities", requireAuth, async (_req, res) => {
+    try {
+      const caps = await listCapabilities();
+      return res.json({
+        success: true,
+        count: caps.length,
+        capabilities: caps.map((c) => ({
+          key: c.key, runtime: c.runtime, status: c.status,
+          effectClass: c.effectClass, riskTier: c.riskTier,
+          approvalPolicy: c.approvalPolicy, reason: c.reason,
+          // Whether a graph capability node can actually dispatch this today.
+          graphExecutable: GRAPH_EXECUTABLE_CAPABILITIES.includes(c.key),
+        })),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list capabilities" });
     }
   });
 
