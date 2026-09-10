@@ -3,8 +3,10 @@ import { ObsidianNote, ObsidianVault, AIModelInfo } from '../types';
 import {
   Database, FileText, Plus, Search, Tag, Trash2, Save,
   RefreshCw, Loader2, AlertTriangle, HardDrive, Hash,
-  CheckCircle2, XCircle
+  CheckCircle2, XCircle, Network, Activity, Link as LinkIcon
 } from 'lucide-react';
+import { ObsidianGraphMind } from './ObsidianGraphMind';
+import { VaultActivitySparkline } from './VaultActivitySparkline';
 
 interface ObsidianViewProps {
   vaults: ObsidianVault[];
@@ -62,7 +64,12 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
   activeWorkspaceId,
 }) => {
   const workspaceId = activeWorkspaceId || 'ws-synthos-primary';
-  const [activeSection, setActiveSection] = useState<'vault' | 'notes'>('vault');
+  // 'mesh' restores the Obsidian Knowledge Mesh surface (animated wikilink
+  // graph + real ingestion sparkline) that cd60d81 replaced and fee6fe4 then
+  // deleted as orphaned code. The 'vault' and 'notes' sections below are the
+  // current, real-data screens and are untouched by that restoration.
+  const [activeSection, setActiveSection] = useState<'mesh' | 'vault' | 'notes'>('mesh');
+  const [selectedMeshNoteId, setSelectedMeshNoteId] = useState<string | null>(null);
 
   // Real Vault artifacts
   const [entries, setEntries] = useState<VaultEntry[]>([]);
@@ -73,6 +80,12 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
+
+  /** Real total of [[wikilinks]] across the loaded notes. */
+  const meshSynapseCount = React.useMemo(
+    () => notes.reduce((acc, n) => acc + (n.wikilinks?.length || 0), 0),
+    [notes]
+  );
 
   const fetchEntries = useCallback(async () => {
     setEntriesLoading(true);
@@ -158,7 +171,7 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
               <Database className="w-6 h-6" />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-white tracking-tight font-['Space_Grotesk']">Vault</h1>
+              <h1 className="text-xl font-bold text-white tracking-tight font-['Space_Grotesk']">Obsidian Knowledge Mesh</h1>
               <p className="text-xs text-[#8E94B8] mt-1 font-sans">Workspace: <span className="text-white">{workspaceId}</span></p>
             </div>
           </div>
@@ -179,6 +192,14 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
 
         <div className="flex border-t border-[#EC4899]/20 pt-4 text-xs gap-2">
           <button
+            onClick={() => setActiveSection('mesh')}
+            className={`px-3.5 py-2 rounded-xl font-bold transition cursor-pointer flex items-center gap-1.5 ${
+              activeSection === 'mesh' ? 'bg-[#EC4899] text-white shadow-lg shadow-[#EC4899]/25' : 'bg-[#0B0D1B] text-[#8E94B8] hover:text-white border border-[#1F2442]'
+            }`}
+          >
+            <Network className="w-3.5 h-3.5" /> KNOWLEDGE MESH
+          </button>
+          <button
             onClick={() => setActiveSection('vault')}
             className={`px-3.5 py-2 rounded-xl font-bold transition cursor-pointer flex items-center gap-1.5 ${
               activeSection === 'vault' ? 'bg-[#EC4899] text-white shadow-lg shadow-[#EC4899]/25' : 'bg-[#0B0D1B] text-[#8E94B8] hover:text-white border border-[#1F2442]'
@@ -196,6 +217,56 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
           </button>
         </div>
       </div>
+
+      {activeSection === 'mesh' && (
+        <div className="space-y-6">
+          {/* Mesh metrics — every figure below is counted from the notes
+              actually loaded, never seeded. */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="p-4 bg-[#090A14] border border-[#1E223D] rounded-2xl">
+              <span className="text-[10px] font-mono text-[#6A7097] uppercase tracking-wider block">Notes In Mesh</span>
+              <span className="text-2xl font-extrabold text-white font-mono mt-1 block">{notes.length}</span>
+              <span className="text-[10px] text-[#7B82A8] font-mono mt-0.5 block">Quick Notes (session-local)</span>
+            </div>
+            <div className="p-4 bg-[#090A14] border border-[#1E223D] rounded-2xl">
+              <span className="text-[10px] font-mono text-[#6A7097] uppercase tracking-wider block">Wikilink Synapses</span>
+              <span className="text-2xl font-extrabold text-[#00D26A] font-mono mt-1 block">{meshSynapseCount}</span>
+              <span className="text-[10px] text-[#7B82A8] font-mono mt-0.5 block">Summed from note wikilinks</span>
+            </div>
+            <div className="p-4 bg-[#090A14] border border-[#1E223D] rounded-2xl">
+              <span className="text-[10px] font-mono text-[#6A7097] uppercase tracking-wider block">Vault Artifacts</span>
+              <span className="text-2xl font-extrabold text-[#38BDF8] font-mono mt-1 block">
+                {entriesLoading ? '…' : entriesError ? 'UNKNOWN' : entries.length}
+              </span>
+              <span className="text-[10px] text-[#7B82A8] font-mono mt-0.5 block">Real files via /api/vault</span>
+            </div>
+            <div className="p-4 bg-[#090A14] border border-[#1E223D] rounded-2xl">
+              <span className="text-[10px] font-mono text-[#6A7097] uppercase tracking-wider block">Local Vault Auto-Sync</span>
+              <span className="text-base font-extrabold text-[#8E94B8] font-mono mt-1 block inline-flex items-center gap-1.5">
+                <XCircle className="w-4 h-4" /> NOT_CONNECTED
+              </span>
+              <span className="text-[10px] text-[#7B82A8] font-mono mt-0.5 block">No Obsidian file watcher is wired up</span>
+            </div>
+          </div>
+
+          {/* Vault Activity & Ingestion sparkline — real, from note timestamps */}
+          <VaultActivitySparkline notes={notes} vaults={vaults} />
+
+          {/* Animated interactive wikilink graph */}
+          <ObsidianGraphMind
+            notes={notes}
+            vaults={vaults}
+            models={models}
+            selectedNoteId={selectedMeshNoteId || undefined}
+            onSelectNote={(noteId) => setSelectedMeshNoteId(noteId)}
+            onOpenNote={(noteId) => {
+              setSelectedMeshNoteId(noteId);
+              setActiveSection('notes');
+            }}
+            height={560}
+          />
+        </div>
+      )}
 
       {activeSection === 'vault' && (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
