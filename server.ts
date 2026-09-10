@@ -60,8 +60,7 @@ import { tonAnalyticsSnapshot, recordTonTelemetry } from "./lib/ton-analytics";
 import { tonGuardianViews, installTonGuardians } from "./lib/ton-guardians";
 import { listWorkspaceVaultEntries, getWorkspaceVaultEntry, previewWorkspaceVaultEntry, writeWorkspaceArtifact } from "./lib/vault";
 import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory, listWorkspaceMemory } from "./lib/memory-index";
-import { crawlSite } from "./lib/aeo/crawler";
-import { analyze as analyzeAudit, renderReport as renderAuditReport } from "./lib/aeo/analyzer";
+import { runAeoAudit, createAuditMissionTasks, resolveGeoProvider } from "./lib/aeo/service";
 import { estimateGraphExecution, selectLiveExecutionNodes } from "./lib/graph-execution";
 import { listWorkspaceSkills, getWorkspaceSkill, createSkill, updateSkill, testSkill, discoverRepoSkillFiles, isValidMcpEndpointRef, classifySkillExecutability, getRawCredentialCiphertext, ExecutionTargetType } from "./lib/skills";
 import { executeSkill } from "./lib/skill-execution";
@@ -1646,13 +1645,18 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       const nodes = selectLiveExecutionNodes(Array.isArray(rawNodes) ? rawNodes : []);
 
       if (!nodes || nodes.length === 0) {
-        return res.status(400).json({ success: false, error: "Graph must contain at least one agent node to execute." });
+        return res.status(400).json({ success: false, error: "Graph must contain at least one agent or capability node to execute." });
       }
 
       // 1. Persist graph definition — graph ownership is authoritative from
       // here on; saveGraph() rejects if graphId already exists in another
       // workspace instead of silently reassigning it.
-      saveGraph({ graphId, workspaceId, name, nodes, edges });
+      // Persist the FULL canvas (rawNodes), not the filtered executable subset.
+      // Saving `nodes` here silently deleted every non-dispatchable node —
+      // triggers, logic, notes — from the stored graph the moment it was run,
+      // so a builder canvas lost structure just by executing. Execution still
+      // uses the filtered `nodes` below; only what gets STORED changes.
+      saveGraph({ graphId, workspaceId, name, nodes: Array.isArray(rawNodes) ? rawNodes : nodes, edges });
 
       // 2. Initialize Graph Run in SQLite — inherits workspaceId from the
       // graph just saved (saveGraphRun derives it from graphs.workspace_id;
@@ -1693,6 +1697,16 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       // or signed per COMPUTE node individually (that was the
       // N-nodes-to-N-receipts problem this step fixes).
       const nativeNodeOutputs: Array<{ nodeId: string; nodeLabel: string; order: number; agent: string; modelUsed: string | null; output: string }> = [];
+      // Shared state threaded between capability nodes in one run: the audit a
+      // downstream review/mission/schedule node needs, and the artefacts each
+      // produced. Scoped to this run only — never global.
+      const capabilityState: {
+        audit?: Extract<Awaited<ReturnType<typeof runAeoAudit>>, { outcome: "SUCCESS" }>;
+        opportunities?: any[];
+        missionTasks?: { taskId: string; title: string }[];
+        schedule?: any;
+      } = {};
+      const graphInput: string = typeof req.body?.input === "string" ? req.body.input : "";
 
       for (let i = 0; i < nodes.length; i++) {
         const currentNode = nodes[i];
@@ -1723,8 +1737,125 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
           && typeof currentNode.windmillTargetId === "string"
           && currentNode.windmillTargetId.trim().length > 0;
 
+        // SYNTHOS-NATIVE CAPABILITY NODE.
+        //
+        // A node that names a stable SynthOS capability (aeo.audit,
+        // create_mission, schedule_recheck…) rather than a vendor. The graph
+        // definition therefore survives provider changes: the capability
+        // resolver decides what runs underneath, exactly as the scheduler does.
+        //
+        // This is NOT a second workflow engine — it is one more branch in the
+        // existing per-node loop, dispatching into the capability services that
+        // already exist. No crawler or analyzer logic is duplicated here.
+        const isCapabilityNode = currentNode.type === "capability"
+          && typeof currentNode.capability === "string"
+          && currentNode.capability.trim().length > 0;
+
         let nodeExecData: any;
-        if (isWindmillNode) {
+        if (isCapabilityNode) {
+          const capKey = String(currentNode.capability).trim();
+          // Node params may reference the graph's own input and prior outputs.
+          const capParams: Record<string, any> = { ...(currentNode.parameters || {}) };
+          if (typeof capParams.domain === "string" && capParams.domain === "$input") {
+            capParams.domain = String(graphInput || "").trim();
+          }
+          if (!capParams.domain && graphInput) capParams.domain = String(graphInput).trim();
+
+          try {
+            if (capKey === "aeo.audit") {
+              const r = await runAeoAudit({
+                workspaceId,
+                domain: String(capParams.domain || ""),
+                businessName: capParams.businessName,
+                location: capParams.location,
+                maxPages: Number(capParams.maxPages) || 10,
+              });
+              if (r.outcome === "FAILED") {
+                nodeExecData = { success: false, status: "FAILED", reason: r.reason, error: r.error };
+              } else {
+                capabilityState.audit = r;
+                const sc = r.analysis.scores;
+                nodeExecData = {
+                  success: true, status: "DONE",
+                  modelUsed: `capability:${capKey}`,
+                  output: [
+                    `Audited ${r.analysis.origin} — ${r.analysis.crawl.pagesAnalyzed} page(s), ${r.analysis.checks.length} checks.`,
+                    `SEO ${sc.seo.score ?? "UNKNOWN"} · AEO ${sc.aeo.score ?? "UNKNOWN"} · GEO ${sc.geo.score ?? "UNKNOWN"} · Overall ${sc.overall.score ?? "UNKNOWN"}.`,
+                    `Artifact ${r.artifact.id} · Aegis ${r.aegis.decision} · Receipt ${r.receiptId || "none"}.`,
+                    r.analysis.unknowns.length ? `UNKNOWN preserved: ${r.analysis.unknowns.length} item(s).` : "",
+                  ].filter(Boolean).join("\n"),
+                  capability: capKey,
+                  auditTaskId: r.taskId, artifactId: r.artifact.id,
+                  aegisDecision: r.aegis.decision, receiptId: r.receiptId,
+                };
+              }
+            } else if (capKey === "opportunity.review") {
+              const audit = capabilityState.audit;
+              if (!audit) {
+                nodeExecData = { success: false, status: "FAILED", reason: "NO_UPSTREAM_AUDIT", error: "opportunity.review requires a completed aeo.audit node upstream." };
+              } else {
+                // Prioritisation only — never converts an UNKNOWN into a score.
+                const opps = audit.analysis.summary.topOpportunities;
+                capabilityState.opportunities = opps;
+                nodeExecData = {
+                  success: true, status: "DONE", modelUsed: `capability:${capKey}`, capability: capKey,
+                  output: [
+                    `${opps.length} prioritised opportunity(ies) from real evidence:`,
+                    ...opps.map((o: any, n: number) => `${n + 1}. [${o.severity}] ${o.title} — ${o.evidence}`),
+                    audit.analysis.scores.geo.score === null
+                      ? `GEO remains UNKNOWN and is preserved as UNKNOWN: ${audit.analysis.scores.geo.unknownReason}`
+                      : "",
+                  ].filter(Boolean).join("\n"),
+                };
+              }
+            } else if (capKey === "create_mission") {
+              const audit = capabilityState.audit;
+              const opps = capabilityState.opportunities || [];
+              if (!audit || opps.length === 0) {
+                nodeExecData = { success: false, status: "FAILED", reason: "NO_OPPORTUNITIES", error: "create_mission requires prioritised opportunities from an upstream review node." };
+              } else {
+                const created = createAuditMissionTasks({
+                  workspaceId, auditTaskId: audit.taskId, domain: audit.analysis.origin,
+                  items: opps.map((o: any) => ({ title: o.title, recommendation: o.recommendation, evidence: o.evidence, category: o.category })),
+                });
+                capabilityState.missionTasks = created;
+                nodeExecData = {
+                  success: true, status: "DONE", modelUsed: `capability:${capKey}`, capability: capKey,
+                  output: `Created ${created.length} real SynthOS task(s):\n${created.map((c) => `- ${c.title} (${c.taskId})`).join("\n")}`,
+                  createdTaskIds: created.map((c) => c.taskId),
+                };
+              }
+            } else if (capKey === "schedule_recheck") {
+              const audit = capabilityState.audit;
+              if (!audit) {
+                nodeExecData = { success: false, status: "FAILED", reason: "NO_UPSTREAM_AUDIT", error: "schedule_recheck requires a completed aeo.audit node upstream." };
+              } else {
+                const days = Number(capParams.everyDays) || 7;
+                const parsed = parseSchedulePhrase(`every ${days} days`, new Date().toISOString());
+                if ("ambiguous" in parsed) {
+                  nodeExecData = { success: false, status: "FAILED", reason: "SCHEDULE_UNPARSEABLE", error: parsed.reason };
+                } else {
+                  const sched = await createValidatedSchedule({
+                    workspaceId, actorUserId: (req as AuthedRequest).authUser!.user_id,
+                    capability: "aeo.audit", action: "aeo.audit",
+                    parameters: { domain: audit.analysis.origin },
+                    rawText: `Re-audit ${audit.analysis.origin} every ${days} days`, parsed,
+                  });
+                  capabilityState.schedule = sched;
+                  nodeExecData = {
+                    success: true, status: "DONE", modelUsed: `capability:${capKey}`, capability: capKey,
+                    output: `Recheck scheduled: ${sched.schedule_id} — status ${sched.status}, next run ${sched.next_run_at || "UNKNOWN"}.`,
+                    scheduleId: sched.schedule_id, nextRunAt: sched.next_run_at,
+                  };
+                }
+              }
+            } else {
+              nodeExecData = { success: false, status: "NOT_CONFIGURED", reason: "NO_CAPABILITY_EXECUTOR", error: `No graph executor is wired for capability "${capKey}".` };
+            }
+          } catch (capErr: any) {
+            nodeExecData = { success: false, status: "FAILED", reason: "CAPABILITY_ERROR", error: capErr?.message || String(capErr) };
+          }
+        } else if (isWindmillNode) {
           // EXTERNAL_ACTION — unchanged: its own real task, Aegis pass, and
           // signed receipt (already fabric-backed since Step 3). This is
           // the one node class that keeps a per-node receipt, by design.
@@ -2182,122 +2313,26 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
 
   app.post("/api/aeo/audit", requireWorkspaceMember(fromBody), async (req, res) => {
     const workspaceId = (req as AuthedRequest).authWorkspaceId!;
-    const nowIso = new Date().toISOString();
     try {
       const { domain, businessName, location, targetService, targetKeywords, maxPages } = req.body || {};
       if (!domain || typeof domain !== "string" || !domain.trim()) {
         return res.status(400).json({ success: false, error: "domain is required (e.g. example.com or https://example.com)." });
       }
-
-      let crawl;
-      try {
-        crawl = await crawlSite({ domain: domain.trim(), maxPages: Number(maxPages) || 12 });
-      } catch (err: any) {
-        return res.status(422).json({
-          success: false, status: "FAILED", reason: "CRAWL_FAILED",
-          error: err?.message || "The site could not be crawled.",
-        });
-      }
-
-      if (crawl.pages.every((p) => p.status === null || p.status >= 400)) {
-        return res.status(422).json({
-          success: false, status: "FAILED", reason: "SITE_UNREACHABLE",
-          error: `No page of ${crawl.origin} returned a success status. Nothing can be analysed.`,
-          crawl: { origin: crawl.origin, failures: crawl.fetchFailures.slice(0, 5) },
-        });
-      }
-
-      const geoProvider = resolveGeoProvider();
-      const analysis = analyzeAudit({
-        crawl,
-        domain: domain.trim(),
+      // One implementation, three callers (route / scheduler envelope / graph node).
+      const r = await runAeoAudit({
+        workspaceId, domain: domain.trim(),
         businessName: typeof businessName === "string" ? businessName : undefined,
         location: typeof location === "string" ? location : undefined,
         targetService: typeof targetService === "string" ? targetService : undefined,
-        targetKeywords: Array.isArray(targetKeywords) ? targetKeywords.filter((k: unknown) => typeof k === "string") : undefined,
-        geo: { queries: [], ...geoProvider },
+        targetKeywords: Array.isArray(targetKeywords) ? targetKeywords.filter((k: unknown) => typeof k === "string") as string[] : undefined,
+        maxPages: Number(maxPages) || 12,
       });
-
-      const reportMarkdown = renderAuditReport(analysis, { businessName, location, targetService });
-
-      // --- canonical persistence spine (same as graph runtime) ---
-      const taskId = `aeo-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
-      const title = `SEO/AEO/GEO Audit — ${businessName || analysis.origin}`;
-      createInitialTask({
-        taskId, workspaceId, title,
-        description: `Live audit of ${analysis.origin}: ${analysis.crawl.pagesAnalyzed} page(s) crawled, ${analysis.checks.length} checks evaluated.`,
-        assignedAgent: "aeo-auditor", assignedModel: "deterministic-crawl", createdAt: nowIso,
-      });
-      // Aegis requires the canonical lifecycle TODO -> READY -> RUNNING ->
-      // AWAITING_VERIFICATION plus PROVIDER_COMPLETED and ARTIFACT_SAVED events.
-      // Walked here for the same reason the graph runtime walks it: the receipt
-      // is only meaningful if the ledger really shows the work happening.
-      recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: "TASK_CREATED", agentId: "aeo-auditor", payload: { domain: analysis.origin }, createdAt: nowIso });
-      updateTaskStatus(taskId, "READY", undefined, workspaceId);
-      recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: "AGENT_ASSIGNED", agentId: "aeo-auditor", payload: { agent: "aeo-auditor" }, createdAt: nowIso });
-      updateTaskStatus(taskId, "RUNNING", undefined, workspaceId);
-      recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: "EXECUTION_STARTED", agentId: "aeo-auditor", payload: { pages: analysis.crawl.pagesAnalyzed }, createdAt: nowIso });
-      recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: "PROVIDER_COMPLETED", agentId: "aeo-auditor", payload: { provider: "synthos-aeo-audit", pagesAnalyzed: analysis.crawl.pagesAnalyzed, checks: analysis.checks.length, durationMs: analysis.crawl.durationMs }, createdAt: nowIso });
-
-      const frontmatter = [
-        "---",
-        `type: "aeo-audit"`,
-        `domain: ${JSON.stringify(analysis.origin)}`,
-        `businessName: ${JSON.stringify(businessName || null)}`,
-        `location: ${JSON.stringify(location || null)}`,
-        `generatedAt: ${JSON.stringify(analysis.generatedAt)}`,
-        `pagesAnalyzed: ${analysis.crawl.pagesAnalyzed}`,
-        `scoreSeo: ${analysis.scores.seo.score ?? "null"}`,
-        `scoreAeo: ${analysis.scores.aeo.score ?? "null"}`,
-        `scoreGeo: ${analysis.scores.geo.score ?? "null"}`,
-        `scoreOverall: ${analysis.scores.overall.score ?? "null"}`,
-        `taskId: ${JSON.stringify(taskId)}`,
-        "---",
-        "",
-      ].join("\n");
-
-      const artifact = writeWorkspaceArtifact({
-        workspaceId, taskId, content: frontmatter + reportMarkdown,
-        folder: "AEO-Audits", extension: "md", createdAt: nowIso,
-      });
-      try { indexVaultArtifact(workspaceId, artifact.artifact_id); } catch { /* index best-effort */ }
-      recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: "ARTIFACT_SAVED", agentId: "aeo-auditor", payload: { artifactId: artifact.artifact_id, relativePath: artifact.relative_path, contentHash: artifact.content_hash }, createdAt: nowIso });
-      updateTaskStatus(taskId, "AWAITING_VERIFICATION", undefined, workspaceId);
-
-      const aegisResult = runDeterministicAegisVerification(taskId, frontmatter + reportMarkdown);
-      const persistedReview = recordQualityReview({
-        taskId, reviewer: aegisResult.reviewer, method: aegisResult.method, score: aegisResult.score,
-        decision: aegisResult.decision, checks: aegisResult.checks, evidence: aegisResult.evidence, createdAt: nowIso,
-      });
-
-      let receiptId: string | null = null;
-      if (aegisResult.decision === "VERIFIED") {
-        updateTaskStatus(taskId, "AWAITING_RECEIPT", undefined, workspaceId);
-        recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: "AEGIS_REVIEWED", agentId: "aegis", payload: { reviewId: persistedReview.review_id, decision: aegisResult.decision, score: aegisResult.score }, createdAt: nowIso });
-        const newReceiptId = `rcpt-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
-        const canonicalPayload: CanonicalReceiptPayload = {
-          receiptId: newReceiptId, taskId, reviewId: persistedReview.review_id, workspaceId,
-          assignedAgent: "aeo-auditor", provider: "synthos-aeo-audit",
-          modelUsed: `crawl:${analysis.crawl.pagesAnalyzed}-pages`,
-          artifactId: artifact.artifact_id, artifactHash: artifact.content_hash,
-          aegisDecision: aegisResult.decision, aegisMethod: aegisResult.method, createdAt: nowIso,
-        };
-        const canonicalPayloadStr = canonicalizePayload(canonicalPayload);
-        const { signature, publicKeyPem, algorithm, fingerprint } = signReceiptPayload(canonicalPayloadStr);
-        if (verifyReceiptSignature(canonicalPayloadStr, signature, publicKeyPem)) {
-          recordReceipt({ receiptId: newReceiptId, taskId, reviewId: persistedReview.review_id, algorithm, publicKey: publicKeyPem, payloadJson: canonicalPayloadStr, signature, createdAt: nowIso });
-          recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: "RECEIPT_CREATED", agentId: "guardian", payload: { receiptId: newReceiptId, algorithm, fingerprint, verified: true }, createdAt: nowIso });
-          receiptId = newReceiptId;
-        }
+      if (r.outcome === "FAILED") {
+        return res.status(422).json({ success: false, status: "FAILED", reason: r.reason, error: r.error, detail: r.detail });
       }
-      updateTaskStatus(taskId, "DONE", undefined, workspaceId);
-
       return res.json({
-        success: true, workspaceId, taskId,
-        artifact: { id: artifact.artifact_id, path: artifact.relative_path, contentHash: artifact.content_hash },
-        aegis: { decision: aegisResult.decision, score: aegisResult.score, reviewId: persistedReview.review_id },
-        receiptId,
-        analysis, report: reportMarkdown,
+        success: true, workspaceId, taskId: r.taskId, artifact: r.artifact,
+        aegis: r.aegis, receiptId: r.receiptId, analysis: r.analysis, report: r.report,
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Audit failed" });
@@ -2340,23 +2375,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       if (!Array.isArray(items) || items.length === 0) {
         return res.status(400).json({ success: false, error: "items[] is required — nothing to create." });
       }
-      const nowIso = new Date().toISOString();
-      const created = items.slice(0, 25).map((it: any, idx: number) => {
-        const id = `aeo-task-${Date.now()}-${idx}-${crypto.randomBytes(2).toString("hex")}`;
-        createInitialTask({
-          taskId: id, workspaceId,
-          title: String(it?.title || "AEO remediation").slice(0, 200),
-          description: [
-            String(it?.recommendation || ""),
-            it?.evidence ? `\n\n**Evidence:** ${String(it.evidence)}` : "",
-            domain ? `\n\n**Domain:** ${String(domain)}` : "",
-            auditTaskId ? `\n\n**From audit task:** ${String(auditTaskId)}` : "",
-          ].join(""),
-          assignedAgent: String(it?.category || "web").slice(0, 40),
-          assignedModel: "n/a", createdAt: nowIso,
-        });
-        return { taskId: id, title: it?.title };
-      });
+      const created = createAuditMissionTasks({ workspaceId, auditTaskId, domain, items });
       return res.json({ success: true, workspaceId, created, count: created.length });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to create mission tasks" });

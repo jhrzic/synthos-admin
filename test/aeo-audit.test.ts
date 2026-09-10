@@ -19,6 +19,10 @@ const read = (p: string) => fs.readFileSync(path.resolve(repoRoot, p), 'utf-8');
 const serverContent = read('server.ts');
 const view = read('src/components/AeoAuditView.tsx');
 const analyzerSrc = read('lib/aeo/analyzer.ts');
+// The audit run moved into a shared service so the HTTP route, the scheduler
+// envelope and graph capability nodes all execute the identical code path.
+// These assertions follow the behaviour to where it now lives.
+const serviceSrc = read('lib/aeo/service.ts');
 const crawlerSrc = read('lib/aeo/crawler.ts');
 
 const page = (html: string, url = 'https://example.com/'): FetchedPage => ({
@@ -226,24 +230,24 @@ describe('6: server wiring — persistence, isolation, honest degradation', () =
   });
 
   it('audits persist through the canonical spine — no second report database', () => {
-    const s = slice('audit');
     for (const fn of ['createInitialTask', 'writeWorkspaceArtifact', 'indexVaultArtifact', 'runDeterministicAegisVerification', 'recordQualityReview', 'recordReceipt']) {
-      expect(s).toContain(fn);
+      expect(serviceSrc).toContain(fn);
     }
     expect(serverContent).not.toContain('CREATE TABLE IF NOT EXISTS aeo_audits');
+    // And the route delegates rather than re-implementing it.
+    expect(slice('audit')).toContain('runAeoAudit({');
   });
 
   it('the canonical lifecycle Aegis requires is actually walked', () => {
-    const s = slice('audit');
-    for (const st of ['"READY"', '"RUNNING"', '"AWAITING_VERIFICATION"']) expect(s).toContain(st);
-    for (const ev of ['PROVIDER_COMPLETED', 'ARTIFACT_SAVED']) expect(s).toContain(ev);
+    for (const st of ["'READY'", "'RUNNING'", "'AWAITING_VERIFICATION'"]) expect(serviceSrc).toContain(st);
+    for (const ev of ['PROVIDER_COMPLETED', 'ARTIFACT_SAVED']) expect(serviceSrc).toContain(ev);
   });
 
   it('an unreachable site fails loudly instead of returning an empty audit', () => {
-    const s = slice('audit');
-    expect(s).toContain('SITE_UNREACHABLE');
-    expect(s).toContain('CRAWL_FAILED');
-    expect(s).toContain('res.status(422)');
+    expect(serviceSrc).toContain('SITE_UNREACHABLE');
+    expect(serviceSrc).toContain('CRAWL_FAILED');
+    // The route surfaces that failure as a real error status, never a 200.
+    expect(slice('audit')).toContain('res.status(422)');
   });
 
   it('missing providers are named rather than silently ignored', () => {

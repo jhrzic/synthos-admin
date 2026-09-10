@@ -170,11 +170,72 @@ export async function executeEnvelope(input: ExecutionEnvelopeInput): Promise<Ex
       return executeResearch(input);
     case 'schedule':
       return executeSchedule(input);
+    case 'aeo.audit':
+      return executeAeoAudit(input);
     default:
       // A registered, AVAILABLE capability with no wired executor here —
       // honest, never a fabricated attempt.
       return { outcome: 'NOT_CONFIGURED', capability: capability.key, reason: `No executor is wired for capability "${capability.key}" through the envelope yet.` };
   }
+}
+
+/**
+ * SEO/AEO/GEO audit. Delegates to the one audit service (lib/aeo/service.ts) —
+ * the same code the HTTP route and graph nodes call, so a scheduled recheck
+ * produces byte-identical evidence to a manual run.
+ *
+ * The service walks the canonical persistence spine itself (task -> artifact ->
+ * Aegis -> receipt), so this executor does NOT call commitEvidencedArtifact;
+ * doing both would write the work twice. It maps the service's result onto the
+ * envelope contract instead.
+ *
+ * Wiring this closed a real gap: `aeo.audit` was registered as a schedulable
+ * capability in the previous pass with no executor behind it, so the recurring
+ * recheck would have failed the moment it fired.
+ */
+async function executeAeoAudit(input: ExecutionEnvelopeInput): Promise<ExecutionEnvelopeResult> {
+  const taskId = deriveIdempotentTaskId('aeo.audit', input.idempotencyKey);
+  const params = (input.parameters || {}) as Record<string, unknown>;
+  const domain = typeof params.domain === 'string' && params.domain.trim()
+    ? params.domain.trim()
+    : (input.rawText || '').trim();
+
+  if (!domain) {
+    return { outcome: 'FAILED', capability: 'aeo.audit', reason: 'No domain supplied for the audit.' };
+  }
+
+  return withAtomicClaim(input, 'aeo.audit', taskId, async () => {
+    const { runAeoAudit } = await import('../aeo/service');
+    const r = await runAeoAudit({
+      workspaceId: input.workspaceId,
+      domain,
+      businessName: typeof params.businessName === 'string' ? params.businessName : undefined,
+      location: typeof params.location === 'string' ? params.location : undefined,
+      maxPages: typeof params.maxPages === 'number' ? params.maxPages : undefined,
+    });
+
+    if (r.outcome === 'FAILED') {
+      return { outcome: 'FAILED', capability: 'aeo.audit', reason: `${r.reason}: ${r.error}` };
+    }
+
+    const geo = r.analysis.scores.geo.score;
+    return {
+      outcome: 'SUCCESS',
+      capability: 'aeo.audit',
+      reason: `Audited ${r.analysis.origin}: ${r.analysis.crawl.pagesAnalyzed} page(s), SEO ${r.analysis.scores.seo.score ?? 'UNKNOWN'}, AEO ${r.analysis.scores.aeo.score ?? 'UNKNOWN'}, GEO ${geo ?? 'UNKNOWN'}.`,
+      taskId: r.taskId,
+      artifact: r.artifact,
+      aegis: { decision: r.aegis.decision, score: r.aegis.score },
+      receipt: r.receiptId ? { receiptId: r.receiptId, verified: true } : null,
+      toolsInvoked: ['http.crawl'],
+      data: {
+        origin: r.analysis.origin,
+        scores: r.analysis.scores,
+        checks: r.analysis.checks.length,
+        unknowns: r.analysis.unknowns,
+      },
+    };
+  });
 }
 
 async function executeWindmillRead(input: ExecutionEnvelopeInput): Promise<ExecutionEnvelopeResult> {
