@@ -19,6 +19,10 @@ interface GraphRunEntry {
     currentStep?: number;
     nodeResults?: Record<string, any>;
     failedNodeId?: string;
+    completedNodeIds?: string[];
+    totalCompletedNodes?: number;
+    completedAt?: string;
+    graphRunReceipt?: { receiptId?: string; taskId?: string; artifactId?: string; artifactPath?: string; aegisDecision?: string; aegisScore?: number | null } | null;
     error?: string;
   };
   created_at: string;
@@ -190,41 +194,101 @@ export const GraphRunsView: React.FC<GraphRunsViewProps> = ({ onSelectTab, activ
                   </span>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                  <div className="bg-[#0D0F1B] border border-[#1A1D33] p-3 rounded-xl">
-                    <span className="text-[10px] text-[#7A82A6] block">Total Nodes</span>
-                    <span className="text-sm font-bold text-[#A5A2FF]">{selectedRun.state.totalNodes ?? '—'}</span>
-                  </div>
-                  <div className="bg-[#0D0F1B] border border-[#1A1D33] p-3 rounded-xl">
-                    <span className="text-[10px] text-[#7A82A6] block">Current Step</span>
-                    <span className="text-sm font-bold text-white">{selectedRun.state.currentStep ?? '—'}</span>
-                  </div>
-                  <div className="bg-[#0D0F1B] border border-[#1A1D33] p-3 rounded-xl">
-                    <span className="text-[10px] text-[#7A82A6] block">Last Updated</span>
-                    <span className="text-sm font-bold text-white">{new Date(selectedRun.updated_at).toLocaleTimeString()}</span>
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <span className="text-xs font-bold text-white block">Execution Log</span>
-                  <div className="bg-[#05060A] border border-[#1A1D33] p-4 rounded-xl space-y-2 text-xs text-[#A2A9D4] max-h-64 overflow-y-auto">
-                    {selectedRun.state.executionLog && selectedRun.state.executionLog.length > 0 ? (
-                      selectedRun.state.executionLog.map((log, idx) => (
-                        <div key={idx} className="flex items-start gap-2">
-                          <span className="text-[#00D26A] select-none font-bold">›</span>
-                          <span>{log}</span>
+                {(() => {
+                  // Render the shape the execution spine really writes:
+                  // state.nodeResults keyed by nodeId. The previous panel read
+                  // totalNodes/currentStep/executionLog, which the spine never
+                  // wrote, so every run showed "—" and "no log entries" despite
+                  // full per-node evidence being present.
+                  const nodes = Object.values(selectedRun.state.nodeResults || {})
+                    .sort((a: any, b: any) => (a?.order ?? 0) - (b?.order ?? 0)) as any[];
+                  const receipt = selectedRun.state.graphRunReceipt || null;
+                  const dur = (n: any) =>
+                    n?.startedAt && n?.finishedAt
+                      ? `${new Date(n.finishedAt).getTime() - new Date(n.startedAt).getTime()}ms`
+                      : 'UNKNOWN';
+                  const runDur = nodes.length && nodes[0]?.startedAt && nodes[nodes.length - 1]?.finishedAt
+                    ? `${new Date(nodes[nodes.length - 1].finishedAt).getTime() - new Date(nodes[0].startedAt).getTime()}ms`
+                    : 'UNKNOWN';
+                  return (
+                    <>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                        <div className="bg-[#0D0F1B] border border-[#1A1D33] p-3 rounded-xl">
+                          <span className="text-[10px] text-[#7A82A6] block">Nodes Executed</span>
+                          <span className="text-sm font-bold text-[#A5A2FF]">{nodes.length || '—'}</span>
                         </div>
-                      ))
-                    ) : (
-                      <p className="text-[#5A6083]">No execution log entries recorded for this run.</p>
-                    )}
-                    {selectedRun.state.error && (
-                      <div className="flex items-start gap-2 text-[#FF5E8E] pt-2 border-t border-[#1A1D33]">
-                        <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" /> {selectedRun.state.error}
+                        <div className="bg-[#0D0F1B] border border-[#1A1D33] p-3 rounded-xl">
+                          <span className="text-[10px] text-[#7A82A6] block">Current / Failed Node</span>
+                          <span className="text-sm font-bold text-white truncate block">{selectedRun.current_node_id || '—'}</span>
+                        </div>
+                        <div className="bg-[#0D0F1B] border border-[#1A1D33] p-3 rounded-xl">
+                          <span className="text-[10px] text-[#7A82A6] block">Run Duration</span>
+                          <span className="text-sm font-bold text-white">{runDur}</span>
+                        </div>
+                        <div className="bg-[#0D0F1B] border border-[#1A1D33] p-3 rounded-xl">
+                          <span className="text-[10px] text-[#7A82A6] block">Last Updated</span>
+                          <span className="text-sm font-bold text-white">{new Date(selectedRun.updated_at).toLocaleTimeString()}</span>
+                        </div>
                       </div>
-                    )}
-                  </div>
-                </div>
+
+                      {receipt && (
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                          <div className="bg-[#0D0F1B] border border-[#1A1D33] p-3 rounded-xl">
+                            <span className="text-[10px] text-[#7A82A6] block">Aegis</span>
+                            <span className="text-sm font-bold text-[#00D26A]">{receipt.aegisDecision || 'UNKNOWN'}</span>
+                          </div>
+                          <div className="bg-[#0D0F1B] border border-[#1A1D33] p-3 rounded-xl">
+                            <span className="text-[10px] text-[#7A82A6] block">Receipt</span>
+                            <span className="text-xs font-bold text-[#8C8AFF] truncate block">{receipt.receiptId || 'UNKNOWN'}</span>
+                          </div>
+                          <div className="bg-[#0D0F1B] border border-[#1A1D33] p-3 rounded-xl">
+                            <span className="text-[10px] text-[#7A82A6] block">Run Artifact</span>
+                            <span className="text-xs font-bold text-white truncate block">{receipt.artifactPath || receipt.artifactId || 'UNKNOWN'}</span>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="space-y-2">
+                        <span className="text-xs font-bold text-white block">Node Execution</span>
+                        <div className="bg-[#05060A] border border-[#1A1D33] rounded-xl overflow-hidden max-h-72 overflow-y-auto">
+                          {nodes.length === 0 ? (
+                            <p className="text-[#5A6083] text-xs p-4">No node results recorded for this run.</p>
+                          ) : nodes.map((n: any) => (
+                            <div key={n.nodeId} className="px-3 py-2 border-b border-[#141628] last:border-0 text-[11px]">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold border ${
+                                  n.status === 'DONE'
+                                    ? 'bg-[#00D26A]/10 border-[#00D26A]/40 text-[#00D26A]'
+                                    : 'bg-[#FF5E8E]/10 border-[#FF5E8E]/40 text-[#FF5E8E]'
+                                }`}>{n.status}</span>
+                                <span className="text-white font-bold truncate">{n.nodeName || n.nodeId}</span>
+                                <span className="text-[#5A6083]">{n.classification}</span>
+                                <span className="text-[#7A82A6] ml-auto">{dur(n)}</span>
+                              </div>
+                              <div className="text-[10px] text-[#7A82A6] mt-0.5 flex flex-wrap gap-x-3">
+                                <span>via {n.modelUsed || n.agentOrRuntime || 'UNKNOWN'}</span>
+                                <span>gate {n.gate?.passed ? 'passed' : 'FAILED'}</span>
+                                {n.receiptId && <span className="text-[#8C8AFF]">receipt {String(n.receiptId).slice(0, 18)}</span>}
+                                {n.artifact && <span className="text-[#8C8AFF]">artifact</span>}
+                              </div>
+                              {n.gate && n.gate.passed === false && n.gate.reason && (
+                                <div className="text-[10px] text-[#FF5E8E] mt-1">{n.gate.reason}</div>
+                              )}
+                              {n.failure && (
+                                <div className="text-[10px] text-[#FF5E8E] mt-1">{n.failure.error || n.failure.reason}</div>
+                              )}
+                            </div>
+                          ))}
+                          {selectedRun.state.error && (
+                            <div className="flex items-start gap-2 text-[#FF5E8E] p-3 border-t border-[#1A1D33] text-[11px]">
+                              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" /> {selectedRun.state.error}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  );
+                })()}
               </>
             )}
           </div>

@@ -59,7 +59,15 @@ export interface GraphExecutionEstimate {
  * request body must apply, so they never disagree about what will run.
  */
 export function selectLiveExecutionNodes<T extends GraphExecutionNodeInput>(nodes: T[]): T[] {
-  return nodes.filter((n) => (n.type || 'agent') === 'agent');
+  // 'agent' nodes dispatch a model call; 'capability' nodes dispatch a
+  // SynthOS-native capability (aeo.audit, create_mission, schedule_recheck…)
+  // through the capability resolver. Both represent real dispatchable work.
+  // Every other canvas type (trigger/model/tool/logic) remains presentational
+  // and is still deliberately excluded.
+  return nodes.filter((n) => {
+    const t = (n.type || 'agent');
+    return t === 'agent' || t === 'capability';
+  });
 }
 
 export type GraphNodeClassification = 'CONTROL' | 'COMPUTE' | 'EXTERNAL_ACTION';
