@@ -1524,6 +1524,31 @@ export function countWorkspaceReceipts(workspaceId: string): number {
   return row?.n ?? 0;
 }
 
+/**
+ * Full workspace-scoped receipt page for the Receipts product surface.
+ *
+ * Distinct from listWorkspaceReceipts() above, which is a deliberately tiny
+ * 4-column summary for Jarvis's ADMIN_RECEIPT_QUERY intent. This returns the
+ * whole row (payload_json, signature, public_key, algorithm) so the caller can
+ * re-verify each signature independently — the same `receipts` table, not a
+ * second store. Scoped via the owning task exactly as the summary query is,
+ * because `receipts` carries no workspace_id column of its own.
+ */
+export function listWorkspaceReceiptsFull(
+  workspaceId: string,
+  limit = 200
+): ReceiptRecord[] {
+  const db = getDatabase();
+  return (db.prepare(`
+    SELECT r.*
+    FROM receipts r
+    JOIN tasks t ON t.task_id = r.task_id
+    WHERE t.workspace_id = ?
+    ORDER BY r.created_at DESC
+    LIMIT ?
+  `).all(workspaceId, limit) as ReceiptRecord[]) || [];
+}
+
 export function getTaskWithHistory(taskId: string): { task: TaskRecord | null; statusHistory: TaskStatusHistoryRecord[] } {
   const db = getDatabase();
   const task = (db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(taskId) as TaskRecord) || null;

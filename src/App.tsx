@@ -62,6 +62,8 @@ import { SkillRegistryView } from './components/SkillRegistryView';
 import { SystemAuditView } from './components/SystemAuditView';
 import { ActivityLedgerView } from './components/ActivityLedgerView';
 import { ReceiptsView } from './components/ReceiptsView';
+import { CanonicalReceiptsView } from './components/CanonicalReceiptsView';
+import { SchedulerView } from './components/SchedulerView';
 import { GuardianAegisControlView } from './components/GuardianAegisControlView';
 import { WorkspacesView } from './components/WorkspacesView';
 import { KanbanDependencyDAG } from './components/KanbanDependencyDAG';
@@ -1625,8 +1627,24 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
             />
           )}
 
-          {/* Deterministic Execution Receipts */}
+          {/* Canonical, Ed25519-signed execution receipts. This nav slot used to
+              render ReceiptsView — the legacy Kanban board's LOCAL/DEMO
+              receipts (a client-side rolling hash, no key material) — while the
+              real signed receipts had no UI at all. */}
           {activeTab === 'receipts' && (
+            <CanonicalReceiptsView activeWorkspaceId={activeWorkspaceId} />
+          )}
+
+          {/* Canonical scheduler management over /api/schedules*. No second
+              scheduling engine — every control calls the server's own route. */}
+          {activeTab === 'scheduler' && (
+            <SchedulerView activeWorkspaceId={activeWorkspaceId} />
+          )}
+
+          {/* Legacy Kanban demo receipts, kept for developer reference only.
+              Deliberately absent from product navigation: it is not the
+              canonical receipt pipeline and must never be presented as one. */}
+          {activeTab === 'dev-kanban-receipts' && (
             <ReceiptsView
               receipts={synthosControl.getReceipts()}
             />

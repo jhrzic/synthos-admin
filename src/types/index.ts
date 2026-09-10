@@ -21,6 +21,8 @@ export type ActiveTab =
   | 'graph-runs'
   | 'activity-ledger'
   | 'receipts'
+  | 'scheduler'
+  | 'dev-kanban-receipts'
   | 'guardian-aegis'
   | 'workspaces'
   | 'idea-strategy'

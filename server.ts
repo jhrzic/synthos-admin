@@ -41,6 +41,8 @@ import {
   DEFAULT_WORKSPACE_ID,
   listWorkspaceTasks,
   listWorkspaceReceipts,
+  listWorkspaceReceiptsFull,
+  countWorkspaceReceipts,
   projectKnowledgeCandidate,
   getSchedule,
   isScheduleInWorkspace,
@@ -2125,6 +2127,56 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       });
     } catch (err: any) {
       return res.status(500).json({ error: err?.message || "Failed to query quality reviews" });
+    }
+  });
+
+  // Workspace-scoped canonical receipt listing for the Receipts product
+  // surface. Reads the SAME `receipts` table as the per-task route below —
+  // there is exactly one receipt store, and it is the Ed25519-signed one
+  // written by the execution fabric. Each row is re-verified here with
+  // verifyReceipt() rather than trusting a stored "verified" flag, so the
+  // screen reports signature validity it actually checked.
+  app.get("/api/execution/receipts", requireWorkspaceMember(fromBodyOrQuery), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const rawLimit = Number(req.query?.limit);
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 500) : 200;
+
+      const rows = listWorkspaceReceiptsFull(workspaceId, limit);
+      const receipts = rows.map((r) => {
+        let payload: Record<string, any> = {};
+        let payloadError: string | null = null;
+        try {
+          payload = JSON.parse(r.payload_json);
+        } catch (e: any) {
+          payloadError = "Receipt payload is not valid JSON.";
+        }
+        return {
+          receipt_id: r.receipt_id,
+          task_id: r.task_id,
+          review_id: r.review_id,
+          algorithm: r.algorithm,
+          created_at: r.created_at,
+          signature: r.signature,
+          public_key: r.public_key,
+          verified: payloadError ? false : verifyReceipt(r),
+          payloadError,
+          // The canonical payload carries no secrets, prompts or provider
+          // payloads — only ids, hashes and the Aegis decision. Returned as
+          // stored so the detail panel shows exactly what was signed.
+          payload,
+        };
+      });
+
+      return res.json({
+        success: true,
+        workspaceId,
+        count: receipts.length,
+        totalInWorkspace: countWorkspaceReceipts(workspaceId),
+        receipts,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || "Failed to list execution receipts" });
     }
   });
 
