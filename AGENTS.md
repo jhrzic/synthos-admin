@@ -53,3 +53,63 @@ The application uses a single unified shell with a two-tier navigation structure
 - **Preserve & Extend**: Preserve existing working screens and integrations. Extend existing components and routes before creating replacements.
 - **Bounded Incremental Execution**: Make bounded, incremental changes only. Do not redesign layouts, navigation, or visual styling unless explicitly requested.
 - **Visual Design Integrity**: Preserve the high-density dark enterprise aesthetic (`#05060A`, `#080A16`, `#615EFF` accents, `#1A1D33` borders, and typography pairings).
+
+---
+
+## 4. Product Preservation Rule (standing, non-negotiable)
+
+> **"Dead", "demo", "mock", "prototype", "unused", "unmounted", "legacy", "hardcoded" and
+> "orphaned" are IMPLEMENTATION classifications. They are NOT authorization to discard product
+> design.**
+
+This rule exists because the repository has already lost intended product UX this way, twice, and
+the git history proves it:
+
+| Step | Obsidian Knowledge Mesh | Context Governor Telemetry |
+|---|---|---|
+| Rich UX exists and is mounted | `f6a2083` | `f6a2083` |
+| Unmounted for a legitimate reason | `cd60d81` — `ObsidianView.tsx` rewritten 1150 → 388 lines against the real Vault API, orphaning `ObsidianGraphMind` + `VaultActivitySparkline` | `739c663` — truth-layer sweep removed the `<ContextGovernorTelemetry />` mount because its telemetry was fabricated |
+| Deleted as dead code | `fee6fe4` — "orphaned, zero React tree callers" | `fee6fe4` — same commit, same justification |
+
+Neither intermediate commit was wrong. Each step was individually defensible, and the deletion
+commit verified "zero callers" before removing anything. **The pattern is the failure, not any one
+commit** — unmounting for an implementation reason silently converts intended product design into
+deletable dead code, and the design intent is lost with no record that it ever existed.
+
+### Required practice
+
+For every historical or orphaned component, decide **two separate questions**:
+
+1. **PRODUCT DESIGN VALUE** — what UI/UX, workflow, information architecture, animation,
+   visualization, editor, control, navigation or product concept does it encode?
+2. **IMPLEMENTATION TRUTH** — `REAL` / `PARTIAL` / `MOCKED` / `STATIC` / `UNKNOWN`.
+
+**A component with fake data may still contain the correct intended UX.** A low score on (2) never
+by itself justifies discarding (1).
+
+The preferred remediation is:
+
+```
+INTENDED HISTORICAL UX  +  CURRENT CANONICAL BACKEND  +  REAL/TRUTHFUL DATA
+```
+
+**Not**: delete the rich UX because the previous backend was fake.
+
+### This does NOT weaken the non-demo build rule in section 3
+
+Section 3 still governs what may be *displayed*. Fabricated metrics must still be removed or
+replaced with truthful states. The two rules combine as: **keep the surface, fix the data.** When
+the real backend does not exist yet, render the surface with `UNKNOWN` / `NOT_CONNECTED` rather
+than deleting the surface — that is precisely how `VaultActivitySparkline` was restored in
+`3cfcac8` (real note timestamps replacing hardcoded seeds, `UNKNOWN` where there is no source).
+
+### Before deleting any component
+
+- Do not delete on "zero callers" alone. Zero callers is the *symptom* this rule is about.
+- Record the product-design value and implementation truth in the commit message.
+- Classify explicitly as one of: `PRESERVE_AND_REWIRE`, `PRESERVE_VISUAL_UX_ONLY`,
+  `MERGE_WITH_CURRENT_SURFACE`, `KEEP_AS_REFERENCE`, `DO_NOT_RESTORE_DUPLICATE`,
+  `DO_NOT_RESTORE_INVALID_CONCEPT`.
+- A true duplicate whose IA is fully covered elsewhere may be removed — prove the coverage. (This
+  is the one case that passed: `HermesTopNav` was deleted in `fee6fe4` after `b21b1a1` replaced it,
+  and all 25 of its tab ids are present in `WorkspaceTopNav`.)
