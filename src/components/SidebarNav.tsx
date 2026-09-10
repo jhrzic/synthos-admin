@@ -101,6 +101,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
         { id: 'agent-fleet' as ActiveTab, label: 'Agent Fleet', icon: Bot, color: '#EAB308' },
         { id: 'guardian-aegis' as ActiveTab, label: 'Approvals', icon: ShieldCheck, color: '#F59E0B' },
         { id: 'receipts' as ActiveTab, label: 'Receipts', icon: FileCheck, color: '#38BDF8' },
+        { id: 'scheduler' as ActiveTab, label: 'Scheduler', icon: Clock, color: '#EC4899' },
       ]
     },
     {
