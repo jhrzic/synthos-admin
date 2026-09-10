@@ -65,6 +65,7 @@ import { ReceiptsView } from './components/ReceiptsView';
 import { CanonicalReceiptsView } from './components/CanonicalReceiptsView';
 import { SchedulerView } from './components/SchedulerView';
 import { ExternalExecutionsView } from './components/ExternalExecutionsView';
+import { AeoAuditView } from './components/AeoAuditView';
 import { GuardianAegisControlView } from './components/GuardianAegisControlView';
 import { WorkspacesView } from './components/WorkspacesView';
 import { KanbanDependencyDAG } from './components/KanbanDependencyDAG';
@@ -1646,6 +1647,13 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               plane (ADR-006). No second execution mechanism. */}
           {activeTab === 'external-executions' && (
             <ExternalExecutionsView activeWorkspaceId={activeWorkspaceId} />
+          )}
+
+          {/* Real crawl-based SEO/AEO/GEO audit. No demo mode — see
+              lib/aeo/crawler.ts. GEO degrades to UNKNOWN when no AI/search
+              provider is configured rather than asserting AI visibility. */}
+          {activeTab === 'aeo-audit' && (
+            <AeoAuditView activeWorkspaceId={activeWorkspaceId} />
           )}
 
           {/* Legacy Kanban demo receipts, kept for developer reference only.
