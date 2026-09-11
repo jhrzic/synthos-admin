@@ -59,17 +59,24 @@ export function renderAssistantPage(params: {
     font: 15px/1.55 Archivo, system-ui, -apple-system, "Segoe UI", sans-serif;
     display: flex; flex-direction: column;
   }
+  /* One centred column on desktop, full width on a phone. Without this the
+     conversation clings to the left edge of a wide monitor and reads as a
+     debug console rather than a business's front door. */
+  .wrap { width: 100%; max-width: 760px; margin: 0 auto; padding: 0 18px; }
   header {
-    padding: 14px 18px calc(14px + env(safe-area-inset-top)); border-bottom: 1px solid var(--line);
+    padding: 16px 0 calc(16px + env(safe-area-inset-top)); border-bottom: 1px solid var(--line);
     display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
   }
-  header h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+  header.bar, #disclosure.bar, footer.bar { width: 100%; }
+  header h1 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
   header span { font-size: 13px; color: var(--muted); }
   #disclosure {
-    margin: 0; padding: 10px 18px; font-size: 12.5px; color: var(--warn-ink);
+    margin: 0; font-size: 12.5px; color: var(--warn-ink);
     background: var(--warn-bg); border-bottom: 1px solid var(--warn-line);
   }
-  main { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+  #disclosure .wrap { padding-block: 10px; }
+  main { flex: 1; overflow-y: auto; }
+  main .wrap { padding-block: 20px; display: flex; flex-direction: column; gap: 16px; }
   .row { display: flex; }
   .row.me { justify-content: flex-end; }
   .bubble {
@@ -80,7 +87,8 @@ export function renderAssistantPage(params: {
   .meta { margin-top: 7px; font-size: 11.5px; color: var(--muted); display: flex; gap: 8px; flex-wrap: wrap; }
   .tag { border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }
   .notice { font-size: 12.5px; color: var(--note); border-left: 2px solid var(--line); padding-left: 10px; }
-  footer { border-top: 1px solid var(--line); padding: 12px 18px calc(12px + env(safe-area-inset-bottom)); }
+  footer { border-top: 1px solid var(--line); background: var(--bg); }
+  footer .wrap { padding-block: 14px; padding-bottom: calc(14px + env(safe-area-inset-bottom)); }
   form { display: flex; gap: 10px; align-items: flex-end; }
   textarea {
     flex: 1; resize: none; font: inherit; color: inherit; background: var(--panel);
@@ -92,23 +100,27 @@ export function renderAssistantPage(params: {
   }
   button[disabled] { opacity: .45; cursor: not-allowed; }
   .fineprint { margin: 8px 0 0; font-size: 11.5px; color: var(--muted); }
-  @media (max-width: 480px) { main { padding: 14px; } .bubble { max-width: 92%; } }
+  @media (max-width: 480px) { .wrap { padding: 0 14px; } .bubble { max-width: 92%; } }
 </style>
 </head>
 <body data-key="${esc(publicKey)}">
-  <header>
-    <h1>${esc(businessName)}</h1>
-    <span>You're chatting with ${esc(assistantName)}</span>
+  <header class="bar">
+    <div class="wrap" style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+      <h1>${esc(businessName)}</h1>
+      <span>You're chatting with ${esc(assistantName)}</span>
+    </div>
   </header>
-  <p id="disclosure">${esc(aiDisclosure)}</p>
-  <main id="thread" aria-live="polite"></main>
-  <footer>
+  <div id="disclosure" class="bar"><div class="wrap">${esc(aiDisclosure)}</div></div>
+  <main class="bar"><div class="wrap" id="thread" aria-live="polite"></div></main>
+  <footer class="bar">
+   <div class="wrap">
     <form id="composer">
       <label for="input" class="sr-only" hidden>Your message</label>
       <textarea id="input" rows="1" placeholder="Ask a question…" autocomplete="off"></textarea>
       <button type="submit" id="send">Send</button>
     </form>
     <p class="fineprint" id="fineprint">This assistant cannot book appointments. It can pass you to a person.</p>
+   </div>
   </footer>
   <script src="/a/assistant.js"></script>
 </body>
