@@ -457,6 +457,127 @@ function scheduleRecheckCapability(): CapabilityDescriptor {
   };
 }
 
+// ---------------------------------------------------------------------------
+// CONVERSATION AI — the platform capability behind the Business Conversation
+// AI product.
+//
+// Deliberately NOT named after any runtime. Hermes, a hosted model, or a local
+// model can each satisfy conversation.respond; none of them IS the capability.
+// Naming it after a vendor would bake a swappable implementation detail into
+// the contract every caller depends on.
+//
+// The honest status story, which is the whole point of this registry:
+//   conversation.respond is AVAILABLE but DEGRADED-in-substance — it answers
+//   from the workspace's own indexed material by extraction, with no model
+//   configured. It is reported DEGRADED rather than AVAILABLE so nobody reads
+//   the registry and concludes generative phrasing is live.
+// ---------------------------------------------------------------------------
+
+const CONVERSATION_MODEL_ENV_KEYS = ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY'] as const;
+
+/** PRESENT/MISSING only — a credential value is never read out of here. */
+export function conversationModelConfigured(): boolean {
+  return CONVERSATION_MODEL_ENV_KEYS.some((k) => Boolean(process.env[k] && String(process.env[k]).trim()));
+}
+
+function conversationRespondCapability(): CapabilityDescriptor {
+  const modelled = conversationModelConfigured();
+  return {
+    key: 'conversation.respond',
+    runtime: 'conversation',
+    status: modelled ? 'AVAILABLE' : 'DEGRADED',
+    effectClass: 'READ',
+    riskTier: 'LOW',
+    approvalPolicy: 'NONE',
+    workspaceScope: 'member',
+    reference: 'lib/conversation/engine.ts::answerQuestion',
+    reason: modelled
+      ? 'An approved model is configured; replies are phrased by the model over retrieved workspace-authorised context only.'
+      : 'No approved model is configured, so replies are GROUNDED_EXTRACTIVE — real passages from the workspace\'s own indexed material — or an explicit NO_KNOWLEDGE refusal. It never generates an unsourced business fact.',
+  };
+}
+
+function conversationQualifyCapability(): CapabilityDescriptor {
+  return {
+    key: 'conversation.qualify',
+    runtime: 'conversation',
+    status: 'AVAILABLE',
+    effectClass: 'READ',
+    riskTier: 'LOW',
+    approvalPolicy: 'NONE',
+    workspaceScope: 'member',
+    reference: 'lib/conversation/service.ts::nextQualificationQuestion',
+    reason: 'Deterministic slot-filling against the business\'s own declared qualification goals. Records only what the customer actually stated; produces no inferred score or grade about a real person.',
+  };
+}
+
+function conversationHandoffCapability(): CapabilityDescriptor {
+  return {
+    key: 'conversation.handoff',
+    runtime: 'conversation',
+    status: 'AVAILABLE',
+    // It creates real work for a real person in the caller's own workspace.
+    effectClass: 'READ',
+    riskTier: 'LOW',
+    approvalPolicy: 'NONE',
+    workspaceScope: 'member',
+    reference: 'lib/conversation/service.ts::createConversationTask',
+    reason: 'Creates a real task assigned to a human. It does not contact anyone — no outbound message is sent by this capability under any configuration.',
+  };
+}
+
+function conversationSummarizeCapability(): CapabilityDescriptor {
+  return {
+    key: 'conversation.summarize',
+    runtime: 'conversation',
+    status: 'AVAILABLE',
+    effectClass: 'READ',
+    riskTier: 'LOW',
+    approvalPolicy: 'NONE',
+    workspaceScope: 'member',
+    reference: 'lib/conversation/service.ts::summarizeConversation',
+    reason: 'Deterministic summary written to the workspace Vault on the canonical spine and signed. No model paraphrase, so it cannot report an outcome the conversation did not have.',
+  };
+}
+
+/**
+ * Booking is the capability this product does NOT have, and saying so in the
+ * registry is load-bearing: it is what stops a future caller assuming a
+ * scheduling path exists because "the assistant handles appointments".
+ */
+function conversationBookingCapability(): CapabilityDescriptor {
+  return {
+    key: 'conversation.booking',
+    runtime: 'conversation',
+    status: 'NOT_CONFIGURED',
+    effectClass: 'EXTERNAL_ACTION',
+    riskTier: 'MEDIUM',
+    approvalPolicy: 'RECOMMENDED_NOT_ENFORCED',
+    workspaceScope: 'member',
+    reference: 'NOT_IMPLEMENTED',
+    reason: 'No calendar or scheduling provider is connected. Scheduling requests produce a FOLLOW_UP_REQUEST task for a human; the product never reports an appointment as booked.',
+  };
+}
+
+/**
+ * Telephony and SMS require an MVNO/carrier line that does not exist on this
+ * install. Registered as NOT_CONFIGURED rather than omitted, so the gap is a
+ * stated fact instead of a silence.
+ */
+function conversationTelephonyCapability(): CapabilityDescriptor {
+  return {
+    key: 'conversation.telephony',
+    runtime: 'conversation',
+    status: 'NOT_CONFIGURED',
+    effectClass: 'EXTERNAL_ACTION',
+    riskTier: 'HIGH',
+    approvalPolicy: 'RECOMMENDED_NOT_ENFORCED',
+    workspaceScope: 'member',
+    reference: 'docs/products/business-conversation-ai/CAPABILITY-MAP.md',
+    reason: 'No voice/SMS carrier line is provisioned. The channel contract is defined; no number, no trunk and no message provider are connected, so no call or SMS can be placed or received.',
+  };
+}
+
 function mcpConnectivityCapability(report: RuntimeStatusReport): CapabilityDescriptor {
   const mcp = findSystem(report, 'MCP Connectivity');
   const status: CapabilityStatus =
@@ -501,6 +622,12 @@ async function buildAllCapabilities(report: RuntimeStatusReport): Promise<Capabi
     opportunityReviewCapability(),
     createMissionCapability(),
     scheduleRecheckCapability(),
+    conversationRespondCapability(),
+    conversationQualifyCapability(),
+    conversationHandoffCapability(),
+    conversationSummarizeCapability(),
+    conversationBookingCapability(),
+    conversationTelephonyCapability(),
     mcpConnectivityCapability(report),
   ];
 }
