@@ -153,8 +153,18 @@ describe('4: validation names the exact problem', () => {
 });
 
 describe('5: node dragging is real and does not corrupt execution semantics', () => {
-  it('drag updates only x/y', () => {
-    const idx = builder.indexOf('const handleMouseMoveCanvas');
+  it('drag is bound to the window, not the canvas element', () => {
+    // Canvas-scoped handlers drop a drag the moment the pointer outruns the
+    // node, crosses another element, or is released outside the canvas — all
+    // routine with a real mouse. Window listeners are the robust pattern.
+    expect(builder).toContain("window.addEventListener('mousemove', onMove)");
+    expect(builder).toContain("window.addEventListener('mouseup', onUp)");
+    expect(builder).toContain("window.removeEventListener('mousemove', onMove)");
+    expect(builder).toContain("window.removeEventListener('mouseup', onUp)");
+  });
+
+  it('drag updates only x/y — never execution semantics', () => {
+    const idx = builder.indexOf('const onMove = (ev: MouseEvent)');
     const slice = builder.slice(idx, idx + 420);
     expect(slice).toContain('{ ...n, x: n.x + dx, y: n.y + dy }');
     expect(slice).not.toContain('type:');
@@ -162,8 +172,30 @@ describe('5: node dragging is real and does not corrupt execution semantics', ()
   });
 
   it('drag is scaled by zoom so movement tracks the pointer', () => {
-    const idx = builder.indexOf('const handleMouseMoveCanvas');
+    const idx = builder.indexOf('const onMove = (ev: MouseEvent)');
     expect(builder.slice(idx, idx + 300)).toContain('/ zoomLevel');
+  });
+});
+
+describe('5b: connecting two nodes is discoverable', () => {
+  it('clicking Connect on a second node completes the edge instead of re-arming', () => {
+    // Previously this silently moved the source: the edge never appeared and
+    // nothing explained why. It is the obvious gesture, so it now finishes.
+    const idx = builder.indexOf('// If a source is already armed');
+    expect(idx).toBeGreaterThan(-1);
+    const slice = builder.slice(idx, idx + 700);
+    expect(slice).toContain('handleConnectNodes(node.id)');
+    expect(slice).toContain('setConnectSourceId(null)');
+  });
+
+  it('the armed source and candidate targets are labelled', () => {
+    expect(builder).toContain("'Source — click target'");
+    expect(builder).toContain("'Connect here ←'");
+    expect(builder).toContain("data-connect-role");
+  });
+
+  it('nodes carry a stable test id so interaction can be verified', () => {
+    expect(builder).toContain('data-testid={`graph-node-${node.id}`}');
   });
 });
 

@@ -813,22 +813,43 @@ export const GraphBuilderView: React.FC<GraphBuilderViewProps> = ({
     setConnectSourceId(null);
   };
 
-  // Node position drag
+  // Node position drag.
+  //
+  // Move/up are bound to the WINDOW for the lifetime of a drag, not to the
+  // canvas div. Canvas-scoped React handlers drop the drag whenever the
+  // pointer outruns the node, crosses another element, or is released outside
+  // the canvas — all of which happen constantly with a real mouse. Window
+  // listeners are the standard fix and make a fast flick behave the same as a
+  // slow one.
   const handleMouseDownNode = (e: React.MouseEvent, nodeId: string) => {
     e.stopPropagation();
+    e.preventDefault();
     setIsDraggingNode(nodeId);
     setDragStartPos({ x: e.clientX, y: e.clientY });
   };
 
-  const handleMouseMoveCanvas = (e: React.MouseEvent) => {
+  useEffect(() => {
     if (!isDraggingNode) return;
-    const dx = (e.clientX - dragStartPos.x) / zoomLevel;
-    const dy = (e.clientY - dragStartPos.y) / zoomLevel;
-    setNodes((prev) =>
-      prev.map((n) => (n.id === isDraggingNode ? { ...n, x: n.x + dx, y: n.y + dy } : n))
-    );
-    setDragStartPos({ x: e.clientX, y: e.clientY });
-  };
+    let last = { x: dragStartPos.x, y: dragStartPos.y };
+    const onMove = (ev: MouseEvent) => {
+      const dx = (ev.clientX - last.x) / zoomLevel;
+      const dy = (ev.clientY - last.y) / zoomLevel;
+      last = { x: ev.clientX, y: ev.clientY };
+      setNodes((prev) => prev.map((n) => (n.id === isDraggingNode ? { ...n, x: n.x + dx, y: n.y + dy } : n)));
+    };
+    const onUp = () => setIsDraggingNode(null);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [isDraggingNode, zoomLevel]);
+
+  // Retained so the canvas element keeps a handler (and so a move that lands
+  // on the canvas during a drag still tracks), but the window listeners above
+  // are what make the drag reliable.
+  const handleMouseMoveCanvas = (_e: React.MouseEvent) => { /* window listeners own the drag */ };
 
   const handleMouseUpCanvas = () => {
     setIsDraggingNode(null);
@@ -1697,7 +1718,7 @@ Please research and resolve all missing fields according to the Required Field S
           {connectSourceId && (
             <div className="absolute top-3 right-3 z-10 bg-[#615EFF]/20 border border-[#615EFF]/50 px-3 py-1.5 rounded-lg text-xs text-white flex items-center gap-2 backdrop-blur animate-pulse shadow-xl">
               <CornerDownRight className="w-4 h-4 text-[#8C8AFF]" />
-              Select target node to create directional edge (Rule #4 Validation Lock active)...
+              Click any other node — or its “Connect here ←” — to finish the edge.
               <button
                 onClick={() => setConnectSourceId(null)}
                 className="ml-2 hover:text-[#FF5E8E] cursor-pointer"
@@ -1798,6 +1819,8 @@ Please research and resolve all missing fields according to the Required Field S
                     }
                   }}
                   onMouseDown={(e) => handleMouseDownNode(e, node.id)}
+                  data-testid={`graph-node-${node.id}`}
+                  data-connect-role={connectSourceId === node.id ? 'source' : connectSourceId ? 'candidate-target' : undefined}
                   style={{ left: `${node.x}px`, top: `${node.y}px` }}
                   className={`absolute w-60 rounded-xl dashboard-box p-3 cursor-grab active:cursor-grabbing transition-all ${
                     isSelected
@@ -1859,12 +1882,30 @@ Please research and resolve all missing fields according to the Required Field S
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        setConnectSourceId(node.id);
+                        // If a source is already armed and this is a DIFFERENT
+                        // node, treat the click as choosing the target rather
+                        // than silently re-arming. Clicking "Connect" on the
+                        // second node is the obvious gesture, and previously it
+                        // just moved the source — the edge never appeared and
+                        // nothing said why.
+                        if (connectSourceId && connectSourceId !== node.id) {
+                          handleConnectNodes(node.id);
+                        } else if (connectSourceId === node.id) {
+                          setConnectSourceId(null);
+                        } else {
+                          setConnectSourceId(node.id);
+                        }
                       }}
-                      className="hover:text-[#615EFF] flex items-center gap-1 font-semibold cursor-pointer"
+                      className={`flex items-center gap-1 font-semibold cursor-pointer ${
+                        connectSourceId === node.id ? 'text-[#00D26A]' : 'hover:text-[#615EFF]'
+                      }`}
                     >
                       <CornerDownRight className="w-3 h-3 text-[#615EFF]" />
-                      Connect →
+                      {connectSourceId === node.id
+                        ? 'Source — click target'
+                        : connectSourceId
+                          ? 'Connect here ←'
+                          : 'Connect →'}
                     </button>
 
                     {node.type === 'agent' && node.status === 'draft' && (
