@@ -26,6 +26,7 @@
 import { getRuntimeStatus, type RuntimeStatusReport, type RuntimeSystemReport } from '../runtime-status';
 import { getDatabase } from '../persistence';
 import { isWindmillConfigured } from '../windmill-client';
+import { getVoiceCredentialStatus } from '../voice-credentials';
 
 export type CapabilityEffectClass = 'READ' | 'COMPUTE' | 'EXTERNAL_ACTION' | 'CONTROL';
 
@@ -578,6 +579,77 @@ function conversationTelephonyCapability(): CapabilityDescriptor {
   };
 }
 
+/**
+ * Voice input. Browser-native speech recognition, so it is genuinely available
+ * without any credential — and genuinely absent in browsers that lack it.
+ * Reported AVAILABLE because the server-side contract holds everywhere; the
+ * per-visitor capability check happens in the page and is surfaced there.
+ *
+ * No audio reaches this server: recognition happens in the visitor's browser
+ * and only the resulting text is submitted.
+ */
+function conversationVoiceInputCapability(): CapabilityDescriptor {
+  return {
+    key: 'conversation.voice_input',
+    runtime: 'browser',
+    status: 'AVAILABLE',
+    effectClass: 'READ',
+    riskTier: 'LOW',
+    approvalPolicy: 'NONE',
+    workspaceScope: 'none',
+    reference: 'lib/conversation/public-page.ts (Web Speech API) + src/hooks/useSpeechRecognition.ts',
+    reason: 'Speech recognition runs in the visitor\'s own browser; no audio is uploaded, recorded or stored by this server. Unsupported browsers show voice input as unavailable rather than degrading silently.',
+  };
+}
+
+/**
+ * Voice output. Reuses the one working Fish Audio path — there is no second
+ * TTS integration, and the public route synthesizes a STORED assistant message
+ * by id rather than caller-supplied text, so it cannot be used as a free
+ * text-to-speech API funded by the business's credit.
+ */
+function conversationVoiceOutputCapability(): CapabilityDescriptor {
+  // PRESENT/MISSING only — the credential value is never read out here.
+  const configured = Boolean(
+    (process.env.FISH_AUDIO_API_KEY || '').trim() || getVoiceCredentialStatus('fish_audio').apiKeyPresent
+  );
+  return {
+    key: 'conversation.voice_output',
+    runtime: 'fish_audio',
+    status: configured ? 'AVAILABLE' : 'NOT_CONFIGURED',
+    effectClass: 'COMPUTE',
+    riskTier: 'LOW',
+    approvalPolicy: 'NONE',
+    workspaceScope: 'member',
+    reference: 'lib/voice-credentials.ts::synthesizeFishAudio',
+    reason: configured
+      ? 'A Fish Audio credential is present. Spoken replies are generated from the reply the assistant already sent; a synthesis failure never invalidates the written answer.'
+      : 'No Fish Audio credential is configured, so spoken replies are unavailable. Text conversation is unaffected.',
+  };
+}
+
+/**
+ * Embedding on a customer's own website.
+ *
+ * AVAILABLE as a mechanism; whether any given business is actually embeddable
+ * depends on its own authorized-origins list, which is per-workspace data and
+ * not a platform capability. An empty list means the standalone page works and
+ * nobody may frame it.
+ */
+function conversationEmbedCapability(): CapabilityDescriptor {
+  return {
+    key: 'conversation.embed',
+    runtime: 'conversation',
+    status: 'AVAILABLE',
+    effectClass: 'READ',
+    riskTier: 'MEDIUM',
+    approvalPolicy: 'NONE',
+    workspaceScope: 'member',
+    reference: 'lib/conversation/origins.ts::assistantPageCsp',
+    reason: 'Third-party embedding is permitted only for origins the business itself authorized, enforced by a per-route frame-ancestors policy. The app-wide frame-ancestors \'none\' is unchanged everywhere else.',
+  };
+}
+
 function mcpConnectivityCapability(report: RuntimeStatusReport): CapabilityDescriptor {
   const mcp = findSystem(report, 'MCP Connectivity');
   const status: CapabilityStatus =
@@ -628,6 +700,9 @@ async function buildAllCapabilities(report: RuntimeStatusReport): Promise<Capabi
     conversationSummarizeCapability(),
     conversationBookingCapability(),
     conversationTelephonyCapability(),
+    conversationVoiceInputCapability(),
+    conversationVoiceOutputCapability(),
+    conversationEmbedCapability(),
     mcpConnectivityCapability(report),
   ];
 }

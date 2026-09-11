@@ -29,8 +29,10 @@ import { indexVaultArtifact } from '../memory-index';
 import {
   type BusinessProfile, type Channel, type ConversationMessage, type LeadData, type ResponseMode,
   answerQuestion, appendMessage, classifyIntent, createConversation, extractLead, getConversation,
-  getMessages, getProfile, handleObjection, mentionsTime, setStatus, updateLead,
+  getMessages, getProfile, handleObjection, mentionsTime, recordUnansweredQuestion,
+  setStatus, updateLead, gatherEvidence, answerFromProfileOnly,
 } from './engine';
+import { buildGroundedPrompt, generateGroundedReply, resolveConversationProvider, type EvidenceItem } from './llm';
 
 /**
  * What actually happened as a result of a turn. Deliberately explicit — the
@@ -50,6 +52,18 @@ export interface TurnResult {
   qualificationComplete: boolean;
   nextQuestion: string | null;
   disclosure: string;
+  /**
+   * What actually produced this reply. Recorded rather than inferred, and
+   * never optimistic: `provider`/`model` are only populated when a real call
+   * really happened, and `runtimeNote` carries the reason when the LLM path
+   * was attempted and did not deliver.
+   */
+  provenance: {
+    provider: string | null;
+    model: string | null;
+    evidence: { artifactId: string; title: string }[];
+    runtimeNote: string | null;
+  };
 }
 
 // --- qualification ---------------------------------------------------------
@@ -129,6 +143,123 @@ function createConversationTask(params: {
   return taskId;
 }
 
+// --- answering mode selection ----------------------------------------------
+
+interface AnsweredTurn {
+  content: string;
+  mode: ResponseMode;
+  sources: { artifactId: string; title: string; path: string }[];
+  provenance: TurnResult['provenance'];
+}
+
+/**
+ * Answer a question with the best mode this install can actually deliver.
+ *
+ * The order is the product's entire safety argument:
+ *
+ *   1. The business's own declared profile. No retrieval, no model, no spend.
+ *   2. Approved evidence from Business-Knowledge only. If there is NONE, the
+ *      answer is a refusal and NO MODEL IS CALLED — a model that is never
+ *      asked cannot answer from its own priors. This is the line that makes
+ *      "never hallucinate a business answer" a property of control flow rather
+ *      than a request in a prompt.
+ *   3. With evidence in hand: if a provider is configured, the model phrases
+ *      THAT EVIDENCE and its output is checked before it is shown. If the
+ *      model is absent, fails, or produces a claim the evidence does not
+ *      support, the reply falls back to quoting the same evidence directly.
+ *
+ * Note what cannot happen: the LLM path never sees evidence the extractive
+ * path would not have used, and never runs when the extractive path would have
+ * refused. Turning a model on can change the wording of an answer. It can
+ * never change whether there was an answer.
+ */
+export async function answerWithBestAvailableMode(params: {
+  profile: BusinessProfile;
+  workspaceId: string;
+  text: string;
+  history: ConversationMessage[];
+  isObjection: boolean;
+  callModel?: (model: string, prompt: any) => Promise<string>;
+}): Promise<AnsweredTurn> {
+  const { profile, workspaceId, text, isObjection } = params;
+  const none: TurnResult['provenance'] = { provider: null, model: null, evidence: [], runtimeNote: null };
+
+  // 1. The profile answers it outright.
+  const direct = answerFromProfileOnly(profile, text);
+  if (direct) {
+    return { content: direct, mode: 'GROUNDED_EXTRACTIVE', sources: [], provenance: none };
+  }
+
+  // 2. Evidence, or a refusal. Identical for both modes.
+  const scored = gatherEvidence(workspaceId, text);
+  if (scored.length === 0) {
+    const refusal = isObjection
+      ? handleObjection(profile, workspaceId, text)
+      : answerQuestion(profile, workspaceId, text);
+    return { content: refusal.content, mode: refusal.mode, sources: refusal.sources, provenance: none };
+  }
+
+  const keep = [scored[0]];
+  if (scored[1] && scored[1].score >= scored[0].score * 0.8 && scored[1].hit.artifact_id !== scored[0].hit.artifact_id) {
+    keep.push(scored[1]);
+  }
+  const evidence: EvidenceItem[] = keep.map((k) => ({
+    artifactId: k.hit.artifact_id, title: k.hit.title, path: k.hit.source_path, passage: k.passage,
+  }));
+  const sources = evidence.map((e) => ({ artifactId: e.artifactId, title: e.title, path: e.path }));
+
+  const extractive = (): AnsweredTurn => {
+    const body = evidence.map((e) => e.passage).join('\n\n');
+    return {
+      content: isObjection ? `That's a fair question.\n\n${body}` : body,
+      mode: 'GROUNDED_EXTRACTIVE',
+      sources,
+      provenance: { ...none, evidence: evidence.map((e) => ({ artifactId: e.artifactId, title: e.title })) },
+    };
+  };
+
+  // 3. Phrase the evidence with a model, if one is really available.
+  const availability = resolveConversationProvider();
+  if (availability.available !== true) {
+    return {
+      ...extractive(),
+      provenance: {
+        provider: null, model: null,
+        evidence: evidence.map((e) => ({ artifactId: e.artifactId, title: e.title })),
+        runtimeNote: `LLM_NOT_CONFIGURED: ${availability.detail}`,
+      },
+    };
+  }
+
+  const prompt = buildGroundedPrompt({ profile, history: params.history, question: text, evidence });
+  const llm = await generateGroundedReply({ prompt, evidence, callModel: params.callModel as any });
+
+  if (!llm.ok) {
+    // A provider failure must never become a worse answer than we already had.
+    // The evidence is still real, so the customer still gets it — and the
+    // degradation is recorded for the owner rather than hidden from them.
+    return {
+      ...extractive(),
+      provenance: {
+        provider: llm.provider ?? null, model: llm.modelUsed ?? null,
+        evidence: evidence.map((e) => ({ artifactId: e.artifactId, title: e.title })),
+        runtimeNote: `LLM_DEGRADED_${llm.failureReason}: ${llm.failureDetail || 'no detail'}`,
+      },
+    };
+  }
+
+  return {
+    content: llm.text!,
+    mode: 'LLM',
+    sources,
+    provenance: {
+      provider: llm.provider ?? null, model: llm.modelUsed ?? null,
+      evidence: evidence.map((e) => ({ artifactId: e.artifactId, title: e.title })),
+      runtimeNote: null,
+    },
+  };
+}
+
 // --- the turn --------------------------------------------------------------
 
 export function startConversation(params: {
@@ -153,9 +284,11 @@ export function startConversation(params: {
   return { conversationId, greeting, disclosure: profile.ai_disclosure, profile };
 }
 
-export function handleTurn(params: {
+export async function handleTurn(params: {
   workspaceId: string; conversationId: string; text: string;
-}): TurnResult | { error: string } {
+  /** Test seam: substitute the model call without touching provider resolution. */
+  callModel?: (model: string, prompt: { system: string; user: string; evidenceRefs: { artifactId: string; title: string }[] }) => Promise<string>;
+}): Promise<TurnResult | { error: string }> {
   const { workspaceId, conversationId } = params;
   const text = String(params.text || '').trim();
   if (!text) return { error: 'Empty message.' };
@@ -205,6 +338,7 @@ export function handleTurn(params: {
   let content: string;
   let mode: ResponseMode;
   let sources: { artifactId: string; title: string; path: string }[] = [];
+  let provenance: TurnResult['provenance'] = { provider: null, model: null, evidence: [], runtimeNote: null };
 
   if (intent === 'HANDOFF') {
     if (alreadyHandedOff) {
@@ -248,12 +382,21 @@ export function handleTurn(params: {
     } else {
       content = `Thanks. I didn't quite catch a usable email or phone number there — could you write it out for me?`;
     }
-  } else if (intent === 'OBJECTION') {
-    const a = handleObjection(profile, workspaceId, text);
-    content = a.content; mode = a.mode; sources = a.sources;
   } else {
-    const a = answerQuestion(profile, workspaceId, text);
-    content = a.content; mode = a.mode; sources = a.sources;
+    // --- the answering path: extractive, or the same evidence phrased by a model ---
+    const answered = await answerWithBestAvailableMode({
+      profile, workspaceId, text, history: prior, isObjection: intent === 'OBJECTION',
+      callModel: params.callModel,
+    });
+    content = answered.content; mode = answered.mode; sources = answered.sources;
+    provenance = answered.provenance;
+
+    // A question the business's own material cannot answer is the single most
+    // useful thing this product learns. Recorded on the extractive path AND
+    // the LLM path, because a refusal is a refusal however it was phrased.
+    if (mode === 'NO_KNOWLEDGE') {
+      recordUnansweredQuestion({ workspaceId, conversationId, question: text, channel: String(conv.channel) });
+    }
   }
 
   // Qualification rides along with an answer at most every other turn, and
@@ -278,6 +421,7 @@ export function handleTurn(params: {
     qualificationComplete: isQualified(profile, lead),
     nextQuestion: mayAsk ? nextQuestion : null,
     disclosure: profile.ai_disclosure,
+    provenance,
   };
 }
 
