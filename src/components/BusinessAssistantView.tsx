@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   MessageSquare, Globe, Loader2, AlertTriangle, CheckCircle2, BookOpen,
   ExternalLink, Copy, User, Bot, ShieldAlert, RefreshCw, FileCheck, HelpCircle,
+  ListChecks, Sparkles,
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -83,6 +84,15 @@ interface UnansweredQuestion {
   updated_at: string;
 }
 
+interface ReadinessItem { key: string; state: string; detail: string; }
+interface Readiness {
+  publicBaseUrl: string;
+  publicBaseUrlSource: string;
+  publicBaseUrlWarning: string | null;
+  items: ReadinessItem[];
+}
+interface ModelCredential { apiKeyPresent: boolean; source: string; envVar: string; updatedAt: string | null; }
+
 interface Analytics {
   conversations: { total: number; active: number; handoffRequested: number; closed: number };
   answering: { assistantTurns: number; grounded: number; llm: number; noKnowledge: number };
@@ -108,6 +118,10 @@ export function BusinessAssistantView({ activeWorkspaceId }: { activeWorkspaceId
   const [newDomain, setNewDomain] = useState('');
   const [answerDraft, setAnswerDraft] = useState<{ q: UnansweredQuestion; title: string; content: string } | null>(null);
   const [preview, setPreview] = useState<{ question: string; reply: string; mode: string; sources: string[] } | null>(null);
+  const [readiness, setReadiness] = useState<Readiness | null>(null);
+  const [modelCred, setModelCred] = useState<ModelCredential | null>(null);
+  const [modelKey, setModelKey] = useState('');
+  const [modelVerify, setModelVerify] = useState<string | null>(null);
   const [selected, setSelected] = useState<{ row: ConversationRow; messages: Message[] } | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -126,12 +140,14 @@ export function BusinessAssistantView({ activeWorkspaceId }: { activeWorkspaceId
     setLoading(true); setError(null);
     try {
       const ws = encodeURIComponent(activeWorkspaceId);
-      const [p, c, a, e, u] = await Promise.all([
+      const [p, c, a, e, u, rd, mc] = await Promise.all([
         fetch(`/api/business/profile?workspaceId=${ws}`).then((r) => r.json()),
         fetch(`/api/business/conversations?workspaceId=${ws}`).then((r) => r.json()),
         fetch(`/api/business/analytics?workspaceId=${ws}`).then((r) => r.json()),
         fetch(`/api/business/embed?workspaceId=${ws}`).then((r) => r.json()),
         fetch(`/api/business/unanswered?workspaceId=${ws}&status=OPEN`).then((r) => r.json()),
+        fetch(`/api/business/readiness?workspaceId=${ws}`).then((r) => r.json()),
+        fetch(`/api/business/model-credential?workspaceId=${ws}`).then((r) => r.json()).catch(() => ({ success: false })),
       ]);
       if (p.success) {
         setProfile(p.profile); setAnswering(p.answering); setPublicUrl(p.publicUrl);
@@ -154,6 +170,8 @@ export function BusinessAssistantView({ activeWorkspaceId }: { activeWorkspaceId
       if (a.success) setAnalytics(a);
       if (e.success) setEmbed(e);
       if (u.success) setUnanswered(u.questions);
+      if (rd.success) setReadiness(rd);
+      if (mc.success) setModelCred(mc.status);
     } catch (e: any) {
       setError(e?.message || 'Could not reach the server.');
     } finally { setLoading(false); }
@@ -268,6 +286,33 @@ export function BusinessAssistantView({ activeWorkspaceId }: { activeWorkspaceId
       await fetch(`/api/business/unanswered/${encodeURIComponent(q.question_id)}/answer`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ workspaceId: activeWorkspaceId, action: 'dismiss' }),
+      });
+      await refresh();
+    } finally { setBusy(null); }
+  };
+
+  const saveModelKey = async () => {
+    setBusy('model'); setError(null); setNotice(null); setModelVerify(null);
+    try {
+      const r = await fetch('/api/business/model-credential', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId: activeWorkspaceId, apiKey: modelKey }),
+      }).then((x) => x.json());
+      if (!r.success) { setError(r.error || 'Could not save the key.'); return; }
+      setModelKey('');
+      setModelVerify(r.verification?.ok
+        ? `Verified — the provider answered using ${r.verification.model}.`
+        : `Saved, but the provider refused it: ${r.verification?.error || 'unknown error'}`);
+      await refresh();
+    } finally { setBusy(null); }
+  };
+
+  const removeModelKey = async () => {
+    setBusy('model'); setModelVerify(null);
+    try {
+      await fetch('/api/business/model-credential', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId: activeWorkspaceId, action: 'delete' }),
       });
       await refresh();
     } finally { setBusy(null); }
@@ -393,26 +438,76 @@ export function BusinessAssistantView({ activeWorkspaceId }: { activeWorkspaceId
           </button>
         </div>
 
-        {/* Channel reality, stated rather than implied. */}
-        <div className="mt-5 grid grid-cols-2 gap-x-6 gap-y-2 border-t border-white/5 pt-4 font-mono text-[11px] md:grid-cols-3">
-          {[
-            ['TEXT CHAT', profile?.published ? 'ACTIVE' : 'NOT PUBLISHED', profile?.published],
-            ['VOICE INPUT', 'BROWSER SPEECH (WHERE SUPPORTED)', true],
-            ['VOICE OUTPUT', profile?.voice_enabled ? 'FISH AUDIO' : 'TURNED OFF', profile?.voice_enabled],
-            ['LIVE PHONE', 'NOT CONFIGURED', false],
-            ['SMS', 'NOT CONFIGURED', false],
-            ['CALENDAR BOOKING', 'NOT CONFIGURED', false],
-          ].map(([label, value, on]) => (
-            <div key={String(label)} className="flex items-baseline justify-between gap-3">
-              <span className="text-slate-500">{label}</span>
-              <span className={on ? 'text-emerald-300/80' : 'text-slate-500'}>{value}</span>
+        {readiness?.publicBaseUrlWarning && (
+          <div className="mt-4 flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-400/[0.08] p-3 text-sm text-amber-100">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <div>
+              <div className="font-medium">Your public address will not work for a real customer</div>
+              <p className="mt-1 text-amber-200/80">{readiness.publicBaseUrlWarning}</p>
             </div>
-          ))}
+          </div>
+        )}
+      </div>
+
+      {/* First-customer readiness. Every row is a checked state — no green tick
+          stands for something that is not actually configured. */}
+      {readiness && (
+        <div className={CARD}>
+          <div className={`${LABEL} flex items-center gap-1.5`}><ListChecks className="h-3.5 w-3.5" /> Ready for a customer?</div>
+          <div className="mt-3 divide-y divide-white/5">
+            {readiness.items.map((it) => {
+              const tone =
+                it.state === 'READY' ? 'text-emerald-300'
+                : it.state === 'ATTENTION' ? 'text-amber-300'
+                : 'text-slate-500';
+              return (
+                <div key={it.key} className="flex items-baseline justify-between gap-4 py-2">
+                  <div className="min-w-0">
+                    <div className="font-mono text-[11px] text-slate-300">{it.key.replace(/_/g, ' ')}</div>
+                    <div className="mt-0.5 text-xs text-slate-500">{it.detail}</div>
+                  </div>
+                  <span className={`shrink-0 font-mono text-[11px] ${tone}`}>{it.state.replace(/_/g, ' ')}</span>
+                </div>
+              );
+            })}
+          </div>
         </div>
-        <p className="mt-3 text-xs text-slate-500">
-          Voice input uses the visitor's own browser — no audio is uploaded or stored by this
-          server; only the text it produces. Voice output is generated by Fish Audio from the reply
-          the assistant already sent.
+      )}
+
+      {/* Natural phrasing — the model key, stored encrypted server-side. */}
+      <div className={CARD}>
+        <div className={`${LABEL} flex items-center gap-1.5`}><Sparkles className="h-3.5 w-3.5" /> Natural phrasing (optional)</div>
+        <p className="mt-2 text-sm text-slate-400">
+          Without a model key your assistant quotes your documents word for word — accurate, but it
+          reads like a document. With one, it phrases <em>the same approved material</em> in its own
+          words. It gains no new knowledge and can still only say what you published.
+        </p>
+        {modelCred?.apiKeyPresent ? (
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 font-mono text-[11px] text-emerald-200">
+              KEY PRESENT — {modelCred.source === 'environment' ? modelCred.envVar : 'stored encrypted'}
+            </span>
+            {modelCred.source !== 'environment' && (
+              <button onClick={removeModelKey} disabled={busy === 'model'}
+                className="text-xs text-slate-500 hover:text-red-300 disabled:opacity-40">Remove key</button>
+            )}
+          </div>
+        ) : (
+          <div className="mt-3 flex gap-2">
+            <input
+              type="password" className={INPUT} placeholder="Gemini API key" value={modelKey}
+              onChange={(e) => setModelKey(e.target.value)} autoComplete="off"
+            />
+            <button onClick={saveModelKey} disabled={busy === 'model' || !modelKey.trim()}
+              className="shrink-0 rounded-lg border border-white/10 px-4 py-2 text-sm text-slate-200 hover:bg-white/5 disabled:opacity-40">
+              {busy === 'model' ? 'Checking…' : 'Save and verify'}
+            </button>
+          </div>
+        )}
+        {modelVerify && <p className="mt-2 text-xs text-slate-400">{modelVerify}</p>}
+        <p className="mt-2 text-xs text-slate-500">
+          Stored encrypted on this server and never sent to a browser. An environment variable, if
+          set, always takes precedence over a key saved here.
         </p>
       </div>
 
