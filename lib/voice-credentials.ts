@@ -379,3 +379,139 @@ export function sanitizeProviderError(raw: string): string {
     .replace(/Bearer\s+[A-Za-z0-9._\-]{6,}/gi, 'Bearer [REDACTED_KEY]')
     .slice(0, 500);
 }
+
+// ---------------------------------------------------------------------------
+// THE ONE FISH AUDIO SYNTHESIS CALL
+//
+// Extracted because a second call site appeared: the public business assistant
+// needed voice output, and copying the request into another route immediately
+// meant two places to keep the contract right — the `model` HTTP header that
+// does nothing in the body, the free-tier retry on 402, the sub-128-byte
+// "success" that is not audio. All three were learned the hard way once.
+//
+// Callers differ only in what they do with the failure: the admin route
+// reports the provider's own message to an operator, the public route must
+// not leak it to a visitor.
+// ---------------------------------------------------------------------------
+
+export type FishSynthesisResult =
+  | { ok: true; audio: Buffer; mimeType: string; model: string; referenceId: string; keySource: VoiceKeySource }
+  | {
+      ok: false;
+      reason: 'API_KEY_NOT_CONFIGURED' | 'REFERENCE_ID_NOT_CONFIGURED' | 'PROVIDER_INSUFFICIENT_CREDIT'
+        | 'PROVIDER_AUTH_REJECTED' | 'MODEL_PROVIDER_UNAVAILABLE' | 'EMPTY_AUDIO_RESPONSE' | 'REQUEST_FAILED';
+      providerStatus?: number;
+      /** Already passed through sanitizeProviderError. Safe to log; never safe to show a customer. */
+      providerError?: string;
+      model?: string;
+      referenceId?: string | null;
+      keySource?: VoiceKeySource;
+    };
+
+export async function synthesizeFishAudio(params: {
+  text: string;
+  referenceId?: string;
+  model?: string;
+  format?: string;
+  latency?: string;
+  speed?: number;
+}): Promise<FishSynthesisResult> {
+  const resolved = resolveFishConfig({ referenceId: params.referenceId, model: params.model });
+
+  if (!resolved.apiKey) {
+    return { ok: false, reason: 'API_KEY_NOT_CONFIGURED', keySource: resolved.keySource };
+  }
+  if (!resolved.referenceId) {
+    // A generic Fish default voice is NOT success for this product — the
+    // configured cloned voice is the point, so a missing reference_id is
+    // reported rather than quietly synthesized with whatever stock voice the
+    // provider picks.
+    return { ok: false, reason: 'REFERENCE_ID_NOT_CONFIGURED', keySource: resolved.keySource };
+  }
+
+  const format = params.format || process.env.FISH_AUDIO_AUDIO_FORMAT || 'mp3';
+  const latency = params.latency || process.env.FISH_AUDIO_LATENCY_MODE || 'normal';
+
+  // `model` is an HTTP HEADER on POST /v1/tts, not a body field. Sending it in
+  // the body silently does nothing.
+  const call = (fishModel: string) =>
+    fetch('https://api.fish.audio/v1/tts', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${resolved.apiKey}`,
+        'Content-Type': 'application/json',
+        model: fishModel,
+      },
+      body: JSON.stringify({
+        text: params.text,
+        reference_id: resolved.referenceId,
+        format,
+        latency,
+        prosody: { speed: Number(params.speed) || 1.0 },
+      }),
+    });
+
+  let usedModel = resolved.model;
+  let response: Response;
+  try {
+    response = await call(usedModel);
+  } catch (err: any) {
+    return { ok: false, reason: 'REQUEST_FAILED', providerError: sanitizeProviderError(err?.message || 'network error') };
+  }
+
+  // Fish meters API credit SEPARATELY from platform credit, so a live account
+  // with an active subscription still 402s once the API balance runs out. The
+  // free tier is a real documented model on the same endpoint honouring the
+  // same reference_id, so it is worth one automatic retry.
+  if (response.status === 402 && usedModel !== FISH_AUDIO_FREE_MODEL) {
+    const original = sanitizeProviderError(await response.text());
+    try {
+      const retry = await call(FISH_AUDIO_FREE_MODEL);
+      if (retry.ok) {
+        usedModel = FISH_AUDIO_FREE_MODEL;
+        response = retry;
+      } else {
+        // Keep the ORIGINAL 402 as the reported cause — the free-tier failure
+        // is a consequence, not the diagnosis.
+        return {
+          ok: false, reason: 'PROVIDER_INSUFFICIENT_CREDIT', providerStatus: 402,
+          providerError: `${original} | free-tier retry ${retry.status}: ${sanitizeProviderError(await retry.text())}`,
+          model: resolved.model, referenceId: resolved.referenceId, keySource: resolved.keySource,
+        };
+      }
+    } catch (err: any) {
+      return {
+        ok: false, reason: 'PROVIDER_INSUFFICIENT_CREDIT', providerStatus: 402,
+        providerError: `${original} | free-tier retry failed: ${sanitizeProviderError(err?.message || 'network error')}`,
+        model: resolved.model, referenceId: resolved.referenceId, keySource: resolved.keySource,
+      };
+    }
+  }
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      reason: response.status === 401 || response.status === 403 ? 'PROVIDER_AUTH_REJECTED' : 'MODEL_PROVIDER_UNAVAILABLE',
+      providerStatus: response.status,
+      providerError: sanitizeProviderError(await response.text()),
+      model: usedModel, referenceId: resolved.referenceId, keySource: resolved.keySource,
+    };
+  }
+
+  const buf = await response.arrayBuffer();
+  // A 200 with no meaningful body is not audio. Caught here rather than
+  // shipping an empty blob the player fails on silently.
+  if (buf.byteLength < 128) {
+    return {
+      ok: false, reason: 'EMPTY_AUDIO_RESPONSE', providerStatus: 200,
+      providerError: `${buf.byteLength} bytes returned, which is not playable audio.`,
+      model: usedModel, referenceId: resolved.referenceId, keySource: resolved.keySource,
+    };
+  }
+
+  const mimeType = format === 'opus' ? 'audio/ogg; codecs=opus' : format === 'wav' ? 'audio/wav' : 'audio/mpeg';
+  return {
+    ok: true, audio: Buffer.from(buf), mimeType,
+    model: usedModel, referenceId: resolved.referenceId, keySource: resolved.keySource,
+  };
+}

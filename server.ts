@@ -105,14 +105,20 @@ import {
   listConversations as listBusinessConversations,
   getConversation as getBusinessConversation,
   getMessages as getBusinessMessages,
+  setAllowedOrigins,
+  listUnansweredQuestions,
+  resolveUnansweredQuestion,
 } from "./lib/conversation/engine";
 import {
   startConversation as startBusinessConversation,
   handleTurn as handleBusinessTurn,
   summarizeConversation as summarizeBusinessConversation,
   addBusinessKnowledge,
+  answerWithBestAvailableMode,
 } from "./lib/conversation/service";
-import { renderAssistantPage, ASSISTANT_SCRIPT } from "./lib/conversation/public-page";
+import { renderAssistantPage, ASSISTANT_SCRIPT, EMBED_LOADER_SCRIPT, embedSnippet } from "./lib/conversation/public-page";
+import { assistantPageCsp, normalizeOrigin } from "./lib/conversation/origins";
+import { synthesizeFishAudio } from "./lib/voice-credentials";
 import { requireAuth, requireWorkspaceMember, requireWorkspaceAdmin, requirePlatformAdmin, requireSameOrigin, getRequestUser, fromBody, fromQuery, fromBodyOrQuery, AuthedRequest } from "./lib/authorization";
 import { recordAdminAuditEvent, listRecentAdminAuditEvents } from "./lib/audit";
 import { executeAgentTask, buildAgentRolePrompt } from "./lib/fabric/kernel";
@@ -2527,6 +2533,129 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
     }
   });
 
+
+  /** Websites authorized to embed this assistant. Invalid entries are reported, never silently dropped. */
+  app.post("/api/business/allowed-origins", requireWorkspaceMember(fromBody), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      if (!getBusinessProfile(workspaceId)) {
+        return res.status(400).json({ success: false, error: "Configure the assistant profile first." });
+      }
+      const origins = Array.isArray(req.body?.origins) ? req.body.origins : [];
+      const r = setAllowedOrigins(workspaceId, origins);
+      return res.json({ success: true, workspaceId, ...r });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to save authorized websites" });
+    }
+  });
+
+  /** The installation snippet, built server-side so the owner copies something real. */
+  app.get("/api/business/embed", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const profile = getBusinessProfile(workspaceId);
+      if (!profile?.public_key || !profile.published) {
+        return res.json({
+          success: true, workspaceId, published: false, snippet: null,
+          detail: "Publish the assistant to get its installation snippet.",
+        });
+      }
+      const origin = `${req.protocol}://${req.get("host")}`;
+      return res.json({
+        success: true, workspaceId, published: true,
+        publicUrl: `${origin}/a/${profile.public_key}`,
+        snippet: embedSnippet(origin, profile.public_key, profile.business_name),
+        allowedOrigins: profile.allowed_origins,
+        // Stated plainly: an empty allowlist is a working standalone page and a
+        // refused embed, not a half-configured state that silently allows all.
+        embeddable: profile.allowed_origins.length > 0,
+        embeddableDetail: profile.allowed_origins.length > 0
+          ? `Only these websites may embed it: ${profile.allowed_origins.join(", ")}.`
+          : "No website is authorized yet, so the snippet will be refused by the browser. Add your website below.",
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to build the embed snippet" });
+    }
+  });
+
+  /** Questions the business's own material could not answer. The commercial feedback loop. */
+  app.get("/api/business/unanswered", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const status = ["OPEN", "ANSWERED", "DISMISSED"].includes(String(req.query.status))
+        ? String(req.query.status) : "OPEN";
+      const questions = listUnansweredQuestions(workspaceId, status, 100);
+      return res.json({ success: true, workspaceId, status, count: questions.length, questions });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list unanswered questions" });
+    }
+  });
+
+  /**
+   * Answer an unanswered question by publishing approved business knowledge.
+   *
+   * A PERSON writes the answer. The assistant never promotes its own guess, and
+   * never learns a fact because a customer asserted one — a business fact
+   * becomes canonical only when someone who speaks for the business says it is.
+   */
+  app.post("/api/business/unanswered/:questionId/answer", requireWorkspaceMember(fromBody), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const user = getRequestUser(req);
+      const questionId = String(req.params.questionId);
+      const action = String(req.body?.action || "answer");
+
+      if (action === "dismiss") {
+        const ok = resolveUnansweredQuestion({ workspaceId, questionId, status: "DISMISSED", userId: user?.user_id });
+        return ok ? res.json({ success: true, status: "DISMISSED" })
+                  : res.status(404).json({ success: false, error: "Question not found in this workspace." });
+      }
+
+      const title = String(req.body?.title || "").trim();
+      const content = String(req.body?.content || "").trim();
+      if (!title || !content) {
+        return res.status(400).json({ success: false, error: "A title and the answer text are both required." });
+      }
+      const added = addBusinessKnowledge({ workspaceId, title, content });
+      if ("error" in added) return res.status(400).json({ success: false, error: added.error });
+
+      const ok = resolveUnansweredQuestion({
+        workspaceId, questionId, status: "ANSWERED", artifactId: added.artifactId, userId: user?.user_id,
+      });
+      if (!ok) return res.status(404).json({ success: false, error: "Question not found in this workspace." });
+      return res.json({ success: true, status: "ANSWERED", ...added });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to record the answer" });
+    }
+  });
+
+  /**
+   * Ask the assistant a question as the owner, without a public conversation.
+   * Used by "test this question again" after knowledge is added — proving the
+   * loop closed, instead of asking the owner to take it on trust.
+   */
+  app.post("/api/business/preview", requireWorkspaceMember(fromBody), async (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const profile = getBusinessProfile(workspaceId);
+      if (!profile) return res.status(400).json({ success: false, error: "Configure the assistant profile first." });
+      const text = String(req.body?.text || "").trim();
+      if (!text) return res.status(400).json({ success: false, error: "A question is required." });
+
+      const answered = await answerWithBestAvailableMode({
+        profile, workspaceId, text, history: [], isObjection: false,
+      });
+      return res.json({
+        success: true, workspaceId,
+        reply: answered.content, responseMode: answered.mode,
+        sources: answered.sources.map((s: any) => ({ title: s.title, path: s.path })),
+        provenance: answered.provenance,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Preview failed" });
+    }
+  });
+
   app.get("/api/business/conversations", requireWorkspaceMember(fromQuery), (req, res) => {
     try {
       const workspaceId = (req as AuthedRequest).authWorkspaceId!;
@@ -2664,7 +2793,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
     }
   });
 
-  app.post("/api/public/assistant/:publicKey/message", rateLimit("EXPENSIVE_EXECUTION", byIp, "public-assistant-message"), (req, res) => {
+  app.post("/api/public/assistant/:publicKey/message", rateLimit("EXPENSIVE_EXECUTION", byIp, "public-assistant-message"), async (req, res) => {
     try {
       const profile = getProfileByPublicKey(String(req.params.publicKey));
       if (!profile) return res.status(404).json({ success: false, error: "No published assistant found." });
@@ -2673,13 +2802,13 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       if (!conversationId) return res.status(400).json({ success: false, error: "conversationId is required." });
 
       // The workspace comes from the published key, never from the request.
-      const r = handleBusinessTurn({ workspaceId: profile.workspace_id, conversationId, text });
+      const r = await handleBusinessTurn({ workspaceId: profile.workspace_id, conversationId, text });
       if ("error" in r) return res.status(400).json({ success: false, error: r.error });
 
       return res.json({
         success: true,
         conversationId: r.conversationId,
-        reply: { role: "assistant", content: r.reply.content, createdAt: r.reply.created_at },
+        reply: { role: "assistant", content: r.reply.content, createdAt: r.reply.created_at, messageId: r.reply.message_id },
         // The visitor is told how the answer was produced. Sources are titles
         // and paths from the business's own published material.
         responseMode: r.mode,
@@ -2696,6 +2825,79 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Could not process the message." });
+    }
+  });
+
+
+  /**
+   * Voice output for the public assistant.
+   *
+   * THE THING THAT MATTERS HERE: this route synthesizes a STORED ASSISTANT
+   * MESSAGE, addressed by id. It never synthesizes caller-supplied text.
+   *
+   * A public endpoint that speaks whatever text it is handed is a free
+   * text-to-speech API funded by the business's Fish Audio credit, and there is
+   * no rate limit generous enough to make that acceptable. Looking the message
+   * up means the only thing that can ever be spoken is something this server
+   * already decided to say.
+   *
+   * It reuses the one working Fish Audio path (lib/voice-credentials.ts); no
+   * second TTS integration exists.
+   */
+  app.post("/api/public/assistant/:publicKey/speak", rateLimit("EXPENSIVE_EXECUTION", byIp, "public-assistant-speak"), async (req, res) => {
+    try {
+      const profile = getProfileByPublicKey(String(req.params.publicKey));
+      if (!profile) return res.status(404).json({ success: false, error: "No published assistant found." });
+      if (!profile.voice_enabled) {
+        return res.status(409).json({ success: false, status: "DISABLED", error: "Voice replies are turned off for this assistant." });
+      }
+
+      const conversationId = String(req.body?.conversationId || "");
+      const messageId = String(req.body?.messageId || "");
+      if (!conversationId || !messageId) {
+        return res.status(400).json({ success: false, error: "conversationId and messageId are required." });
+      }
+
+      // Workspace comes from the published key; the message must belong to that
+      // workspace AND that conversation AND be one the assistant said.
+      const message = getBusinessMessages(profile.workspace_id, conversationId)
+        .find((m: any) => m.message_id === messageId && m.role === "assistant");
+      if (!message) {
+        return res.status(404).json({ success: false, error: "No such assistant message in this conversation." });
+      }
+
+      const spoken = String(message.content).slice(0, 1500);
+
+      // The ONE Fish Audio path, shared with the admin TTS route — including
+      // its free-tier retry and its "200 with no audio" guard.
+      const synth = await synthesizeFishAudio({
+        text: spoken,
+        // The business's own cloned voice when it has one; otherwise the
+        // platform default, which the owner surface states plainly rather than
+        // presenting as theirs.
+        referenceId: profile.voice_reference_id || undefined,
+      });
+
+      if (synth.ok !== true) {
+        // The provider's own error can carry account and billing detail, so it
+        // is logged for the operator and NEVER returned to the visitor.
+        console.error(`[Public assistant TTS] ${synth.reason}`, synth.providerStatus ?? "", synth.providerError ?? "");
+        const notConfigured = synth.reason === "API_KEY_NOT_CONFIGURED" || synth.reason === "REFERENCE_ID_NOT_CONFIGURED";
+        return res.status(notConfigured ? 503 : 502).json({
+          success: false,
+          status: notConfigured ? "NOT_CONFIGURED" : "DEGRADED",
+          error: notConfigured
+            ? "Spoken replies are not available right now."
+            : "The spoken reply could not be generated. The written answer above is unaffected.",
+        });
+      }
+
+      res.setHeader("Content-Type", synth.mimeType);
+      res.setHeader("Cache-Control", "no-store");
+      return res.send(synth.audio);
+    } catch (err: any) {
+      console.error("[Public assistant TTS] failed:", err?.message);
+      return res.status(502).json({ success: false, status: "DEGRADED", error: "The spoken reply could not be generated." });
     }
   });
 
@@ -2858,144 +3060,60 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       }
 
       if (provider === "fish_audio" || provider === "fishaudio" || !provider) {
-        const resolved = resolveFishConfig({
-          referenceId: voiceId || reference_id,
-          model: requestedModel,
+        // The ONE Fish Audio path (lib/voice-credentials.ts::synthesizeFishAudio),
+        // shared with the public business-assistant voice route. It owns the
+        // three things learned the hard way: `model` is an HTTP header and does
+        // nothing in the body; a 402 is API-credit exhaustion and is worth one
+        // retry on the documented free tier; and a 200 under 128 bytes is not
+        // audio. Keeping a second copy here is how those three drift apart.
+        const synth = await synthesizeFishAudio({
+          text,
+          referenceId: (voiceId || reference_id) as string | undefined,
+          model: requestedModel as string | undefined,
+          format,
+          latency,
+          speed: Number(speed) || 1.0,
         });
 
-        if (!resolved.apiKey) {
-          return res.status(503).json({
-            success: false,
-            status: "DEGRADED",
-            reason: "API_KEY_NOT_CONFIGURED",
-            provider: "fish_audio",
-            error:
-              "No Fish Audio API key is configured on the server. Save it in Settings → Voice (stored encrypted server-side) or set FISH_AUDIO_API_KEY in the environment.",
-            keySource: resolved.keySource,
-          });
-        }
+        if (synth.ok !== true) {
+          // This is the OPERATOR-facing route, so the provider's own message is
+          // returned: an operator debugging a silent voice needs the real cause.
+          // The public assistant route deliberately does the opposite.
+          console.error(`[Fish Audio TTS] ${synth.reason}`, synth.providerStatus ?? "", synth.providerError ?? "");
 
-        if (!resolved.referenceId) {
-          // A generic Fish default voice is NOT success for this product —
-          // the configured cloned voice is the whole point, so a missing
-          // reference_id is reported rather than quietly synthesized with
-          // whatever stock voice the provider picks.
-          return res.status(503).json({
-            success: false,
-            status: "DEGRADED",
-            reason: "REFERENCE_ID_NOT_CONFIGURED",
-            provider: "fish_audio",
-            error:
-              "No Fish Audio reference voice is configured. Save the cloned voice's reference_id in Settings → Voice.",
-          });
-        }
-
-        const effectiveFormat = format || process.env.FISH_AUDIO_AUDIO_FORMAT || "mp3";
-        const effectiveLatency = latency || process.env.FISH_AUDIO_LATENCY_MODE || "normal";
-
-        // `model` is an HTTP HEADER on POST /v1/tts, not a body field. Sending
-        // it in the body (as this route used to, on its retry path) silently
-        // does nothing.
-        const callFish = (fishModel: string) =>
-          fetch("https://api.fish.audio/v1/tts", {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${resolved.apiKey}`,
-              "Content-Type": "application/json",
-              model: fishModel,
-            },
-            body: JSON.stringify({
-              text: text,
-              reference_id: resolved.referenceId,
-              format: effectiveFormat,
-              latency: effectiveLatency,
-              prosody: {
-                speed: Number(speed) || 1.0,
-                volume: 0,
-              },
-            }),
-          });
-
-        let usedModel: string = resolved.model;
-        let response = await callFish(usedModel);
-
-        // Fish Audio meters API credit SEPARATELY from platform credit, so a
-        // live account with an active subscription still 402s here once the
-        // API balance runs out. The free tier is a real, documented model on
-        // the same endpoint and honours the same reference_id, so it is worth
-        // one automatic retry before declaring the voice unavailable.
-        if (response.status === 402 && usedModel !== FISH_AUDIO_FREE_MODEL) {
-          console.warn(
-            `[Fish Audio TTS] 402 on model ${usedModel} (API credit exhausted) — retrying on ${FISH_AUDIO_FREE_MODEL}.`
-          );
-          const retry = await callFish(FISH_AUDIO_FREE_MODEL);
-          if (retry.ok) {
-            usedModel = FISH_AUDIO_FREE_MODEL;
-            response = retry;
-          } else {
-            // Keep the ORIGINAL 402 as the reported cause — the free-tier
-            // failure is a consequence, not the diagnosis.
-            const retryText = sanitizeProviderError(await retry.text());
-            const originalText = sanitizeProviderError(await response.text());
-            console.error("[Fish Audio TTS Error]:", response.status, originalText, "| free-tier retry:", retry.status, retryText);
-            return res.status(502).json({
-              success: false,
-              status: "DEGRADED",
-              reason: "PROVIDER_INSUFFICIENT_CREDIT",
-              provider: "fish_audio",
-              providerStatus: response.status,
-              error: `Fish Audio API error (${response.status}): ${originalText}`,
-              freeTierRetry: { status: retry.status, error: retryText },
-              model: resolved.model,
-              referenceId: resolved.referenceId,
-              keySource: resolved.keySource,
+          if (synth.reason === "API_KEY_NOT_CONFIGURED") {
+            return res.status(503).json({
+              success: false, status: "DEGRADED", reason: "API_KEY_NOT_CONFIGURED", provider: "fish_audio",
+              error: "No Fish Audio API key is configured on the server. Save it in Settings → Voice (stored encrypted server-side) or set FISH_AUDIO_API_KEY in the environment.",
+              keySource: synth.keySource,
             });
           }
-        }
-
-        if (!response.ok) {
-          const errorText = sanitizeProviderError(await response.text());
-          console.error("[Fish Audio TTS Error]:", response.status, errorText);
+          if (synth.reason === "REFERENCE_ID_NOT_CONFIGURED") {
+            // A generic Fish default voice is NOT success for this product —
+            // the configured cloned voice is the whole point.
+            return res.status(503).json({
+              success: false, status: "DEGRADED", reason: "REFERENCE_ID_NOT_CONFIGURED", provider: "fish_audio",
+              error: "No Fish Audio reference voice is configured. Save the cloned voice's reference_id in Settings → Voice.",
+            });
+          }
           return res.status(502).json({
-            success: false,
-            status: "DEGRADED",
-            reason: response.status === 401 || response.status === 403 ? "PROVIDER_AUTH_REJECTED" : "MODEL_PROVIDER_UNAVAILABLE",
-            provider: "fish_audio",
-            providerStatus: response.status,
-            error: `Fish Audio API error (${response.status}): ${errorText}`,
-            model: usedModel,
-            referenceId: resolved.referenceId,
-            keySource: resolved.keySource,
+            success: false, status: "DEGRADED", reason: synth.reason, provider: "fish_audio",
+            providerStatus: synth.providerStatus,
+            error: `Fish Audio API error (${synth.providerStatus ?? "no status"}): ${synth.providerError ?? "no detail"}`,
+            model: synth.model, referenceId: synth.referenceId, keySource: synth.keySource,
           });
         }
 
-        const audioBuffer = await response.arrayBuffer();
-
-        // A 200 with no meaningful body is not audio. Catch it here rather
-        // than shipping an empty blob the player will silently fail on.
-        if (audioBuffer.byteLength < 128) {
-          return res.status(502).json({
-            success: false,
-            status: "DEGRADED",
-            reason: "EMPTY_AUDIO_RESPONSE",
-            provider: "fish_audio",
-            error: `Fish Audio returned ${audioBuffer.byteLength} bytes, which is not playable audio.`,
-            model: usedModel,
-            referenceId: resolved.referenceId,
-          });
-        }
-
-        const mimeType = effectiveFormat === "opus" ? "audio/ogg; codecs=opus" : effectiveFormat === "wav" ? "audio/wav" : "audio/mpeg";
-        res.setHeader("Content-Type", mimeType);
+        res.setHeader("Content-Type", synth.mimeType);
         res.setHeader("Cache-Control", "no-cache");
         // Non-secret provenance headers so the client can PROVE which provider,
         // voice and model actually produced the audio it is about to play —
         // rather than inferring "it must be Fish" from a 200.
         res.setHeader("X-Voice-Provider", "fish_audio");
-        res.setHeader("X-Voice-Model", usedModel);
-        res.setHeader("X-Voice-Reference-Id", resolved.referenceId);
-        res.setHeader("X-Voice-Key-Source", resolved.keySource);
-        return res.send(Buffer.from(audioBuffer));
+        res.setHeader("X-Voice-Model", synth.model);
+        res.setHeader("X-Voice-Reference-Id", synth.referenceId);
+        res.setHeader("X-Voice-Key-Source", synth.keySource);
+        return res.send(synth.audio);
       }
 
       if (provider === "openai") {
@@ -6359,21 +6477,62 @@ Rules for spokenSummary specifically:
     return res.send(ASSISTANT_SCRIPT);
   });
 
+  /**
+   * The embed loader a business puts on its own website.
+   *
+   * Public and uncredentialed by necessity — it is a <script src> on somebody
+   * else's page. It carries no business data at all: the assistant key comes
+   * from the host page's own tag, and everything the loader does is create a
+   * button and an iframe back to this origin. Authorization happens where it
+   * can actually be enforced — the frame-ancestors policy on the framed page
+   * below, which the browser applies using the real embedding origin.
+   */
+  app.get("/a/embed.js", (_req, res) => {
+    res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+    // Short: the loader is ~4KB and a business that changes its label or
+    // takes the assistant offline should not wait out a long cache.
+    res.setHeader("Cache-Control", "public, max-age=60");
+    // A loader that may be fetched by any site must not inherit the app-wide
+    // `frame-ancestors 'none'`-shaped assumptions; it is a script, not a page.
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    return res.send(EMBED_LOADER_SCRIPT);
+  });
+
   app.get("/a/:publicKey", rateLimit("GENERAL_API", byIp, "public-assistant-page"), (req, res) => {
     const profile = getProfileByPublicKey(String(req.params.publicKey));
     if (!profile) {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       return res.status(404).send("<!doctype html><meta charset=utf-8><title>Not found</title><body style=\"font:15px system-ui;padding:40px\"><p>No published assistant at this address.</p>");
     }
+
+    // THE ONLY PLACE IN SYNTHOS WHERE FRAMING IS PERMITTED.
+    //
+    // The app-wide policy is `frame-ancestors 'none'` plus `X-Frame-Options:
+    // DENY`, and both are correct for every other route. Here they are
+    // replaced — not loosened globally — with a policy built from this one
+    // business's validated allowlist. X-Frame-Options must be REMOVED rather
+    // than left in place: it has no multi-origin form, so leaving DENY would
+    // silently override frame-ancestors in browsers that honour both.
+    //
+    // With no authorized origins the policy is still 'none': the standalone
+    // page keeps working and nobody may embed it.
+    res.setHeader("Content-Security-Policy", assistantPageCsp(profile.allowed_origins));
+    res.removeHeader("X-Frame-Options");
+    // Microphone must be delegable to this document for voice input to work
+    // inside a frame; the host page still has to grant it via allow=.
+    res.setHeader("Permissions-Policy", "microphone=(self), camera=(), geolocation=()");
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     // This page is a customer-facing surface of someone else's business; it
     // carries no SynthOS identity and should not be indexed.
     res.setHeader("X-Robots-Tag", "noindex");
+
     return res.send(renderAssistantPage({
       publicKey: profile.public_key!,
       businessName: profile.business_name,
       assistantName: profile.assistant_name,
       aiDisclosure: profile.ai_disclosure,
+      voiceEnabled: profile.voice_enabled,
+      embedded: String(req.query.embed || "") === "1",
     }));
   });
 
