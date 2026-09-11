@@ -61,7 +61,7 @@ import { tonGuardianViews, installTonGuardians } from "./lib/ton-guardians";
 import { listWorkspaceVaultEntries, getWorkspaceVaultEntry, previewWorkspaceVaultEntry, writeWorkspaceArtifact } from "./lib/vault";
 import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory, listWorkspaceMemory } from "./lib/memory-index";
 import { runAeoAudit, createAuditMissionTasks, resolveGeoProvider } from "./lib/aeo/service";
-import { listCapabilities } from "./lib/fabric/registry";
+import { listCapabilities, conversationModelConfigured } from "./lib/fabric/registry";
 import { GRAPH_EXECUTABLE_CAPABILITIES } from "./lib/graph-execution";
 import { estimateGraphExecution, selectLiveExecutionNodes } from "./lib/graph-execution";
 import { listWorkspaceSkills, getWorkspaceSkill, createSkill, updateSkill, testSkill, discoverRepoSkillFiles, isValidMcpEndpointRef, classifySkillExecutability, getRawCredentialCiphertext, ExecutionTargetType } from "./lib/skills";
@@ -97,6 +97,22 @@ import {
   updateMembershipRole, listUserMembershipsWithWorkspaceNames, listWorkspaceMembersWithUserInfo,
   getWorkspaceActivityCounts,
 } from "./lib/workspaces";
+import {
+  getProfile as getBusinessProfile,
+  saveProfile as saveBusinessProfile,
+  getProfileByPublicKey,
+  setPublished as setConversationPublished,
+  listConversations as listBusinessConversations,
+  getConversation as getBusinessConversation,
+  getMessages as getBusinessMessages,
+} from "./lib/conversation/engine";
+import {
+  startConversation as startBusinessConversation,
+  handleTurn as handleBusinessTurn,
+  summarizeConversation as summarizeBusinessConversation,
+  addBusinessKnowledge,
+} from "./lib/conversation/service";
+import { renderAssistantPage, ASSISTANT_SCRIPT } from "./lib/conversation/public-page";
 import { requireAuth, requireWorkspaceMember, requireWorkspaceAdmin, requirePlatformAdmin, requireSameOrigin, getRequestUser, fromBody, fromQuery, fromBodyOrQuery, AuthedRequest } from "./lib/authorization";
 import { recordAdminAuditEvent, listRecentAdminAuditEvents } from "./lib/audit";
 import { executeAgentTask, buildAgentRolePrompt } from "./lib/fabric/kernel";
@@ -2403,6 +2419,283 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       return res.json({ success: true, workspaceId, created, count: created.length });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to create mission tasks" });
+    }
+  });
+
+
+  // =========================================================================
+  // BUSINESS CONVERSATION AI
+  //
+  // Two distinct surfaces with deliberately different authorisation:
+  //
+  //   /api/business/*  — the OWNER's surface. Workspace-member guarded, reads
+  //                      and writes the profile, reads conversations.
+  //   /a/:publicKey    — the CUSTOMER's surface. Anonymous. The visitor never
+  //                      names a workspace; the unguessable published key is
+  //                      the only thing that resolves one, and an unpublished
+  //                      assistant resolves to nothing at all.
+  //
+  // The customer surface can therefore never be pointed at a workspace it was
+  // not published for, and never reaches an owner-side route.
+  // =========================================================================
+
+  app.get("/api/business/profile", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const profile = getBusinessProfile(workspaceId);
+      const modelConfigured = conversationModelConfigured();
+      return res.json({
+        success: true, workspaceId, profile,
+        // Stated, not implied: with no model configured the assistant answers
+        // by extraction from indexed material or refuses. The owner needs to
+        // know that before putting it in front of customers.
+        answering: modelConfigured
+          ? { mode: "LLM", detail: "An approved model is configured; replies are phrased over retrieved workspace material." }
+          : { mode: "GROUNDED_EXTRACTIVE", detail: "NO_MODEL_CONFIGURED — replies quote your own indexed material directly, or say they don't know. Nothing is generated." },
+        publicUrl: profile?.public_key && profile.published ? `/a/${profile.public_key}` : null,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to read profile" });
+    }
+  });
+
+  app.post("/api/business/profile", requireWorkspaceMember(fromBody), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const b = req.body || {};
+      const str = (v: unknown, max = 2000) => (typeof v === "string" ? v.slice(0, max) : undefined);
+      const arr = (v: unknown) => (Array.isArray(v) ? v.filter((x) => typeof x === "string").slice(0, 50).map((x: string) => x.slice(0, 200)) : undefined);
+      if (!str(b.businessName) && !getBusinessProfile(workspaceId)) {
+        return res.status(400).json({ success: false, error: "businessName is required." });
+      }
+      const saved = saveBusinessProfile({
+        workspace_id: workspaceId,
+        business_name: str(b.businessName, 200),
+        assistant_name: str(b.assistantName, 80),
+        business_description: str(b.businessDescription, 4000),
+        services: arr(b.services),
+        locations: arr(b.locations),
+        hours: str(b.hours, 400),
+        contact: b.contact && typeof b.contact === "object" && !Array.isArray(b.contact) ? b.contact : undefined,
+        brand_voice: str(b.brandVoice, 400),
+        greeting: str(b.greeting, 600),
+        ai_disclosure: str(b.aiDisclosure, 600),
+        qualification_goals: arr(b.qualificationGoals),
+        handoff_rules: str(b.handoffRules, 2000),
+        escalation_contacts: arr(b.escalationContacts),
+        enabled_capabilities: arr(b.enabledCapabilities),
+        allowed_actions: arr(b.allowedActions),
+      } as any);
+      return res.json({ success: true, workspaceId, profile: saved });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to save profile" });
+    }
+  });
+
+  /** Publish / unpublish the public assistant. Unpublishing really takes it off the air. */
+  app.post("/api/business/publish", requireWorkspaceMember(fromBody), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      if (!getBusinessProfile(workspaceId)) {
+        return res.status(400).json({ success: false, error: "Configure the assistant profile before publishing it." });
+      }
+      const published = req.body?.published !== false;
+      const r = setConversationPublished(workspaceId, published);
+      return res.json({
+        success: true, workspaceId, published: r.published,
+        publicKey: r.publicKey,
+        publicUrl: r.published && r.publicKey ? `/a/${r.publicKey}` : null,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to change publication state" });
+    }
+  });
+
+  /** Add a business knowledge document. One artifact path, one index — no second store. */
+  app.post("/api/business/knowledge", requireWorkspaceMember(fromBody), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const r = addBusinessKnowledge({
+        workspaceId,
+        title: String(req.body?.title || ""),
+        content: String(req.body?.content || ""),
+      });
+      if ("error" in r) return res.status(400).json({ success: false, error: r.error });
+      return res.json({ success: true, workspaceId, ...r });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to add knowledge" });
+    }
+  });
+
+  app.get("/api/business/conversations", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const rows = listBusinessConversations(workspaceId, 200);
+      return res.json({
+        success: true, workspaceId, count: rows.length,
+        conversations: rows.map((c: any) => ({
+          conversationId: c.conversation_id, channel: c.channel, status: c.status,
+          lead: (() => { try { return JSON.parse(c.lead_json || "{}"); } catch { return {}; } })(),
+          summaryArtifactId: c.summary_artifact_id,
+          createdAt: c.created_at, updatedAt: c.updated_at,
+        })),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list conversations" });
+    }
+  });
+
+  app.get("/api/business/conversations/:conversationId", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const conv = getBusinessConversation(workspaceId, String(req.params.conversationId));
+      if (!conv) return res.status(404).json({ success: false, error: "Conversation not found in this workspace." });
+      return res.json({
+        success: true, workspaceId,
+        conversation: {
+          conversationId: conv.conversation_id, channel: conv.channel, status: conv.status,
+          lead: (() => { try { return JSON.parse(conv.lead_json || "{}"); } catch { return {}; } })(),
+          summaryArtifactId: conv.summary_artifact_id, createdAt: conv.created_at, updatedAt: conv.updated_at,
+        },
+        messages: getBusinessMessages(workspaceId, String(req.params.conversationId)),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to read conversation" });
+    }
+  });
+
+  /** Write the deterministic summary artifact onto the canonical spine. */
+  app.post("/api/business/conversations/:conversationId/summary", requireWorkspaceMember(fromBody), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const r = summarizeBusinessConversation(workspaceId, String(req.params.conversationId));
+      if ("error" in r) return res.status(404).json({ success: false, error: r.error });
+      return res.json({ success: true, workspaceId, ...r });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to summarize conversation" });
+    }
+  });
+
+  /**
+   * Real-only analytics. Every number below is a count of rows that exist.
+   * There is no conversion rate, no lead score, no "revenue influenced" — none
+   * of those have a data source on this install, and inventing them is exactly
+   * the failure this product is meant not to have.
+   */
+  app.get("/api/business/analytics", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const convs = listBusinessConversations(workspaceId, 1000);
+      let grounded = 0, noKnowledge = 0, llm = 0, assistantTurns = 0;
+      const unanswered: string[] = [];
+      for (const c of convs) {
+        const msgs = getBusinessMessages(workspaceId, c.conversation_id);
+        for (let i = 0; i < msgs.length; i++) {
+          const m = msgs[i];
+          if (m.role !== "assistant") continue;
+          assistantTurns++;
+          if (m.response_mode === "GROUNDED_EXTRACTIVE") grounded++;
+          else if (m.response_mode === "LLM") llm++;
+          else if (m.response_mode === "NO_KNOWLEDGE") {
+            noKnowledge++;
+            const q = [...msgs.slice(0, i)].reverse().find((x: any) => x.role === "customer");
+            if (q && unanswered.length < 50) unanswered.push(q.content.slice(0, 200));
+          }
+        }
+      }
+      return res.json({
+        success: true, workspaceId,
+        conversations: {
+          total: convs.length,
+          active: convs.filter((c: any) => c.status === "ACTIVE").length,
+          handoffRequested: convs.filter((c: any) => c.status === "HANDOFF_REQUESTED").length,
+          closed: convs.filter((c: any) => c.status === "CLOSED").length,
+        },
+        answering: { assistantTurns, grounded, llm, noKnowledge },
+        knowledgeGaps: unanswered,
+        // Named absences, so nobody reads a missing metric as a zero.
+        appointmentsBooked: "NOT_IMPLEMENTED",
+        callsHandled: "NOT_CONFIGURED",
+        smsHandled: "NOT_CONFIGURED",
+        revenueInfluenced: "UNKNOWN",
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to compute analytics" });
+    }
+  });
+
+  // ---- public customer surface -------------------------------------------
+  // Anonymous. Rate-limited by IP. Never accepts a workspaceId.
+
+  app.get("/api/public/assistant/:publicKey", rateLimit("GENERAL_API", byIp, "public-assistant"), (req, res) => {
+    const profile = getProfileByPublicKey(String(req.params.publicKey));
+    if (!profile) return res.status(404).json({ success: false, error: "No published assistant found." });
+    // Only what a visitor may see. Never the qualification goals, handoff
+    // rules, escalation contacts, enabled capabilities or workspace id —
+    // those are the business's internal configuration.
+    return res.json({
+      success: true,
+      assistant: {
+        businessName: profile.business_name,
+        assistantName: profile.assistant_name,
+        greeting: profile.greeting,
+        aiDisclosure: profile.ai_disclosure,
+        services: profile.services,
+        locations: profile.locations,
+        hours: profile.hours,
+      },
+    });
+  });
+
+  app.post("/api/public/assistant/:publicKey/session", rateLimit("GENERAL_API", byIp, "public-assistant-session"), (req, res) => {
+    try {
+      const profile = getProfileByPublicKey(String(req.params.publicKey));
+      if (!profile) return res.status(404).json({ success: false, error: "No published assistant found." });
+      const started = startBusinessConversation({ workspaceId: profile.workspace_id, channel: "WEB" });
+      if (!started) return res.status(500).json({ success: false, error: "Could not start a conversation." });
+      return res.json({
+        success: true,
+        conversationId: started.conversationId,
+        disclosure: started.disclosure,
+        greeting: { role: "assistant", content: started.greeting.content, createdAt: started.greeting.created_at },
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Could not start a conversation." });
+    }
+  });
+
+  app.post("/api/public/assistant/:publicKey/message", rateLimit("EXPENSIVE_EXECUTION", byIp, "public-assistant-message"), (req, res) => {
+    try {
+      const profile = getProfileByPublicKey(String(req.params.publicKey));
+      if (!profile) return res.status(404).json({ success: false, error: "No published assistant found." });
+      const conversationId = String(req.body?.conversationId || "");
+      const text = String(req.body?.text || "");
+      if (!conversationId) return res.status(400).json({ success: false, error: "conversationId is required." });
+
+      // The workspace comes from the published key, never from the request.
+      const r = handleBusinessTurn({ workspaceId: profile.workspace_id, conversationId, text });
+      if ("error" in r) return res.status(400).json({ success: false, error: r.error });
+
+      return res.json({
+        success: true,
+        conversationId: r.conversationId,
+        reply: { role: "assistant", content: r.reply.content, createdAt: r.reply.created_at },
+        // The visitor is told how the answer was produced. Sources are titles
+        // and paths from the business's own published material.
+        responseMode: r.mode,
+        sources: r.reply.sources.map((s: any) => ({ title: s.title })),
+        // Truthful outcome reporting: FOLLOW_UP_REQUEST is never dressed up as
+        // a booking, and the internal task id stays internal.
+        action: r.action.kind,
+        actionDetail:
+          r.action.kind === "FOLLOW_UP_REQUEST"
+            ? "A follow-up request was created. Nothing has been booked — a person will confirm."
+            : r.action.kind === "HUMAN_HANDOFF"
+            ? "A person has been asked to take over this conversation."
+            : null,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Could not process the message." });
     }
   });
 
@@ -6052,6 +6345,36 @@ Rules for spokenSummary specifically:
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to stage restore" });
     }
+  });
+
+
+  // ---- the public assistant page ------------------------------------------
+  // Served by this same process, so dev and production behave identically and
+  // there is no second deployment target to keep in sync. Registered ahead of
+  // the SPA/Vite fallback so /a/* never resolves to the Admin bundle.
+
+  app.get("/a/assistant.js", (_req, res) => {
+    res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache");
+    return res.send(ASSISTANT_SCRIPT);
+  });
+
+  app.get("/a/:publicKey", rateLimit("GENERAL_API", byIp, "public-assistant-page"), (req, res) => {
+    const profile = getProfileByPublicKey(String(req.params.publicKey));
+    if (!profile) {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.status(404).send("<!doctype html><meta charset=utf-8><title>Not found</title><body style=\"font:15px system-ui;padding:40px\"><p>No published assistant at this address.</p>");
+    }
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    // This page is a customer-facing surface of someone else's business; it
+    // carries no SynthOS identity and should not be indexed.
+    res.setHeader("X-Robots-Tag", "noindex");
+    return res.send(renderAssistantPage({
+      publicKey: profile.public_key!,
+      businessName: profile.business_name,
+      assistantName: profile.assistant_name,
+      aiDisclosure: profile.ai_disclosure,
+    }));
   });
 
   if (process.env.NODE_ENV !== "production") {
