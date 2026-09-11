@@ -44,6 +44,19 @@ function ttsRouteSlice(): string {
   return serverContent.slice(idx, next === -1 ? undefined : next);
 }
 
+/**
+ * The Fish Audio request itself now lives in ONE function shared by the admin
+ * TTS route and the public business-assistant voice route — a second call site
+ * appeared and copying the request would have meant two places to keep the
+ * `model`-is-a-header rule, the 402 free-tier retry and the empty-audio guard
+ * correct. These assertions follow the logic; none of them was relaxed.
+ */
+function fishSynthesisSlice(): string {
+  const idx = voiceCredentialsContent.indexOf('export async function synthesizeFishAudio');
+  expect(idx).toBeGreaterThan(-1);
+  return voiceCredentialsContent.slice(idx);
+}
+
 describe('1: the reference voice reaches the Fish Audio request body', () => {
   it('the resolver returns a reference_id and names where it came from', () => {
     expect(voiceCredentialsContent).toContain('export function resolveFishConfig');
@@ -54,17 +67,20 @@ describe('1: the reference voice reaches the Fish Audio request body', () => {
   });
 
   it('the Fish request body carries reference_id from the resolved config', () => {
-    const slice = ttsRouteSlice();
+    const slice = fishSynthesisSlice();
     expect(slice).toContain('https://api.fish.audio/v1/tts');
     expect(slice).toContain('reference_id: resolved.referenceId');
+    // And the route reaches the provider only through that one function.
+    expect(ttsRouteSlice()).toContain('await synthesizeFishAudio({');
+    expect(ttsRouteSlice()).not.toContain('https://api.fish.audio/v1/tts');
   });
 
   it('a MISSING reference voice is refused, never silently synthesized with a stock voice', () => {
     // "A generic Fish default voice does NOT count as success" — the point of
     // the product is the configured cloned voice.
-    const slice = ttsRouteSlice();
-    expect(slice).toContain('REFERENCE_ID_NOT_CONFIGURED');
-    expect(slice).toContain('if (!resolved.referenceId)');
+    expect(fishSynthesisSlice()).toContain('if (!resolved.referenceId)');
+    expect(fishSynthesisSlice()).toContain('REFERENCE_ID_NOT_CONFIGURED');
+    expect(ttsRouteSlice()).toContain('REFERENCE_ID_NOT_CONFIGURED');
   });
 
   it('Jarvis passes its configured voice id into the canonical engine', () => {
@@ -75,7 +91,7 @@ describe('1: the reference voice reaches the Fish Audio request body', () => {
 
 describe('2: model selection matches the current Fish Audio contract', () => {
   it('model is sent as an HTTP HEADER, which is where /v1/tts reads it', () => {
-    const slice = ttsRouteSlice();
+    const slice = fishSynthesisSlice();
     // The header form. Body-level `model` is ignored by this endpoint.
     const headersIdx = slice.indexOf('headers: {');
     expect(headersIdx).toBeGreaterThan(-1);
@@ -96,11 +112,22 @@ describe('2: model selection matches the current Fish Audio contract', () => {
   });
 
   it('a 402 (API credit exhausted) retries once on the documented free tier', () => {
-    const slice = ttsRouteSlice();
+    const slice = fishSynthesisSlice();
     expect(slice).toContain('response.status === 402');
     expect(slice).toContain('FISH_AUDIO_FREE_MODEL');
     // The original 402 stays the reported cause, not the retry's error.
     expect(slice).toContain('PROVIDER_INSUFFICIENT_CREDIT');
+  });
+
+  it('the public assistant route shares that same path rather than repeating it', () => {
+    const i = serverContent.indexOf('app.post("/api/public/assistant/:publicKey/speak"');
+    expect(i).toBeGreaterThan(-1);
+    const slice = serverContent.slice(i, i + 3000);
+    expect(slice).toContain('await synthesizeFishAudio({');
+    expect(slice).not.toContain('https://api.fish.audio');
+    // Exactly one place in the entire codebase performs the synthesis call.
+    expect((serverContent.match(/fetch\(["']https:\/\/api\.fish\.audio/g) || []).length).toBe(0);
+    expect((voiceCredentialsContent.match(/fetch\(["']https:\/\/api\.fish\.audio/g) || []).length).toBe(1);
   });
 });
 
@@ -115,8 +142,8 @@ describe('3: a failure is never HTTP 200 — the bug that made JSON play as audi
 
   it('an empty/short provider body is refused rather than sent as audio', () => {
     const slice = ttsRouteSlice();
-    expect(slice).toContain('EMPTY_AUDIO_RESPONSE');
-    expect(slice).toContain('audioBuffer.byteLength < 128');
+    expect(fishSynthesisSlice()).toContain('EMPTY_AUDIO_RESPONSE');
+    expect(fishSynthesisSlice()).toContain('buf.byteLength < 128');
   });
 
   it('the client no longer treats "status === 200" as proof of audio', () => {
@@ -142,9 +169,15 @@ describe('4: the browser never holds or sends the Fish Audio secret', () => {
   });
 
   it('the TTS route resolves the credential server-side and ignores any client-sent key', () => {
-    const slice = ttsRouteSlice();
-    expect(slice).toContain('resolveFishConfig');
-    expect(slice).not.toContain('clientKey');
+    // The credential is resolved inside the shared synthesis function, which
+    // the route reaches only by calling it — so the route has no opportunity
+    // to substitute a caller-supplied key even by accident.
+    expect(fishSynthesisSlice()).toContain('resolveFishConfig({');
+    expect(ttsRouteSlice()).toContain('await synthesizeFishAudio({');
+    for (const slice of [ttsRouteSlice(), fishSynthesisSlice()]) {
+      expect(slice).not.toContain('clientKey');
+      expect(slice).not.toContain('req.body.apiKey');
+    }
   });
 
   it('there is no direct browser -> api.fish.audio synthesis call any more', () => {
@@ -290,9 +323,23 @@ describe('7: provider errors are surfaced, but sanitized', () => {
   });
 
   it('the real provider failure is reported rather than collapsed into a generic message', () => {
-    const slice = ttsRouteSlice();
-    expect(slice).toContain('providerStatus');
-    expect(slice).toContain('PROVIDER_AUTH_REJECTED');
-    expect(slice).toContain('sanitizeProviderError');
+    // The operator-facing route still surfaces the provider's own cause.
+    const route = ttsRouteSlice();
+    expect(route).toContain('providerStatus');
+    expect(route).toContain('synth.providerError');
+    const shared = fishSynthesisSlice();
+    expect(shared).toContain('PROVIDER_AUTH_REJECTED');
+    expect(shared).toContain('sanitizeProviderError');
+  });
+
+  it('the PUBLIC assistant route does the opposite and never leaks the provider message', () => {
+    // A visitor on someone else's website must not learn that a business's
+    // Fish Audio balance ran out, or which credential is missing.
+    const i = serverContent.indexOf('app.post("/api/public/assistant/:publicKey/speak"');
+    const slice = serverContent.slice(i, i + 3000);
+    expect(slice).toContain('console.error');
+    expect(slice).toContain('The spoken reply could not be generated');
+    expect(slice).not.toContain('error: `Fish Audio API error');
+    expect(slice).not.toContain('providerStatus: synth.providerStatus');
   });
 });

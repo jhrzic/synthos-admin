@@ -208,6 +208,7 @@ describe('Pass III API security: the explicit public allowlist (E2) — never ac
       '/api/public/assistant/:publicKey',
       '/api/public/assistant/:publicKey/session',
       '/api/public/assistant/:publicKey/message',
+      '/api/public/assistant/:publicKey/speak',
       '/a/:publicKey',
     ]) {
       const line = routeLine(route);
@@ -245,8 +246,10 @@ describe('Pass III API security: the explicit public allowlist (E2) — never ac
       '/api/public/assistant/:publicKey',
       '/api/public/assistant/:publicKey/session',
       '/api/public/assistant/:publicKey/message',
+      '/api/public/assistant/:publicKey/speak',
       '/a/:publicKey',
       '/a/assistant.js', // static page script, no data of its own
+      '/a/embed.js', // embed loader: a <script src> on someone else's site, carries no business data
       '*', // SPA shell fallback — no data of its own
     ]);
     const unguardedUnexpected: string[] = [];
