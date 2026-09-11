@@ -34,6 +34,7 @@
 import crypto from 'node:crypto';
 import { getDatabase } from '../persistence';
 import { searchWorkspaceMemoryScoped, type ScopedMemoryResult } from '../memory-index';
+import { normalizeOrigin } from './origins';
 
 export type Channel = 'WEB' | 'MOBILE_APP' | 'VOICE_CALL' | 'SMS' | 'WHATSAPP';
 export type ConversationStatus = 'ACTIVE' | 'HANDOFF_REQUESTED' | 'CLOSED';
@@ -61,6 +62,9 @@ export interface BusinessProfile {
   business_line_id: string | null;
   public_key: string | null;
   published: boolean;
+  allowed_origins: string[];
+  voice_reference_id: string | null;
+  voice_enabled: boolean;
 }
 
 export interface ConversationMessage {
@@ -112,6 +116,9 @@ export function getProfile(workspaceId: string): BusinessProfile | null {
     escalation_contacts: j(row.escalation_contacts_json, []),
     bot_mode_profile: row.bot_mode_profile, business_line_id: row.business_line_id,
     public_key: row.public_key ?? null, published: Boolean(row.published),
+    allowed_origins: j(row.allowed_origins_json ?? '[]', []),
+    voice_reference_id: row.voice_reference_id ?? null,
+    voice_enabled: row.voice_enabled === undefined ? true : Boolean(row.voice_enabled),
   };
 }
 
@@ -158,8 +165,9 @@ export function saveProfile(p: Partial<BusinessProfile> & { workspace_id: string
       (profile_id, workspace_id, business_name, assistant_name, business_description, services_json,
        locations_json, hours, contact_json, brand_voice, greeting, ai_disclosure, qualification_goals_json,
        handoff_rules, memory_permissions, enabled_capabilities_json, allowed_actions_json,
-       escalation_contacts_json, voice_profile, bot_mode_profile, business_line_id, created_at, updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       escalation_contacts_json, voice_profile, bot_mode_profile, business_line_id,
+       voice_reference_id, voice_enabled, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(profile_id) DO UPDATE SET
       business_name=excluded.business_name, assistant_name=excluded.assistant_name,
       business_description=excluded.business_description, services_json=excluded.services_json,
@@ -170,6 +178,7 @@ export function saveProfile(p: Partial<BusinessProfile> & { workspace_id: string
       allowed_actions_json=excluded.allowed_actions_json,
       escalation_contacts_json=excluded.escalation_contacts_json,
       bot_mode_profile=excluded.bot_mode_profile, business_line_id=excluded.business_line_id,
+      voice_reference_id=excluded.voice_reference_id, voice_enabled=excluded.voice_enabled,
       updated_at=excluded.updated_at
   `).run(
     id, p.workspace_id, merged.business_name || 'Unnamed Business',
@@ -182,10 +191,115 @@ export function saveProfile(p: Partial<BusinessProfile> & { workspace_id: string
     'workspace_only', JSON.stringify(merged.enabled_capabilities || []),
     JSON.stringify(merged.allowed_actions || []), JSON.stringify(merged.escalation_contacts || []),
     null, merged.bot_mode_profile ?? null, merged.business_line_id ?? null,
+    merged.voice_reference_id ?? null, merged.voice_enabled === false ? 0 : 1,
     existing ? (getDatabase().prepare('SELECT created_at FROM business_assistant_profiles WHERE profile_id=?').get(id) as any)?.created_at || now : now,
     now
   );
   return getProfile(p.workspace_id)!;
+}
+
+// ---------------------------------------------------------------------------
+// Authorized embed origins
+// ---------------------------------------------------------------------------
+
+/**
+ * Replace the set of websites allowed to embed this assistant.
+ *
+ * Every entry is validated and canonicalized before it is stored, so nothing
+ * unvalidated can ever reach a Content-Security-Policy header. Invalid entries
+ * are returned to the caller with the reason rather than silently dropped — a
+ * business that typos its own domain must be told, not left with an assistant
+ * that mysteriously refuses to load.
+ */
+export function setAllowedOrigins(workspaceId: string, origins: unknown[]): {
+  accepted: string[];
+  rejected: { value: string; reason: string }[];
+} {
+  const profile = getProfile(workspaceId);
+  if (!profile) return { accepted: [], rejected: [] };
+
+  const accepted: string[] = [];
+  const rejected: { value: string; reason: string }[] = [];
+  for (const raw of (origins || []).slice(0, 50)) {
+    const v = normalizeOrigin(raw);
+    if (v.ok && v.origin) {
+      if (!accepted.includes(v.origin)) accepted.push(v.origin);
+    } else {
+      rejected.push({ value: String(raw).slice(0, 120), reason: v.reason || 'Invalid.' });
+    }
+  }
+
+  getDatabase()
+    .prepare('UPDATE business_assistant_profiles SET allowed_origins_json = ?, updated_at = ? WHERE profile_id = ?')
+    .run(JSON.stringify(accepted), new Date().toISOString(), profile.profile_id);
+  return { accepted, rejected };
+}
+
+// ---------------------------------------------------------------------------
+// Unanswered questions — the commercial feedback loop
+// ---------------------------------------------------------------------------
+
+/**
+ * Record a question the business's published material could not answer.
+ *
+ * This is the single most commercially useful by-product of the whole system:
+ * every row is a real customer asking something the business's website is
+ * silent on. It is recorded, never acted on automatically — the assistant does
+ * not learn a fact because a customer asked about it.
+ */
+export function recordUnansweredQuestion(params: {
+  workspaceId: string; conversationId: string; question: string; channel: string;
+}): void {
+  const question = String(params.question || '').trim().slice(0, 500);
+  if (question.length < 3) return;
+  const db = getDatabase();
+  const now = new Date().toISOString();
+
+  // Collapse the identical question asked repeatedly into one open row rather
+  // than manufacturing a queue of duplicates the owner has to wade through.
+  const existing = db
+    .prepare("SELECT question_id FROM business_unanswered_questions WHERE workspace_id = ? AND question = ? AND status = 'OPEN'")
+    .get(params.workspaceId, question) as { question_id?: string } | undefined;
+  if (existing?.question_id) {
+    db.prepare('UPDATE business_unanswered_questions SET updated_at = ? WHERE question_id = ?').run(now, existing.question_id);
+    return;
+  }
+
+  db.prepare(`
+    INSERT INTO business_unanswered_questions
+      (question_id, workspace_id, conversation_id, question, channel, status, created_at, updated_at)
+    VALUES (?,?,?,?,?,'OPEN',?,?)
+  `).run(
+    `uq-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    params.workspaceId, params.conversationId, question, params.channel, now, now
+  );
+}
+
+export interface UnansweredQuestion {
+  question_id: string; conversation_id: string; question: string; channel: string;
+  status: 'OPEN' | 'ANSWERED' | 'DISMISSED'; answered_artifact_id: string | null;
+  created_at: string; updated_at: string;
+}
+
+export function listUnansweredQuestions(workspaceId: string, status = 'OPEN', limit = 100): UnansweredQuestion[] {
+  return getDatabase()
+    .prepare(`SELECT question_id, conversation_id, question, channel, status, answered_artifact_id, created_at, updated_at
+              FROM business_unanswered_questions
+              WHERE workspace_id = ? AND status = ? ORDER BY updated_at DESC LIMIT ?`)
+    .all(workspaceId, status, Math.min(Math.max(limit, 1), 200)) as UnansweredQuestion[];
+}
+
+export function resolveUnansweredQuestion(params: {
+  workspaceId: string; questionId: string; status: 'ANSWERED' | 'DISMISSED';
+  artifactId?: string; userId?: string;
+}): boolean {
+  const r = getDatabase()
+    .prepare(`UPDATE business_unanswered_questions
+              SET status = ?, answered_artifact_id = ?, answered_by_user_id = ?, updated_at = ?
+              WHERE question_id = ? AND workspace_id = ?`)
+    .run(params.status, params.artifactId ?? null, params.userId ?? null,
+         new Date().toISOString(), params.questionId, params.workspaceId);
+  return Number((r as any).changes || 0) > 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -514,9 +628,33 @@ function isIdentityQuestion(lowerText: string, businessName: string): boolean {
   return name.length > 2 && (lowerText.includes(`what is ${name}`) || lowerText.includes(`what does ${name}`));
 }
 
+/**
+ * Topics the business's PUBLISHED MATERIAL must answer, never the profile's
+ * generic fields.
+ *
+ * This exists because of a real wrong answer: "what guarantee do you offer?"
+ * was answered with the list of services, because the services matcher fires
+ * on the bare word "offer". The reply was fluent, confident, and about
+ * something the customer had not asked — the same failure shape as answering
+ * "what is your refund policy?" with the company description.
+ *
+ * A question naming one of these wins over every generic profile answer. If
+ * the business has published nothing about it, the honest outcome is
+ * NO_KNOWLEDGE — not a different question's answer delivered with confidence.
+ */
+const SPECIFIC_TOPIC = /\b(guarantee|guaranteed|warranty|refund|deposit|cancel|cancellation|policy|insurance|licen[cs]ed|accredit|price|pricing|cost|costs|quote|fee|fees|rate|rates|discount|payment|finance|financing|how long|timeline|lead time|turnaround|emergency|complaint|process|qualification|experience)\b/;
+
+function asksSpecificTopic(lowerText: string): boolean {
+  return SPECIFIC_TOPIC.test(lowerText);
+}
+
 /** Does the profile itself answer this, without touching the knowledge base? */
 function answerFromProfile(p: BusinessProfile, text: string): string | null {
   const t = text.toLowerCase();
+  // A question about a specific published topic is never answered from the
+  // profile's generic fields. Retrieval owns it, or nobody does.
+  if (asksSpecificTopic(t)) return null;
+
   if (/\b(service|services|offer|do you do|provide|products?)\b/.test(t) && p.services.length) {
     return `${p.business_name} offers: ${p.services.join(', ')}.`;
   }
@@ -538,8 +676,16 @@ function answerFromProfile(p: BusinessProfile, text: string): string | null {
   if (isIdentityQuestion(t, p.business_name) && p.business_description) {
     return p.business_description;
   }
-
   return null;
+}
+
+/**
+ * Exported so the LLM path takes the same shortcut the extractive path takes:
+ * a question the business's own declared profile answers needs no model and no
+ * retrieval, and should spend neither.
+ */
+export function answerFromProfileOnly(p: BusinessProfile, text: string): string | null {
+  return answerFromProfile(p, text);
 }
 
 export interface AnswerResult {
@@ -565,19 +711,33 @@ function dontKnow(profile: BusinessProfile, topic?: string): AnswerResult {
  * authoritative, no retrieval needed), then its published knowledge, then an
  * explicit refusal. There is no fourth branch that guesses.
  */
+/**
+ * The evidence set for a question: the approved passages, and nothing else.
+ *
+ * Both answering modes call this. That is the point — LLM mode does not get a
+ * wider view of the workspace than extractive mode, it gets the identical
+ * evidence and only phrases it differently.
+ */
+export function gatherEvidence(workspaceId: string, text: string): {
+  hit: ScopedMemoryResult; passage: string; score: number;
+}[] {
+  const hits = retrieveBusinessContext(workspaceId, text, 4);
+  const scored: { hit: ScopedMemoryResult; passage: string; score: number }[] = [];
+  for (const h of hits) {
+    const p = bestPassage(h.content, text);
+    if (p) scored.push({ hit: h, passage: p.text, score: p.score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored;
+}
+
 export function answerQuestion(profile: BusinessProfile, workspaceId: string, text: string): AnswerResult {
   const direct = answerFromProfile(profile, text);
   if (direct) return { content: direct, mode: 'GROUNDED_EXTRACTIVE', sources: [] };
 
-  const hits = retrieveBusinessContext(workspaceId, text, 4);
-  const scored: { text: string; score: number; hit: ScopedMemoryResult }[] = [];
-  for (const h of hits) {
-    const p = bestPassage(h.content, text);
-    if (p) scored.push({ ...p, hit: h });
-  }
+  const scored = gatherEvidence(workspaceId, text);
   if (scored.length === 0) return dontKnow(profile);
 
-  scored.sort((a, b) => b.score - a.score);
   // A second passage is included only when it is genuinely comparable to the
   // first. Padding a good answer with a weak one made a correct reply look
   // like a document dump, and buried the part that answered the question.
@@ -587,7 +747,7 @@ export function answerQuestion(profile: BusinessProfile, workspaceId: string, te
   }
 
   return {
-    content: keep.map((p) => p.text).join('\n\n'),
+    content: keep.map((p) => p.passage).join('\n\n'),
     mode: 'GROUNDED_EXTRACTIVE',
     sources: keep.map((p) => ({ artifactId: p.hit.artifact_id, title: p.hit.title, path: p.hit.source_path })),
   };

@@ -704,6 +704,35 @@ export function getDatabase(): any {
     if (bapCols.length > 0 && !bapCols.some((c) => c.name === 'published')) {
       dbInstance.exec("ALTER TABLE business_assistant_profiles ADD COLUMN published INTEGER NOT NULL DEFAULT 0");
     }
+    if (bapCols.length > 0 && !bapCols.some((c) => c.name === 'allowed_origins_json')) {
+      dbInstance.exec("ALTER TABLE business_assistant_profiles ADD COLUMN allowed_origins_json TEXT NOT NULL DEFAULT '[]'");
+    }
+    if (bapCols.length > 0 && !bapCols.some((c) => c.name === 'voice_reference_id')) {
+      dbInstance.exec("ALTER TABLE business_assistant_profiles ADD COLUMN voice_reference_id TEXT");
+    }
+    if (bapCols.length > 0 && !bapCols.some((c) => c.name === 'voice_enabled')) {
+      dbInstance.exec("ALTER TABLE business_assistant_profiles ADD COLUMN voice_enabled INTEGER NOT NULL DEFAULT 1");
+    }
+
+    // Unanswered questions — the commercial feedback loop. A customer asks
+    // something the business never published; the business sees it and can
+    // publish an answer. Deliberately NOT auto-learned: a customer's own
+    // statement is not a business fact.
+    dbInstance.exec(`
+      CREATE TABLE IF NOT EXISTS business_unanswered_questions (
+        question_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        question TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN','ANSWERED','DISMISSED')),
+        answered_artifact_id TEXT,
+        answered_by_user_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_buq_workspace ON business_unanswered_questions(workspace_id, status);
+    `);
 
     // Pass V — a small, bounded, real runtime-event ledger (Workstream I).
     // Deliberately not a reuse of `activity_events` (NOT NULL task_id,
@@ -845,6 +874,16 @@ export function getDatabase(): any {
         -- un-enumerable from the public surface.
         public_key TEXT UNIQUE,
         published INTEGER NOT NULL DEFAULT 0,
+        -- Websites authorized to embed this assistant. Empty means the
+        -- standalone page still works but nobody may frame it — publishing
+        -- must never silently make a business embeddable anywhere.
+        allowed_origins_json TEXT NOT NULL DEFAULT '[]',
+        -- Fish Audio reference voice for THIS business. The API key stays the
+        -- platform's (managed-keys phase); only the voice identity is per
+        -- business, and a business that sets none gets the platform default
+        -- with that stated honestly rather than implied as its own.
+        voice_reference_id TEXT,
+        voice_enabled INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
