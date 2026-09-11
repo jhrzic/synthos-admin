@@ -192,6 +192,43 @@ describe('Pass III API security: the explicit public allowlist (E2) — never ac
     expect(routeLine('/api/ready')).not.toMatch(/requireAuth|requireWorkspaceMember|requirePlatformAdmin/);
   });
 
+  it('the Business Conversation AI customer surface is public by design — a customer has no SynthOS account', () => {
+    // These four are the ONLY customer-facing routes in the product. They are
+    // unauthenticated on purpose: the people using them are a business's
+    // customers, not SynthOS users, and requiring a login would make the
+    // product impossible.
+    //
+    // What replaces the session guard is narrower, and must stay that way:
+    //   * the workspace is resolved from an unguessable published key and is
+    //     NEVER taken from the request, so a caller cannot name a workspace;
+    //   * an unpublished assistant resolves to nothing, so unpublishing is a
+    //     real off switch;
+    //   * every one of them is IP rate-limited.
+    for (const route of [
+      '/api/public/assistant/:publicKey',
+      '/api/public/assistant/:publicKey/session',
+      '/api/public/assistant/:publicKey/message',
+      '/a/:publicKey',
+    ]) {
+      const line = routeLine(route);
+      expect(line).not.toMatch(/requireAuth|requireWorkspaceMember|requirePlatformAdmin/);
+      expect(line).toMatch(/rateLimit\(/);
+    }
+  });
+
+  it('the public conversation surface never accepts a caller-supplied workspaceId', () => {
+    // The whole isolation argument rests on this. If any of these handlers
+    // read a workspace from the request, an anonymous visitor could point the
+    // assistant at another tenant's knowledge base.
+    const start = serverContent.indexOf('app.get("/api/public/assistant/:publicKey"');
+    const end = serverContent.indexOf('app.get("/api/execution/receipts"');
+    expect(start).toBeGreaterThan(-1);
+    const surface = serverContent.slice(start, end);
+    expect(surface).not.toMatch(/req\.body\?\.workspaceId|req\.query\.workspaceId/);
+    expect(surface).toContain('getProfileByPublicKey(');
+    expect(surface).toContain('profile.workspace_id');
+  });
+
   it('no route outside the documented allowlist is missing every guard', () => {
     const allRouteMatches = [...serverContent.matchAll(/app\.(get|post|put|patch|delete)\(\s*(?:\[)?"([^"]+)"/g)];
     const guarded = new Set([
@@ -200,6 +237,16 @@ describe('Pass III API security: the explicit public allowlist (E2) — never ac
       '/api/auth/setup-token/:token', '/api/auth/setup-token/:token/complete',
       '/api/skills/discover',
       '/health', '/api/ready', // Pass VII — liveness/readiness, public by design (B1/B2): an orchestrator has no session
+      // Business Conversation AI — the customer-facing surface. Public by
+      // design (a business's customer has no SynthOS account) and covered by
+      // its own dedicated test above, which asserts the narrower controls that
+      // stand in for a session guard: public-key workspace resolution, no
+      // caller-supplied workspaceId, and IP rate limiting on every route.
+      '/api/public/assistant/:publicKey',
+      '/api/public/assistant/:publicKey/session',
+      '/api/public/assistant/:publicKey/message',
+      '/a/:publicKey',
+      '/a/assistant.js', // static page script, no data of its own
       '*', // SPA shell fallback — no data of its own
     ]);
     const unguardedUnexpected: string[] = [];
