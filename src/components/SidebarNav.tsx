@@ -142,6 +142,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
         { id: 'obsidian' as ActiveTab, label: 'Obsidian / Vault', icon: Database, badge: `${notesCount}`, color: '#EC4899' },
         { id: 'hermes-oracle' as ActiveTab, label: 'Intelligence', icon: Sparkles, color: '#A5A2FF' },
         { id: 'aeo-audit' as ActiveTab, label: 'SEO / AEO / GEO Audit', icon: Search, color: '#20B2AA' },
+        { id: 'business-assistant' as ActiveTab, label: 'Business Assistant', icon: MessageSquare, color: '#8C8AFF' },
         { id: 'lead-scraper' as ActiveTab, label: 'Radar', icon: Globe, color: '#20B2AA' },
         { id: 'content-library' as ActiveTab, label: 'Research Library', icon: Layers, color: '#38BDF8' },
       ]

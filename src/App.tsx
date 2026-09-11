@@ -66,6 +66,7 @@ import { CanonicalReceiptsView } from './components/CanonicalReceiptsView';
 import { SchedulerView } from './components/SchedulerView';
 import { ExternalExecutionsView } from './components/ExternalExecutionsView';
 import { AeoAuditView } from './components/AeoAuditView';
+import { BusinessAssistantView } from './components/BusinessAssistantView';
 import { GuardianAegisControlView } from './components/GuardianAegisControlView';
 import { WorkspacesView } from './components/WorkspacesView';
 import { KanbanDependencyDAG } from './components/KanbanDependencyDAG';
@@ -1654,6 +1655,13 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               provider is configured rather than asserting AI visibility. */}
           {activeTab === 'aeo-audit' && (
             <AeoAuditView activeWorkspaceId={activeWorkspaceId} />
+          )}
+
+          {/* Business Conversation AI — the OWNER's surface. The customer-facing
+              assistant is a separate public page at /a/<key>, deliberately not
+              a panel inside Admin. */}
+          {activeTab === 'business-assistant' && (
+            <BusinessAssistantView activeWorkspaceId={activeWorkspaceId} />
           )}
 
           {/* Legacy Kanban demo receipts, kept for developer reference only.

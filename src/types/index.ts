@@ -24,6 +24,7 @@ export type ActiveTab =
   | 'scheduler'
   | 'external-executions'
   | 'aeo-audit'
+  | 'business-assistant'
   | 'dev-kanban-receipts'
   | 'guardian-aegis'
   | 'workspaces'
