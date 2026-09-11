@@ -150,6 +150,33 @@ describe('3: intent classification, including the ordering defect', () => {
     expect(classifyIntent('can you book me in for tomorrow morning')).toBe('SCHEDULE');
   });
 
+  it('a QUESTION about an appointment is not a request to book one', async () => {
+    // Found in a live acceptance run: "appointment" was in the scheduling
+    // pattern, so a plain question about what a customer would receive was
+    // answered with "I can't book times myself" AND opened a follow-up task.
+    // The customer got a non-answer; the business owner got a false lead.
+    for (const q of [
+      'What does that first appointment include?',
+      'How long is a typical appointment?',
+      'Do you charge for the first visit?',
+      'What happens at a consultation?',
+    ]) {
+      expect(classifyIntent(q)).not.toBe('SCHEDULE');
+    }
+  });
+
+  it('an actual request to arrange something is still SCHEDULE', async () => {
+    for (const q of [
+      'Can someone come out next Tuesday?',
+      'can you book me in for tomorrow morning',
+      'please schedule a visit',
+      'can someone call me back',
+      'I need an appointment on Friday',
+    ]) {
+      expect(classifyIntent(q)).toBe('SCHEDULE');
+    }
+  });
+
   it('an explicit request for a person is still HANDOFF', async () => {
     expect(classifyIntent('Can I speak to a real person?')).toBe('HANDOFF');
     expect(classifyIntent('I want to talk to someone about this')).toBe('HANDOFF');

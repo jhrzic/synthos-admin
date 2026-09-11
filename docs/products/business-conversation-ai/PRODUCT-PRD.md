@@ -1,8 +1,14 @@
 # Business Conversation AI — Product PRD
 
-**Status:** web channel shipped and live-verified. Voice, SMS and mobile are contracts, not code.
+**Status:** web channel shipped and live-verified, including embed, voice output and the
+knowledge loop. Phone, SMS and mobile remain contracts, not code.
 **Branch:** `fix/p0-jarvis-voice-and-knowledge-mesh` — NOT merged to `main`.
-**Last verified:** 2026-09-10, against a real workspace over real HTTP.
+**Last verified:** 2026-09-11 — two fresh single-document tenants onboarded and isolated over
+real HTTP; embed proven on a third-party origin; voice output producing real audio.
+
+**Deployment:** Docker + docker-compose behind Caddy (TLS automatic). See
+`FIRST-CUSTOMER-RUNBOOK.md` and `docs/deploy/Caddyfile.example`. No new hosting architecture was
+introduced.
 
 ---
 
@@ -152,7 +158,45 @@ corpus size — the same perfect match scored `-0.35` against 36 documents and `
 one. Every new customer starts at one document, so that gate would have refused every answer for
 exactly the businesses being onboarded. Replaced with corpus-independent concept coverage.
 
-## 8. Deliberately not built
+## 8. Production readiness
+
+### The public address is the thing most likely to break a real install
+
+The embed snippet used to be built from `req.protocol` + the Host header. Behind a
+TLS-terminating proxy the app receives plain HTTP, so the business would be handed
+`<script src="http://…">` and paste it onto their HTTPS site, where the browser blocks it as
+mixed content — **silently**, with nothing in the product admitting anything was wrong.
+
+`lib/public-url.ts` now resolves it once: an explicit `PUBLIC_BASE_URL` beats any inference,
+inference honours `X-Forwarded-Proto`, and when the result is not https in production the
+readiness panel says so instead of handing over a snippet that cannot work.
+
+### The model key no longer requires a redeploy
+
+Enabling natural phrasing meant editing `.env` and rebuilding a container — engineering
+intervention for a configuration change. `lib/model-credentials.ts` mirrors the proven voice
+credential store: AES-256-GCM at rest, never returned to a browser, verified by a real provider
+call on save. **Environment always wins over the stored key**, so an operator who sets a variable
+is never silently overridden by something typed into a form.
+
+### Named states, not lucky successes
+
+Fish Audio's free-tier retry produces audio after the paid balance is exhausted. That is a
+fallback, not a plan — the free tier is rate-limited and can be withdrawn. `FREE_TIER_ONLY` is
+therefore its own state, observed from real calls rather than inferred from the last request
+happening to succeed, and the owner sees it before putting voice in front of customers.
+
+### Bounds on an anonymous surface
+
+| Bound | Value | Why |
+|---|---|---|
+| Message length | 4,000 chars | Longer than any real question |
+| Customer turns per conversation | 60 | Every turn re-reads the transcript, so cost grows with N — a per-request rate limit never catches that |
+| TTS input | 1,500 chars | Caps cost per spoken reply |
+| Public message rate | `EXPENSIVE_EXECUTION` per IP | Existing limiter |
+| Request body | 10 MB | Existing, matched by the Caddy config |
+
+## 9. Deliberately not built
 
 - **A second knowledge store.** Documents are Vault artifacts in the existing index.
 - **Lead scoring.** A fabricated judgement about a real person.
@@ -161,3 +205,5 @@ exactly the businesses being onboarded. Replaced with corpus-independent concept
 - **Bot Mode adapter.** The thin adapter is optional and unbuilt; nothing depends on it.
 - **Anything that makes Hermes the foundation.** Hermes remains one possible implementation of one
   step, reachable only through capability resolution.
+- **Retention windows, per-conversation delete, data export.** Named as gaps in the runbook
+  rather than implied to exist. Required before a client with real privacy obligations.

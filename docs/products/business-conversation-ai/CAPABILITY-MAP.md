@@ -94,6 +94,17 @@ one business's validated allowlist:
 Verified live against two local origins — an authorized one loaded the widget, an unauthorized one
 serving the identical snippet was blocked by the browser.
 
+## Configuration surfaces
+
+| Credential | Where it lives | Precedence |
+|---|---|---|
+| Model provider (Gemini) | `GEMINI_API_KEY`, or `model_credentials` encrypted AES-256-GCM | Environment, then store |
+| Fish Audio | `FISH_AUDIO_API_KEY`, or `voice_credentials` encrypted AES-256-GCM | Store, then environment |
+| Public address | `PUBLIC_BASE_URL`, else `X-Forwarded-Proto` + Host | Explicit, then inference |
+
+Neither credential value is ever returned by any route or rendered into a browser. A provider
+verification error is scrubbed of key-shaped tokens before it reaches a log or a response.
+
 ## Channel contract
 
 One engine, five channels. `handleTurn()` takes text and returns a reply plus an explicit action;
