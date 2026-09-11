@@ -66,6 +66,19 @@ export interface TurnResult {
   };
 }
 
+// --- bounds ----------------------------------------------------------------
+// Real limits on an anonymous, unauthenticated surface. Deliberately generous
+// for a genuine customer and bounded for everyone else.
+
+/** One message. Longer than any real customer question, shorter than a payload. */
+export const MAX_MESSAGE_CHARS = 4000;
+
+/** Customer turns in one conversation. A real enquiry resolves well inside this. */
+export const MAX_CUSTOMER_TURNS = 60;
+
+/** Characters sent to the speech provider per reply. Caps cost per request. */
+export const MAX_TTS_CHARS = 1500;
+
 // --- qualification ---------------------------------------------------------
 // Deterministic slot-filling. The goals come from the business's own profile;
 // when it declares none, these are the four that apply to essentially every
@@ -292,7 +305,7 @@ export async function handleTurn(params: {
   const { workspaceId, conversationId } = params;
   const text = String(params.text || '').trim();
   if (!text) return { error: 'Empty message.' };
-  if (text.length > 4000) return { error: 'Message too long.' };
+  if (text.length > MAX_MESSAGE_CHARS) return { error: 'Message too long.' };
 
   const conv = getConversation(workspaceId, conversationId);
   if (!conv) return { error: 'Conversation not found in this workspace.' };
@@ -307,6 +320,21 @@ export async function handleTurn(params: {
   lead = extractLead(text, lead);
 
   const prior = getMessages(workspaceId, conversationId);
+
+  // A bounded conversation. Without this an anonymous visitor can grow one
+  // conversation without limit — every turn re-reads the whole transcript, so
+  // the cost of turn N grows with N, and a single session becomes a slow
+  // resource drain that no per-request rate limit catches.
+  //
+  // The cap ends the conversation honestly rather than degrading it: a
+  // customer is told to start a new one or ask for a person, which is what a
+  // genuine 60-turn conversation needed anyway.
+  if (prior.filter((m) => m.role === 'customer').length >= MAX_CUSTOMER_TURNS) {
+    return {
+      error: `This conversation has reached its length limit. Please start a new one — or say "talk to a human" in a new conversation and someone will pick it up.`,
+    };
+  }
+
   const intent = classifyIntent(text);
 
   // If the assistant's previous turn asked a qualification question, THIS turn

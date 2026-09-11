@@ -379,8 +379,27 @@ export type Intent = 'HANDOFF' | 'OBJECTION' | 'SCHEDULE' | 'CONTACT_DETAILS' | 
  * person still wins; a scheduling request that merely mentions a call does not.
  */
 const EXPLICIT_HANDOFF = /\b(human|real person|a person|representative|speak to someone|talk to someone|talk to a|speak with|customer service|manager|transfer me|put me through)\b/;
-const SCHEDULING = /\b(book|booking|schedule|appointment|reschedule|availability|available|slot|come out|visit|consultation|call me back|get a call|call me)\b/;
+
+/**
+ * A request to arrange something. VERBS, not nouns.
+ *
+ * This distinction cost a live acceptance run: "appointment" was in the
+ * scheduling pattern, so "What does that first appointment include?" — a plain
+ * question about what a customer would receive — was answered with "I can't
+ * book times myself" AND created a follow-up task for a human. The customer
+ * got a non-answer and the business owner got a false lead.
+ *
+ * A noun like "appointment" or "visit" appears in questions at least as often
+ * as in requests. Only a verb, or a noun paired with a named time, is a
+ * request to arrange something.
+ */
+const BOOKING_VERB = /\b(book|booking|schedule|reschedule|arrange|set up|come out|send someone|call me|ring me|phone me|get a call|availability|slots?\s+available)\b/;
+const SCHEDULING_NOUN = /\b(appointment|visit|consultation|callout|call out|survey|quote visit)\b/;
 const TIME_REFERENCE = /\b(today|tomorrow|tonight|this (week|afternoon|morning|evening)|next (week|month|monday|tuesday|wednesday|thursday|friday)|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}\s?(am|pm))\b/;
+
+/** An informational question, which a scheduling NOUN alone must never override. */
+const INFORMATIONAL = /^(what|how|why|which|who|where|when do you|does|do you|is|are|can you tell|could you tell|tell me)\b/;
+
 const OBJECTION = /\b(too expensive|expensive|pricing|price|cost|afford|discount|cheaper|budget|not sure|unsure|hesitant|why should|compare|competitor|alternative|think about it|worth it|guarantee|risk)\b/;
 const CONTACT = /[\w.+-]+@[\w-]+\.[\w.]+|\b\+?\d[\d\s().-]{7,}\d\b/;
 
@@ -391,13 +410,19 @@ export function mentionsTime(text: string): boolean {
 
 export function classifyIntent(text: string): Intent {
   const t = text.toLowerCase();
-  const scheduling = SCHEDULING.test(t);
+
+  // A request to ARRANGE something: a booking verb, or a scheduling noun with
+  // a named time that is not simply a question about it.
+  const asksToArrange =
+    BOOKING_VERB.test(t) ||
+    (SCHEDULING_NOUN.test(t) && TIME_REFERENCE.test(t) && !INFORMATIONAL.test(t.trim()));
 
   // A scheduling request wins over handoff when the customer named a time —
-  // that is a booking attempt, and it must reach the branch that says so.
-  if (scheduling && TIME_REFERENCE.test(t)) return 'SCHEDULE';
+  // that is a booking attempt, and it must reach the branch that says nothing
+  // can be booked here.
+  if (asksToArrange && TIME_REFERENCE.test(t)) return 'SCHEDULE';
   if (EXPLICIT_HANDOFF.test(t)) return 'HANDOFF';
-  if (scheduling) return 'SCHEDULE';
+  if (asksToArrange) return 'SCHEDULE';
   if (OBJECTION.test(t)) return 'OBJECTION';
   // Contact details are only the intent when the turn is essentially just
   // that — an address inside a long question is a detail, not the point.
@@ -607,11 +632,27 @@ export function bestPassage(content: string, query: string, maxChars = 700): { t
   const low = out.toLowerCase();
   const matched = concepts.filter((group) => group.some((t) => hasTerm(low, t)));
   if (matched.length === 0) return null;
-  // A lone match must be on a specific word. Overlapping on a short common
-  // term ("work", "area", "time") is a coincidence, not an answer.
-  if (matched.length === 1 && !matched[0].some((t) => t.length >= SPECIFIC_TERM_MIN_LENGTH && hasTerm(low, t))) {
-    return null;
+
+  if (matched.length === 1) {
+    const only = matched[0];
+    // A lone match must be on a specific word. Overlapping on a short common
+    // term ("work", "area", "time") is a coincidence, not an answer.
+    if (!only.some((t) => t.length >= SPECIFIC_TERM_MIN_LENGTH && hasTerm(low, t))) return null;
+
+    // ...and it must be the customer's OWN word, not only a synonym of it.
+    //
+    // Found live: "do you do teeth whitening and how much is it?" was answered
+    // with "nervous patients can ask for a longer appointment at no extra
+    // charge" — the cost concept matched through the synonym "charge" while
+    // the words the question was actually about (teeth, whitening) matched
+    // nothing at all. A non-sequitur that implies whitening might be free.
+    //
+    // Synonyms still do their job whenever a second concept also matches; they
+    // just cannot carry a passage on their own. `only[0]` is the original term
+    // by construction of conceptsOf().
+    if (!hasTerm(low, only[0])) return null;
   }
+
   return { text: out.trim(), score: matched.length };
 }
 
@@ -642,7 +683,12 @@ function isIdentityQuestion(lowerText: string, businessName: string): boolean {
  * the business has published nothing about it, the honest outcome is
  * NO_KNOWLEDGE — not a different question's answer delivered with confidence.
  */
-const SPECIFIC_TOPIC = /\b(guarantee|guaranteed|warranty|refund|deposit|cancel|cancellation|policy|insurance|licen[cs]ed|accredit|price|pricing|cost|costs|quote|fee|fees|rate|rates|discount|payment|finance|financing|how long|timeline|lead time|turnaround|emergency|complaint|process|qualification|experience)\b/;
+// "how much" is in here for the same reason as the rest: a question naming a
+// quantity or a price is not answered by the list of services, however
+// naturally "do you do X" also matches the services pattern. Found live —
+// "do you do teeth whitening and how much is it?" returned the service list
+// and silently dropped the half of the question the customer cared about.
+const SPECIFIC_TOPIC = /\b(guarantee|guaranteed|warranty|refund|deposit|cancel|cancellation|policy|insurance|licen[cs]ed|accredit|price|pricing|cost|costs|quote|fee|fees|rate|rates|discount|payment|finance|financing|how much|how many|how long|timeline|lead time|turnaround|emergency|complaint|process|qualification|experience)\b/;
 
 function asksSpecificTopic(lowerText: string): boolean {
   return SPECIFIC_TOPIC.test(lowerText);
