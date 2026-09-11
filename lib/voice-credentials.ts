@@ -470,6 +470,10 @@ export async function synthesizeFishAudio(params: {
       if (retry.ok) {
         usedModel = FISH_AUDIO_FREE_MODEL;
         response = retry;
+        // Audio was produced, but only because the paid balance ran out and
+        // the free tier caught it. That distinction is what FREE_TIER_ONLY
+        // exists to keep visible.
+        recordFishObservation({ paidCreditExhausted: true, failure: null });
       } else {
         // Keep the ORIGINAL 402 as the reported cause — the free-tier failure
         // is a consequence, not the diagnosis.
@@ -489,6 +493,7 @@ export async function synthesizeFishAudio(params: {
   }
 
   if (!response.ok) {
+    recordFishObservation({ failure: `provider returned ${response.status}` });
     return {
       ok: false,
       reason: response.status === 401 || response.status === 403 ? 'PROVIDER_AUTH_REJECTED' : 'MODEL_PROVIDER_UNAVAILABLE',
@@ -510,8 +515,69 @@ export async function synthesizeFishAudio(params: {
   }
 
   const mimeType = format === 'opus' ? 'audio/ogg; codecs=opus' : format === 'wav' ? 'audio/wav' : 'audio/mpeg';
+  if (usedModel !== FISH_AUDIO_FREE_MODEL) recordFishObservation({ paidCreditExhausted: false, failure: null });
   return {
     ok: true, audio: Buffer.from(buf), mimeType,
     model: usedModel, referenceId: resolved.referenceId, keySource: resolved.keySource,
   };
+}
+
+// ---------------------------------------------------------------------------
+// FISH AUDIO ACCOUNT STATE
+//
+// "The free-tier retry produces audio" is not the same as "voice is ready to
+// sell". The paid API balance on this account is exhausted, and the retry is a
+// genuine fallback, not a plan: the free tier is rate-limited and can be
+// withdrawn by the provider at any time.
+//
+// So the state is named rather than inferred from whether the last request
+// happened to succeed. FREE_TIER_ONLY is a real, distinct state that an owner
+// must see before putting voice in front of customers.
+//
+// This is observed from real calls, not polled — there is no billing API here
+// and inventing a balance figure would be worse than saying what we saw.
+// ---------------------------------------------------------------------------
+
+export type FishAccountState = 'PRODUCTION_READY' | 'FREE_TIER_ONLY' | 'NOT_CONFIGURED' | 'FAILED' | 'UNKNOWN';
+
+interface FishObservation {
+  state: FishAccountState;
+  detail: string;
+  observedAt: string | null;
+}
+
+let lastObservation: { paidCreditExhausted: boolean; lastFailure: string | null; at: string } | null = null;
+
+/** Called by the synthesis path with what the provider actually did. */
+export function recordFishObservation(params: { paidCreditExhausted?: boolean; failure?: string | null }): void {
+  lastObservation = {
+    paidCreditExhausted: params.paidCreditExhausted ?? lastObservation?.paidCreditExhausted ?? false,
+    lastFailure: params.failure ?? null,
+    at: new Date().toISOString(),
+  };
+}
+
+export function getFishAccountState(): FishObservation {
+  const status = getVoiceCredentialStatus('fish_audio');
+  const envKey = Boolean((process.env.FISH_AUDIO_API_KEY || '').trim());
+  if (!status.apiKeyPresent && !envKey) {
+    return { state: 'NOT_CONFIGURED', detail: 'No Fish Audio API key is configured. Spoken replies are unavailable; text is unaffected.', observedAt: null };
+  }
+  if (!status.referenceIdPresent && !(process.env.FISH_AUDIO_VOICE_ID || '').trim()) {
+    return { state: 'NOT_CONFIGURED', detail: 'A Fish Audio key is stored but no reference voice is set, so nothing can be synthesized.', observedAt: null };
+  }
+  if (!lastObservation) {
+    return { state: 'UNKNOWN', detail: 'A Fish Audio key and voice are configured. No spoken reply has been generated yet, so the account state has not been observed.', observedAt: null };
+  }
+  if (lastObservation.paidCreditExhausted) {
+    return {
+      state: 'FREE_TIER_ONLY',
+      detail: 'The paid Fish Audio API balance is exhausted. Spoken replies are falling back to the free tier, which is rate-limited and not a basis to sell voice. Top up the account before a paying customer relies on it.',
+      observedAt: lastObservation.at,
+    };
+  }
+  if (lastObservation.lastFailure) {
+    return { state: 'FAILED', detail: `The last spoken reply failed: ${lastObservation.lastFailure}`, observedAt: lastObservation.at };
+  }
+  return { state: 'PRODUCTION_READY', detail: 'Spoken replies generated from the paid account.', observedAt: lastObservation.at };
 }

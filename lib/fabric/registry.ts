@@ -27,6 +27,7 @@ import { getRuntimeStatus, type RuntimeStatusReport, type RuntimeSystemReport } 
 import { getDatabase } from '../persistence';
 import { isWindmillConfigured } from '../windmill-client';
 import { getVoiceCredentialStatus } from '../voice-credentials';
+import { getModelCredentialStatus } from '../model-credentials';
 
 export type CapabilityEffectClass = 'READ' | 'COMPUTE' | 'EXTERNAL_ACTION' | 'CONTROL';
 
@@ -474,11 +475,15 @@ function scheduleRecheckCapability(): CapabilityDescriptor {
 //   the registry and concludes generative phrasing is live.
 // ---------------------------------------------------------------------------
 
-const CONVERSATION_MODEL_ENV_KEYS = ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY'] as const;
-
-/** PRESENT/MISSING only — a credential value is never read out of here. */
+/**
+ * PRESENT/MISSING only — a credential value is never read out of here.
+ *
+ * Checks the same resolution the conversation engine uses (environment, then
+ * the encrypted server-side store), so the registry cannot report a provider
+ * the engine would refuse, or vice versa.
+ */
 export function conversationModelConfigured(): boolean {
-  return CONVERSATION_MODEL_ENV_KEYS.some((k) => Boolean(process.env[k] && String(process.env[k]).trim()));
+  return getModelCredentialStatus('gemini').apiKeyPresent;
 }
 
 function conversationRespondCapability(): CapabilityDescriptor {

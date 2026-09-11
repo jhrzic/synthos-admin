@@ -31,6 +31,7 @@
 import { classifyModelRequest, generateWithFailover, type FailoverAttemptLog } from '../model-router';
 import type { BusinessProfile, ConversationMessage } from './engine';
 import type { ScopedMemoryResult } from '../memory-index';
+import { resolveModelApiKey } from '../model-credentials';
 
 export interface EvidenceItem {
   artifactId: string;
@@ -52,12 +53,16 @@ export type LlmAvailability =
  * which models exist is exactly how the two drift apart.
  */
 export function resolveConversationProvider(preferredModel?: string): LlmAvailability {
-  const geminiKey = (process.env.GEMINI_API_KEY || '').trim();
-  if (!geminiKey) {
+  // Environment first, then the encrypted server-side store. Enabling
+  // conversational phrasing must not require editing a .env file and
+  // rebuilding a container — the same argument that produced the voice
+  // credential store, applied to the model key.
+  const { apiKey } = resolveModelApiKey('gemini');
+  if (!apiKey) {
     return {
       available: false,
       reason: 'NO_PROVIDER_CONFIGURED',
-      detail: 'No conversation model provider is configured on this server. GEMINI_API_KEY is the provider this build can execute; it is not set.',
+      detail: 'No conversation model provider is configured. Add a Gemini API key in the Business Assistant settings, or set GEMINI_API_KEY in the environment.',
     };
   }
   const classified = classifyModelRequest(preferredModel);
@@ -282,8 +287,10 @@ export async function generateGroundedReply(params: {
 
 /** The one real provider call. Imported lazily so tests never need the SDK. */
 async function defaultGeminiCall(model: string, prompt: GroundedPrompt): Promise<string> {
+  const { apiKey } = resolveModelApiKey('gemini');
+  if (!apiKey) throw new Error('No Gemini API key is configured.');
   const { GoogleGenAI } = await import('@google/genai');
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  const ai = new GoogleGenAI({ apiKey });
   const response = await ai.models.generateContent({
     model,
     contents: prompt.user,

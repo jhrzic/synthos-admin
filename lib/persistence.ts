@@ -919,6 +919,19 @@ export function getDatabase(): any {
       );
       CREATE INDEX IF NOT EXISTS idx_bconvmsg_conv ON business_conversation_messages(conversation_id);
 
+      -- Model provider credentials, encrypted at rest with the same
+      -- AES-256-GCM envelope the voice store uses. It exists so enabling
+      -- conversational phrasing does not require editing a .env file and
+      -- rebuilding a container — the same argument that produced the voice
+      -- store, applied to the model key.
+      CREATE TABLE IF NOT EXISTS model_credentials (
+        provider TEXT PRIMARY KEY,
+        api_key_encrypted TEXT,
+        updated_by_user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS voice_credentials (
         provider TEXT PRIMARY KEY,
         api_key_encrypted TEXT,
