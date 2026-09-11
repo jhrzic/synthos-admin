@@ -140,3 +140,68 @@ export function searchWorkspaceMemory(workspaceId: string, query: string, limit 
     return [];
   }
 }
+
+/**
+ * Search a NAMED SUBSET of a workspace's indexed material, returning the full
+ * document content and the bm25 rank alongside the usual fields.
+ *
+ * Added for the customer-facing conversation assistant, and the reason is a
+ * real defect found by running it against a live workspace: an assistant that
+ * searched the whole index answered a visitor's question by quoting an
+ * internal graph-run log, a Jarvis directive and a workspace file path. Every
+ * one of those documents was real — and none of them were things a business
+ * would ever say to a customer.
+ *
+ * So the customer-facing surface searches only what the business has
+ * explicitly designated as its published knowledge (a path prefix), and gets
+ * the rank back so it can refuse a weak match instead of presenting it.
+ *
+ * searchWorkspaceMemory() above is deliberately left exactly as it was — it is
+ * the operator-facing search, where searching everything is correct.
+ */
+export interface ScopedMemoryResult extends MemorySearchResult {
+  /** FTS5 bm25 rank. More negative is a better match. */
+  rank: number;
+  /** Full indexed document text, so a caller can quote a whole paragraph rather than an FTS5 shard. */
+  content: string;
+}
+
+export function searchWorkspaceMemoryScoped(
+  workspaceId: string,
+  query: string,
+  opts: { pathPrefix?: string; limit?: number } = {}
+): ScopedMemoryResult[] {
+  const trimmed = (query || '').trim();
+  if (!trimmed) return [];
+  const tokens = trimmed.match(/[\p{L}\p{N}]+/gu) || [];
+  if (tokens.length === 0) return [];
+  // OR the terms: a visitor's question rarely contains every term of the
+  // answer, and an implicit AND makes a well-stocked knowledge base look empty.
+  const matchExpr = tokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(' OR ');
+  const limit = Math.min(Math.max(opts.limit ?? 8, 1), 50);
+
+  const db = getDatabase();
+  try {
+    const like = opts.pathPrefix ? `%${opts.pathPrefix}%` : null;
+    const sql = `
+      SELECT artifact_id, workspace_id, title, source_path, updated_at, content, rank AS bm25
+      FROM memory_index
+      WHERE workspace_id = ? AND memory_index MATCH ?
+      ${like ? 'AND source_path LIKE ?' : ''}
+      ORDER BY rank
+      LIMIT ?
+    `;
+    const args: unknown[] = like ? [workspaceId, matchExpr, like, limit] : [workspaceId, matchExpr, limit];
+    const rows = db.prepare(sql).all(...(args as any[])) as Array<{
+      artifact_id: string; workspace_id: string; title: string; source_path: string;
+      updated_at: string; content: string; bm25: number;
+    }>;
+    return rows.map((r) => ({
+      artifact_id: r.artifact_id, workspace_id: r.workspace_id, title: r.title,
+      snippet: '', source_path: r.source_path, updated_at: r.updated_at,
+      rank: Number(r.bm25), content: r.content,
+    }));
+  } catch {
+    return [];
+  }
+}

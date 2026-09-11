@@ -694,6 +694,17 @@ export function getDatabase(): any {
       dbInstance.exec("ALTER TABLE skills ADD COLUMN credential_ciphertext TEXT");
     }
 
+    // Business Conversation AI — the public assistant key. Added as a
+    // migration as well as in the CREATE TABLE because an install that ran
+    // an earlier build of this branch already has the table without it.
+    const bapCols = dbInstance.prepare("PRAGMA table_info(business_assistant_profiles)").all() as Array<{ name: string }>;
+    if (bapCols.length > 0 && !bapCols.some((c) => c.name === 'public_key')) {
+      dbInstance.exec("ALTER TABLE business_assistant_profiles ADD COLUMN public_key TEXT");
+    }
+    if (bapCols.length > 0 && !bapCols.some((c) => c.name === 'published')) {
+      dbInstance.exec("ALTER TABLE business_assistant_profiles ADD COLUMN published INTEGER NOT NULL DEFAULT 0");
+    }
+
     // Pass V — a small, bounded, real runtime-event ledger (Workstream I).
     // Deliberately not a reuse of `activity_events` (NOT NULL task_id,
     // task-scoped) or `admin_audit_events` (authority-mutation-scoped) —
@@ -794,6 +805,81 @@ export function getDatabase(): any {
       -- both are stored in the clear and may be read back by the UI.
       -- One row per provider: this is install-level configuration, not
       -- per-workspace data.
+      -- ===================================================================
+      -- BUSINESS CONVERSATION AI (revenue product #1)
+      --
+      -- Channel-neutral by design: the same business representative must be
+      -- reachable later from mobile, voice call and SMS without a second
+      -- conversation store. The channel field is the only thing that changes.
+      --
+      -- Deliberately separate from jarvis_sessions: that is the OPERATOR's
+      -- internal assistant, single-channel and owner-facing. This is a
+      -- CUSTOMER-facing conversation with an external participant, lead data
+      -- and handoff state, and the two must not share a table.
+      -- ===================================================================
+      CREATE TABLE IF NOT EXISTS business_assistant_profiles (
+        profile_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        business_name TEXT NOT NULL,
+        assistant_name TEXT NOT NULL,
+        business_description TEXT,
+        services_json TEXT NOT NULL DEFAULT '[]',
+        locations_json TEXT NOT NULL DEFAULT '[]',
+        hours TEXT,
+        contact_json TEXT NOT NULL DEFAULT '{}',
+        brand_voice TEXT,
+        greeting TEXT,
+        ai_disclosure TEXT NOT NULL,
+        qualification_goals_json TEXT NOT NULL DEFAULT '[]',
+        handoff_rules TEXT,
+        memory_permissions TEXT NOT NULL DEFAULT 'workspace_only',
+        enabled_capabilities_json TEXT NOT NULL DEFAULT '[]',
+        allowed_actions_json TEXT NOT NULL DEFAULT '[]',
+        escalation_contacts_json TEXT NOT NULL DEFAULT '[]',
+        voice_profile TEXT,
+        bot_mode_profile TEXT,
+        business_line_id TEXT,
+        -- The public assistant is addressed by an unguessable key, never by
+        -- workspace_id. An anonymous visitor therefore cannot name which
+        -- workspace's knowledge is searched, and workspace ids stay
+        -- un-enumerable from the public surface.
+        public_key TEXT UNIQUE,
+        published INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_bap_workspace ON business_assistant_profiles(workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_bap_public_key ON business_assistant_profiles(public_key);
+
+      CREATE TABLE IF NOT EXISTS business_conversations (
+        conversation_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        profile_id TEXT NOT NULL,
+        channel TEXT NOT NULL CHECK (channel IN ('WEB','MOBILE_APP','VOICE_CALL','SMS','WHATSAPP')),
+        participant_ref TEXT,
+        status TEXT NOT NULL CHECK (status IN ('ACTIVE','HANDOFF_REQUESTED','CLOSED')),
+        lead_json TEXT NOT NULL DEFAULT '{}',
+        summary_artifact_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_bconv_workspace ON business_conversations(workspace_id);
+
+      CREATE TABLE IF NOT EXISTS business_conversation_messages (
+        message_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('customer','assistant','system')),
+        content TEXT NOT NULL,
+        -- How the assistant produced this turn. Never inferred by the client:
+        -- GROUNDED_EXTRACTIVE = real passages from workspace knowledge,
+        -- LLM = an approved model phrased it, NO_KNOWLEDGE = declined to answer.
+        response_mode TEXT,
+        sources_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_bconvmsg_conv ON business_conversation_messages(conversation_id);
+
       CREATE TABLE IF NOT EXISTS voice_credentials (
         provider TEXT PRIMARY KEY,
         api_key_encrypted TEXT,
