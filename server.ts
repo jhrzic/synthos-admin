@@ -115,10 +115,13 @@ import {
   summarizeConversation as summarizeBusinessConversation,
   addBusinessKnowledge,
   answerWithBestAvailableMode,
+  MAX_TTS_CHARS,
 } from "./lib/conversation/service";
 import { renderAssistantPage, ASSISTANT_SCRIPT, EMBED_LOADER_SCRIPT, embedSnippet } from "./lib/conversation/public-page";
 import { assistantPageCsp, normalizeOrigin } from "./lib/conversation/origins";
-import { synthesizeFishAudio } from "./lib/voice-credentials";
+import { synthesizeFishAudio, getFishAccountState } from "./lib/voice-credentials";
+import { getModelCredentialStatus, saveModelCredential, deleteModelCredential, verifyModelCredential } from "./lib/model-credentials";
+import { resolvePublicBaseUrl } from "./lib/public-url";
 import { requireAuth, requireWorkspaceMember, requireWorkspaceAdmin, requirePlatformAdmin, requireSameOrigin, getRequestUser, fromBody, fromQuery, fromBodyOrQuery, AuthedRequest } from "./lib/authorization";
 import { recordAdminAuditEvent, listRecentAdminAuditEvents } from "./lib/audit";
 import { executeAgentTask, buildAgentRolePrompt } from "./lib/fabric/kernel";
@@ -2534,6 +2537,114 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
   });
 
 
+
+  /**
+   * Conversation model credential — save, verify, remove.
+   *
+   * Workspace-admin only: a model key is platform cost, not per-conversation
+   * data, and the margin firewall means it is never client-visible.
+   * The value is written encrypted and is never returned by any route.
+   */
+  app.get("/api/business/model-credential", requireWorkspaceAdmin(fromQuery), (_req, res) => {
+    try {
+      return res.json({ success: true, status: getModelCredentialStatus("gemini") });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to read model credential status" });
+    }
+  });
+
+  app.post("/api/business/model-credential", requireWorkspaceAdmin(fromBody), async (req, res) => {
+    try {
+      const user = getRequestUser(req);
+      const action = String(req.body?.action || "save");
+
+      if (action === "delete") {
+        deleteModelCredential("gemini");
+        return res.json({ success: true, status: getModelCredentialStatus("gemini") });
+      }
+      if (action === "verify") {
+        // A real call to the provider, so "configured" is never confused with
+        // "working" — the distinction that decides whether a customer meets a
+        // broken assistant.
+        const v = await verifyModelCredential("gemini");
+        return res.json({ success: true, verification: v, status: getModelCredentialStatus("gemini") });
+      }
+
+      const apiKey = String(req.body?.apiKey || "");
+      if (!apiKey.trim()) return res.status(400).json({ success: false, error: "An API key is required." });
+      const status = saveModelCredential({ provider: "gemini", apiKey, userId: user?.user_id || "unknown" });
+      const verification = await verifyModelCredential("gemini");
+      return res.json({ success: true, status, verification });
+    } catch (err: any) {
+      // Never echo the submitted key back, even inside an error.
+      return res.status(500).json({ success: false, error: String(err?.message || "Failed to save the key").slice(0, 200) });
+    }
+  });
+
+  /**
+   * First-customer readiness. Every row is a real, checked state — there are no
+   * green ticks for things that are not configured, and nothing here is
+   * aspirational.
+   */
+  app.get("/api/business/readiness", requireWorkspaceMember(fromQuery), async (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const profile = getBusinessProfile(workspaceId);
+      const base = resolvePublicBaseUrl(req);
+      const model = getModelCredentialStatus("gemini");
+      const voice = getVoiceCredentialStatus("fish_audio");
+      const fish = getFishAccountState();
+      const knowledgeCount = listWorkspaceVaultEntries(workspaceId).filter((e: any) =>
+        typeof e.relative_path === "string" && e.relative_path.includes("Business-Knowledge/")
+      ).length;
+
+      const row = (key: string, state: string, detail: string) => ({ key, state, detail });
+
+      return res.json({
+        success: true,
+        workspaceId,
+        publicBaseUrl: base.origin,
+        publicBaseUrlSource: base.source,
+        publicBaseUrlWarning: base.warning,
+        items: [
+          row("ASSISTANT", profile ? "READY" : "NOT_CONFIGURED",
+            profile ? `${profile.business_name} — ${profile.assistant_name}` : "No assistant profile yet."),
+          row("KNOWLEDGE", knowledgeCount > 0 ? "READY" : "NOT_CONFIGURED",
+            knowledgeCount > 0
+              ? `${knowledgeCount} approved document${knowledgeCount === 1 ? "" : "s"}.`
+              : "No approved documents. The assistant can only answer from your profile fields."),
+          row("PUBLICATION", profile?.published ? "READY" : "NOT_CONFIGURED",
+            profile?.published ? "Live at the public link." : "Not published — no customer can reach it."),
+          row("DOMAIN", (profile?.allowed_origins?.length || 0) > 0 ? "READY" : "NOT_CONFIGURED",
+            (profile?.allowed_origins?.length || 0) > 0
+              ? `${profile!.allowed_origins.length} authorized website(s).`
+              : "No website authorized — the standalone link works, the embed will be refused."),
+          row("HTTPS", base.warning ? "ATTENTION" : base.secure ? "READY" : "NOT_CONFIGURED",
+            base.warning || `Public address ${base.origin || "UNKNOWN"} (${base.source}).`),
+          row("TEXT", profile?.published ? "READY" : "NOT_CONFIGURED",
+            profile?.published ? "Answering from your approved material." : "Publish to enable."),
+          row("LLM", model.apiKeyPresent ? "READY" : "NOT_CONFIGURED",
+            model.apiKeyPresent
+              ? `Natural phrasing over your own material (key from ${model.source === "environment" ? model.envVar : "the encrypted store"}).`
+              : "Replies quote your documents directly. Add a model key for natural phrasing."),
+          row("VOICE_INPUT", "READY", "Runs in the visitor's browser where supported. No audio reaches this server."),
+          row("VOICE_OUTPUT", fish.state === "PRODUCTION_READY" ? "READY"
+              : fish.state === "FREE_TIER_ONLY" ? "ATTENTION"
+              : fish.state === "NOT_CONFIGURED" ? "NOT_CONFIGURED" : "ATTENTION",
+            fish.detail),
+          row("FOLLOW_UP", "READY", "Scheduling requests and handoffs create real tasks for a person."),
+          row("CALENDAR", "NOT_CONFIGURED", "No calendar is connected. The assistant never claims a booking."),
+          row("PHONE", "NOT_CONFIGURED", "No carrier line is provisioned."),
+          row("SMS", "NOT_CONFIGURED", "No messaging provider is configured."),
+          row("GIGS", "NOT_CONFIGURED", "No Gigs/MVNO integration exists."),
+          row("MOBILE", "NOT_IMPLEMENTED", "No mobile app codebase exists. The web contract is channel-agnostic."),
+        ],
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to compute readiness" });
+    }
+  });
+
   /** Websites authorized to embed this assistant. Invalid entries are reported, never silently dropped. */
   app.post("/api/business/allowed-origins", requireWorkspaceMember(fromBody), (req, res) => {
     try {
@@ -2560,12 +2671,19 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
           detail: "Publish the assistant to get its installation snippet.",
         });
       }
-      const origin = `${req.protocol}://${req.get("host")}`;
+      // Proxy-aware and explicitly overridable. Deriving this from
+      // req.protocol alone handed businesses an http:// script tag behind a
+      // TLS-terminating proxy, which browsers block as mixed content on an
+      // https site — silently, with nothing in the product admitting it.
+      const base = resolvePublicBaseUrl(req);
+      const origin = base.origin;
       return res.json({
         success: true, workspaceId, published: true,
         publicUrl: `${origin}/a/${profile.public_key}`,
         snippet: embedSnippet(origin, profile.public_key, profile.business_name),
         allowedOrigins: profile.allowed_origins,
+        publicBaseUrlSource: base.source,
+        publicBaseUrlWarning: base.warning,
         // Stated plainly: an empty allowlist is a working standalone page and a
         // refused embed, not a half-configured state that silently allows all.
         embeddable: profile.allowed_origins.length > 0,
@@ -2866,7 +2984,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         return res.status(404).json({ success: false, error: "No such assistant message in this conversation." });
       }
 
-      const spoken = String(message.content).slice(0, 1500);
+      const spoken = String(message.content).slice(0, MAX_TTS_CHARS);
 
       // The ONE Fish Audio path, shared with the admin TTS route — including
       // its free-tier retry and its "200 with no audio" guard.
