@@ -38,6 +38,9 @@ interface Profile {
   escalation_contacts: string[];
   public_key: string | null;
   published: boolean;
+  allowed_origins: string[];
+  voice_enabled: boolean;
+  voice_reference_id: string | null;
 }
 
 interface Answering { mode: string; detail: string; }
@@ -61,6 +64,25 @@ interface Message {
   created_at: string;
 }
 
+interface EmbedInfo {
+  published: boolean;
+  publicUrl?: string;
+  snippet: string | null;
+  allowedOrigins?: string[];
+  embeddable?: boolean;
+  embeddableDetail?: string;
+  detail?: string;
+}
+
+interface UnansweredQuestion {
+  question_id: string;
+  conversation_id: string;
+  question: string;
+  channel: string;
+  created_at: string;
+  updated_at: string;
+}
+
 interface Analytics {
   conversations: { total: number; active: number; handoffRequested: number; closed: number };
   answering: { assistantTurns: number; grounded: number; llm: number; noKnowledge: number };
@@ -81,6 +103,11 @@ export function BusinessAssistantView({ activeWorkspaceId }: { activeWorkspaceId
   const [publicUrl, setPublicUrl] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationRow[]>([]);
   const [analytics, setAnalytics] = useState<Analytics | null>(null);
+  const [embed, setEmbed] = useState<EmbedInfo | null>(null);
+  const [unanswered, setUnanswered] = useState<UnansweredQuestion[]>([]);
+  const [newDomain, setNewDomain] = useState('');
+  const [answerDraft, setAnswerDraft] = useState<{ q: UnansweredQuestion; title: string; content: string } | null>(null);
+  const [preview, setPreview] = useState<{ question: string; reply: string; mode: string; sources: string[] } | null>(null);
   const [selected, setSelected] = useState<{ row: ConversationRow; messages: Message[] } | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -99,10 +126,12 @@ export function BusinessAssistantView({ activeWorkspaceId }: { activeWorkspaceId
     setLoading(true); setError(null);
     try {
       const ws = encodeURIComponent(activeWorkspaceId);
-      const [p, c, a] = await Promise.all([
+      const [p, c, a, e, u] = await Promise.all([
         fetch(`/api/business/profile?workspaceId=${ws}`).then((r) => r.json()),
         fetch(`/api/business/conversations?workspaceId=${ws}`).then((r) => r.json()),
         fetch(`/api/business/analytics?workspaceId=${ws}`).then((r) => r.json()),
+        fetch(`/api/business/embed?workspaceId=${ws}`).then((r) => r.json()),
+        fetch(`/api/business/unanswered?workspaceId=${ws}&status=OPEN`).then((r) => r.json()),
       ]);
       if (p.success) {
         setProfile(p.profile); setAnswering(p.answering); setPublicUrl(p.publicUrl);
@@ -123,6 +152,8 @@ export function BusinessAssistantView({ activeWorkspaceId }: { activeWorkspaceId
       } else setError(p.error || 'Could not load the assistant profile.');
       if (c.success) setConversations(c.conversations);
       if (a.success) setAnalytics(a);
+      if (e.success) setEmbed(e);
+      if (u.success) setUnanswered(u.questions);
     } catch (e: any) {
       setError(e?.message || 'Could not reach the server.');
     } finally { setLoading(false); }
@@ -179,6 +210,80 @@ export function BusinessAssistantView({ activeWorkspaceId }: { activeWorkspaceId
       else { setNotice(r.published ? 'Assistant is live.' : 'Assistant is offline — the link now returns nothing.'); await refresh(); }
     } catch (e: any) { setError(e?.message || 'Could not change publication.'); }
     finally { setBusy(null); }
+  };
+
+  const addDomain = async () => {
+    const value = newDomain.trim();
+    if (!value) return;
+    setBusy('domain'); setError(null); setNotice(null);
+    try {
+      const next = [...(embed?.allowedOrigins || []), value];
+      const r = await fetch('/api/business/allowed-origins', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId: activeWorkspaceId, origins: next }),
+      }).then((x) => x.json());
+      if (!r.success) setError(r.error || 'Could not save the website.');
+      else if (r.rejected?.length) setError(`${r.rejected[0].value} was not accepted — ${r.rejected[0].reason}`);
+      else { setNewDomain(''); setNotice('Website authorized.'); }
+      await refresh();
+    } finally { setBusy(null); }
+  };
+
+  const removeDomain = async (origin: string) => {
+    setBusy('domain');
+    try {
+      const next = (embed?.allowedOrigins || []).filter((o) => o !== origin);
+      await fetch('/api/business/allowed-origins', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId: activeWorkspaceId, origins: next }),
+      });
+      await refresh();
+    } finally { setBusy(null); }
+  };
+
+  const saveAnswer = async () => {
+    if (!answerDraft) return;
+    setBusy('answer'); setError(null); setNotice(null);
+    try {
+      const r = await fetch(`/api/business/unanswered/${encodeURIComponent(answerDraft.q.question_id)}/answer`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspaceId: activeWorkspaceId, action: 'answer',
+          title: answerDraft.title, content: answerDraft.content,
+        }),
+      }).then((x) => x.json());
+      if (!r.success) { setError(r.error || 'Could not save the answer.'); return; }
+      const question = answerDraft.q.question;
+      setAnswerDraft(null);
+      setNotice('Answer published to your business knowledge.');
+      await refresh();
+      // Prove the loop closed rather than asking the owner to take it on trust.
+      await runPreview(question);
+    } finally { setBusy(null); }
+  };
+
+  const dismissQuestion = async (q: UnansweredQuestion) => {
+    setBusy('answer');
+    try {
+      await fetch(`/api/business/unanswered/${encodeURIComponent(q.question_id)}/answer`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId: activeWorkspaceId, action: 'dismiss' }),
+      });
+      await refresh();
+    } finally { setBusy(null); }
+  };
+
+  const runPreview = async (question: string) => {
+    const r = await fetch('/api/business/preview', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: activeWorkspaceId, text: question }),
+    }).then((x) => x.json());
+    if (r.success) {
+      setPreview({
+        question, reply: r.reply, mode: r.responseMode,
+        sources: (r.sources || []).map((s: any) => s.title),
+      });
+    }
   };
 
   const openConversation = async (row: ConversationRow) => {
@@ -257,7 +362,7 @@ export function BusinessAssistantView({ activeWorkspaceId }: { activeWorkspaceId
         </div>
       )}
 
-      {/* Publication */}
+      {/* Publishing and installation — the step that makes this commercial. */}
       <div className={CARD}>
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
@@ -287,11 +392,91 @@ export function BusinessAssistantView({ activeWorkspaceId }: { activeWorkspaceId
             {busy === 'publish' ? 'Working…' : profile?.published ? 'Take offline' : 'Publish assistant'}
           </button>
         </div>
+
+        {/* Channel reality, stated rather than implied. */}
+        <div className="mt-5 grid grid-cols-2 gap-x-6 gap-y-2 border-t border-white/5 pt-4 font-mono text-[11px] md:grid-cols-3">
+          {[
+            ['TEXT CHAT', profile?.published ? 'ACTIVE' : 'NOT PUBLISHED', profile?.published],
+            ['VOICE INPUT', 'BROWSER SPEECH (WHERE SUPPORTED)', true],
+            ['VOICE OUTPUT', profile?.voice_enabled ? 'FISH AUDIO' : 'TURNED OFF', profile?.voice_enabled],
+            ['LIVE PHONE', 'NOT CONFIGURED', false],
+            ['SMS', 'NOT CONFIGURED', false],
+            ['CALENDAR BOOKING', 'NOT CONFIGURED', false],
+          ].map(([label, value, on]) => (
+            <div key={String(label)} className="flex items-baseline justify-between gap-3">
+              <span className="text-slate-500">{label}</span>
+              <span className={on ? 'text-emerald-300/80' : 'text-slate-500'}>{value}</span>
+            </div>
+          ))}
+        </div>
         <p className="mt-3 text-xs text-slate-500">
-          The link is the only way in — a customer cannot reach your workspace any other way.
-          Taking it offline stops it answering immediately; republishing restores the same link.
-          Embedding it in an iframe on your own site is <span className="font-mono">NOT_IMPLEMENTED</span> today.
+          Voice input uses the visitor's own browser — no audio is uploaded or stored by this
+          server; only the text it produces. Voice output is generated by Fish Audio from the reply
+          the assistant already sent.
         </p>
+      </div>
+
+      {/* Install on a website */}
+      <div className={CARD}>
+        <div className={`${LABEL} flex items-center gap-1.5`}><Globe className="h-3.5 w-3.5" /> Put it on your website</div>
+
+        {!profile?.published ? (
+          <p className="mt-3 text-sm text-slate-400">Publish the assistant to get its installation code.</p>
+        ) : (
+          <>
+            <p className="mt-2 text-sm text-slate-400">
+              Only websites you list here may show your assistant. That is enforced by the visitor's
+              browser, not by us asking politely — an unlisted site gets a blank frame.
+            </p>
+
+            <div className="mt-4">
+              <div className="mb-1 text-xs text-slate-500">Authorized websites</div>
+              {(embed?.allowedOrigins || []).length === 0 ? (
+                <p className="text-sm text-amber-200/80">
+                  None yet. Your public link works, but the code below will be refused until you add
+                  your website.
+                </p>
+              ) : (
+                <ul className="space-y-1">
+                  {embed!.allowedOrigins!.map((o) => (
+                    <li key={o} className="flex items-center justify-between gap-3 rounded-lg border border-white/10 px-3 py-1.5">
+                      <span className="font-mono text-xs text-slate-200">{o}</span>
+                      <button onClick={() => removeDomain(o)} disabled={busy === 'domain'}
+                        className="text-xs text-slate-500 hover:text-red-300 disabled:opacity-40">Remove</button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="mt-2 flex gap-2">
+                <input
+                  className={INPUT} placeholder="https://your-website.com" value={newDomain}
+                  onChange={(e) => setNewDomain(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addDomain(); } }}
+                />
+                <button onClick={addDomain} disabled={busy === 'domain' || !newDomain.trim()}
+                  className="shrink-0 rounded-lg border border-white/10 px-4 py-2 text-sm text-slate-200 hover:bg-white/5 disabled:opacity-40">
+                  Add
+                </button>
+              </div>
+            </div>
+
+            {embed?.snippet && (
+              <div className="mt-5">
+                <div className="mb-1 flex items-center justify-between">
+                  <div className="text-xs text-slate-500">Paste this just before &lt;/body&gt; on your website</div>
+                  <button
+                    onClick={() => { navigator.clipboard?.writeText(embed.snippet!); setNotice('Installation code copied.'); }}
+                    className="flex items-center gap-1.5 rounded border border-white/10 px-2 py-1 text-xs text-slate-300 hover:bg-white/5"
+                  >
+                    <Copy className="h-3 w-3" /> Copy
+                  </button>
+                </div>
+                <pre className="overflow-x-auto rounded-lg border border-white/10 bg-black/40 p-3 font-mono text-[11px] leading-relaxed text-slate-300">{embed.snippet}</pre>
+                <p className="mt-2 text-xs text-slate-500">{embed.embeddableDetail}</p>
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       {/* Analytics — counts of real rows only. */}
@@ -311,21 +496,6 @@ export function BusinessAssistantView({ activeWorkspaceId }: { activeWorkspaceId
               </div>
             ))}
           </div>
-
-          {analytics.knowledgeGaps.length > 0 && (
-            <div className="mt-5 border-t border-white/5 pt-4">
-              <div className={LABEL}>Questions your material does not answer</div>
-              <p className="mt-1 text-xs text-slate-500">
-                Each one is a real customer asking something your published material is silent on.
-                Answering it here fixes it for every future visitor.
-              </p>
-              <ul className="mt-2 space-y-1">
-                {analytics.knowledgeGaps.slice(0, 8).map((q, i) => (
-                  <li key={i} className="text-sm text-slate-300">— {q}</li>
-                ))}
-              </ul>
-            </div>
-          )}
 
           <div className="mt-5 border-t border-white/5 pt-4">
             <div className={LABEL}>Not measured</div>
@@ -421,6 +591,101 @@ export function BusinessAssistantView({ activeWorkspaceId }: { activeWorkspaceId
             </p>
           </div>
         </div>
+      </div>
+
+      {/* The knowledge loop — questions your material does not answer, and the
+          one-click way to fix that. This is the most commercially useful panel
+          on the screen: every row is a real customer asking something the
+          website is silent on. */}
+      <div className={CARD}>
+        <div className={`${LABEL} flex items-center gap-1.5`}>
+          <HelpCircle className="h-3.5 w-3.5" /> Questions you haven't answered
+        </div>
+        {unanswered.length === 0 ? (
+          <p className="mt-3 text-sm text-slate-500">
+            Nothing outstanding — every question asked so far was answerable from your material.
+          </p>
+        ) : (
+          <>
+            <p className="mt-2 text-sm text-slate-400">
+              Your assistant refused to guess at these. Publish an answer and it will handle the
+              question from then on — for every future visitor, and for the AI assistants that read
+              your site.
+            </p>
+            <div className="mt-3 divide-y divide-white/5">
+              {unanswered.map((q) => (
+                <div key={q.question_id} className="py-3">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <div className="text-sm text-slate-200">"{q.question}"</div>
+                      <div className="mt-1 font-mono text-[10px] text-slate-600">
+                        {q.channel} · {new Date(q.updated_at).toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 gap-2">
+                      <button
+                        onClick={() => setAnswerDraft({ q, title: '', content: '' })}
+                        className="rounded-lg bg-violet-500/90 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500"
+                      >
+                        Answer this
+                      </button>
+                      <button
+                        onClick={() => dismissQuestion(q)} disabled={busy === 'answer'}
+                        className="rounded-lg border border-white/10 px-3 py-1.5 text-xs text-slate-400 hover:bg-white/5 disabled:opacity-40"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </div>
+
+                  {answerDraft?.q.question_id === q.question_id && (
+                    <div className="mt-3 space-y-2 rounded-lg border border-white/10 bg-black/20 p-3">
+                      <p className="text-xs text-slate-500">
+                        You write the answer — the assistant never invents a business fact, and it
+                        never learns one because a customer asserted it.
+                      </p>
+                      <input
+                        className={INPUT} placeholder="Title, e.g. Gutter clearing"
+                        value={answerDraft.title}
+                        onChange={(e) => setAnswerDraft({ ...answerDraft, title: e.target.value })}
+                      />
+                      <textarea
+                        rows={4} className={INPUT} placeholder="The real answer a customer should get…"
+                        value={answerDraft.content}
+                        onChange={(e) => setAnswerDraft({ ...answerDraft, content: e.target.value })}
+                      />
+                      <div className="flex gap-2">
+                        <button
+                          onClick={saveAnswer}
+                          disabled={busy === 'answer' || !answerDraft.title.trim() || !answerDraft.content.trim()}
+                          className="rounded-lg bg-violet-500/90 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+                        >
+                          {busy === 'answer' ? 'Publishing…' : 'Publish and re-test'}
+                        </button>
+                        <button onClick={() => setAnswerDraft(null)}
+                          className="rounded-lg border border-white/10 px-3 py-1.5 text-xs text-slate-400 hover:bg-white/5">
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* Proof the loop closed, rather than asking the owner to take it on trust. */}
+        {preview && (
+          <div className="mt-4 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.06] p-3">
+            <div className={LABEL}>Re-tested</div>
+            <div className="mt-1 text-sm text-slate-400">"{preview.question}"</div>
+            <div className="mt-2 whitespace-pre-wrap text-sm text-slate-200">{preview.reply}</div>
+            <div className="mt-2 font-mono text-[10px] text-slate-500">
+              {preview.mode}{preview.sources.length ? ` · ${preview.sources.join(', ')}` : ''}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Conversations */}
