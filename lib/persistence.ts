@@ -714,6 +714,17 @@ export function getDatabase(): any {
       dbInstance.exec("ALTER TABLE business_assistant_profiles ADD COLUMN voice_enabled INTEGER NOT NULL DEFAULT 1");
     }
 
+    // PUSH 2A — durable advancement columns, added as a migration as well as
+    // in the CREATE TABLE because installs from earlier builds of this branch
+    // already have external_executions without them.
+    const extExecCols = dbInstance.prepare("PRAGMA table_info(external_executions)").all() as Array<{ name: string }>;
+    if (extExecCols.length > 0 && !extExecCols.some((c) => c.name === 'next_poll_at')) {
+      dbInstance.exec("ALTER TABLE external_executions ADD COLUMN next_poll_at TEXT");
+    }
+    if (extExecCols.length > 0 && !extExecCols.some((c) => c.name === 'poll_attempts')) {
+      dbInstance.exec("ALTER TABLE external_executions ADD COLUMN poll_attempts INTEGER NOT NULL DEFAULT 0");
+    }
+
     // Unanswered questions — the commercial feedback loop. A customer asks
     // something the business never published; the business sees it and can
     // publish an answer. Deliberately NOT auto-learned: a customer's own
@@ -817,6 +828,11 @@ export function getDatabase(): any {
         result_artifact_id TEXT,
         result_receipt_id TEXT,
         result_ingested_at TEXT,
+        -- PUSH 2A — see the migration above; declared here too so a FRESH
+        -- install gets them (the migration is guarded on the table already
+        -- existing, and runs before this statement).
+        next_poll_at TEXT,
+        poll_attempts INTEGER NOT NULL DEFAULT 0,
         created_by_user_id TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -824,6 +840,49 @@ export function getDatabase(): any {
       CREATE INDEX IF NOT EXISTS idx_external_executions_workspace ON external_executions(workspace_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_external_executions_correlation ON external_executions(correlation_id);
       CREATE INDEX IF NOT EXISTS idx_external_executions_remote_job ON external_executions(remote_job_id);
+      -- PUSH 2A — durable advancement. next_poll_at is the lease: the sweep
+      -- claims a row by compare-and-swapping it forward, so two concurrent
+      -- ticks can never poll the same execution. Both columns live on the
+      -- EXISTING ledger rather than in a second table, because "when should
+      -- this job next be looked at" is a property of the job.
+      CREATE INDEX IF NOT EXISTS idx_external_executions_due ON external_executions(next_poll_at);
+
+      -- PUSH 2A — the development loop. This is an EXTENSION of the canonical
+      -- task, never a replacement for it: task_id points at the real tasks
+      -- row that owns the artifacts, Aegis reviews and receipts, exactly as
+      -- external_executions does. It exists because the canonical execution
+      -- vocabulary (TODO/READY/RUNNING/AWAITING_VERIFICATION/AWAITING_RECEIPT/
+      -- DONE/FAILED) describes ONE execution's lifecycle and genuinely cannot
+      -- express WAITING_FOR_REVIEW or WAITING_FOR_APPROVAL — states that occur
+      -- before any execution exists. Overloading tasks.status with them would
+      -- corrupt the vocabulary every other surface reads.
+      CREATE TABLE IF NOT EXISTS development_tasks (
+        dev_task_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        task_id TEXT,
+        title TEXT NOT NULL,
+        instruction TEXT NOT NULL,
+        state TEXT NOT NULL,
+        state_reason TEXT,
+        requires_review INTEGER NOT NULL DEFAULT 1,
+        requires_approval INTEGER NOT NULL DEFAULT 1,
+        review_provider TEXT,
+        review_model TEXT,
+        review_text TEXT,
+        review_at TEXT,
+        approved_by_user_id TEXT,
+        approved_at TEXT,
+        execution_id TEXT,
+        result_artifact_id TEXT,
+        result_receipt_id TEXT,
+        aegis_decision TEXT,
+        created_by_user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_development_tasks_workspace ON development_tasks(workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_development_tasks_state ON development_tasks(state);
+      CREATE INDEX IF NOT EXISTS idx_development_tasks_execution ON development_tasks(execution_id);
 
       -- P0 voice regression fix. The TTS provider credential now has a real
       -- server-side home instead of living in browser localStorage and

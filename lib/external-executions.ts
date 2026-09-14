@@ -98,6 +98,9 @@ export interface ExternalExecutionRecord {
   result_artifact_id: string | null;
   result_receipt_id: string | null;
   result_ingested_at: string | null;
+  /** PUSH 2A — when the durable sweep should next look at this row. NULL means "never again" (terminal, or polling deliberately stopped). */
+  next_poll_at: string | null;
+  poll_attempts: number;
   created_by_user_id: string;
   created_at: string;
   updated_at: string;
@@ -157,8 +160,8 @@ function insertRow(params: {
       id, workspace_id, runtime, task_id, graph_run_id, graph_node_id, skill_id, target_id, remote_path, target_kind,
       remote_job_id, status, attempt_number, parent_execution_id, correlation_id, input_json,
       submitted_at, started_at, completed_at, last_checked_at, error_code, error_message_safe,
-      result_artifact_id, result_receipt_id, result_ingested_at, created_by_user_id, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'PENDING', ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)
+      result_artifact_id, result_receipt_id, result_ingested_at, next_poll_at, poll_attempts, created_by_user_id, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'PENDING', ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?, ?, ?)
   `).run(
     id, params.workspaceId, params.runtime, params.taskId ?? null, params.graphRunId ?? null, params.graphNodeId ?? null,
     params.skillId ?? null, params.targetId ?? null, params.remotePath, params.targetKind,
@@ -387,13 +390,15 @@ export async function submitExternalExecution(params: SubmitExternalExecutionPar
 
   const submission = await dispatchForRuntime(runtime, params.workspaceId, remotePath, targetKind, params.input || {});
   if (!submission.ok) {
-    execution = patchRow(execution.id, { status: 'FAILED', error_code: 'SUBMISSION_FAILED', error_message_safe: sanitizeError(submission.error) });
+    execution = patchRow(execution.id, { status: 'FAILED', error_code: 'SUBMISSION_FAILED', error_message_safe: sanitizeError(submission.error), next_poll_at: null });
     recordTransition(execution, 'PENDING', 'FAILED');
     return { execution, created: true, error: submission.error };
   }
 
   const now = new Date().toISOString();
-  execution = patchRow(execution.id, { status: 'SUBMITTED', remote_job_id: submission.remoteJobId, submitted_at: now });
+  // PUSH 2A — arm the durable sweep. A real submission is due for its first
+  // poll immediately; from then on settlePollSchedule() owns the cadence.
+  execution = patchRow(execution.id, { status: 'SUBMITTED', remote_job_id: submission.remoteJobId, submitted_at: now, next_poll_at: now });
   recordTransition(execution, 'PENDING', 'SUBMITTED');
   return { execution, created: true };
 }
@@ -662,6 +667,190 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
   return { execution: updated, alreadyIngested: false, verified: !!receiptId };
 }
 
+// ---------------------------------------------------------------------------
+// PUSH 2A — DURABLE ADVANCEMENT.
+//
+// THE GAP THIS CLOSES. Antigravity interactions are submitted with
+// background:true and can run for minutes. Before this, nothing moved them
+// forward: a human had to call refresh. A background runtime that only
+// completes when someone is watching is not a background runtime.
+//
+// WHY THE EXISTING SCHEDULER OWNS THIS, AND NOT WINDMILL. The requirement is
+// durable polling that survives a restart. Durability here comes from the
+// LEDGER, not from the thing doing the polling: every fact needed to resume
+// (remote job id, status, attempt count, when to look next) is already a
+// column, so a restarted process rebuilds its entire work queue with one
+// SELECT. Windmill would add a second service that must be installed,
+// credentialed and operated, and it would still have to hand the result back
+// to this process — because Aegis, the KIL gate, receipt signing and the
+// Vault writer all live in SynthOS. It cannot shorten the critical path; it
+// can only lengthen it. lib/fabric/scheduler.ts already runs THE one
+// in-process loop, so this is one more unit of work on that loop, not a
+// second scheduler.
+//
+// CONCURRENCY. next_poll_at doubles as a LEASE. A sweep claims a row by
+// compare-and-swapping next_poll_at forward in a single UPDATE and checking
+// that exactly one row changed. Two overlapping ticks therefore cannot poll
+// the same execution, without a second claims table.
+// ---------------------------------------------------------------------------
+
+/** Bounded exponential backoff, in seconds, by poll attempt. Capped so a long job is never polled aggressively. */
+export const POLL_BACKOFF_SECONDS = [2, 3, 5, 8, 13, 21, 30, 45, 60] as const;
+
+/** Stop polling after this many attempts. At the backoff above this is roughly 25 minutes of real elapsed time. */
+export const MAX_POLL_ATTEMPTS = 60;
+
+/** How long a claimed row is leased before another sweep may retry it, if the claiming sweep dies mid-poll. */
+const POLL_LEASE_SECONDS = 120;
+
+export function pollBackoffSeconds(attempt: number): number {
+  const i = Math.max(0, Math.min(attempt, POLL_BACKOFF_SECONDS.length - 1));
+  return POLL_BACKOFF_SECONDS[i];
+}
+
+function isoPlusSeconds(fromIso: string, seconds: number): string {
+  return new Date(new Date(fromIso).getTime() + seconds * 1000).toISOString();
+}
+
+/**
+ * Rows the durable sweep should look at now: non-terminal, really submitted
+ * (a remote job id exists, so there is something to ask about), and due.
+ *
+ * A row with next_poll_at NULL is deliberately excluded — that is how
+ * polling is stopped for good, and a stopped row must never silently
+ * restart.
+ */
+export function listDueExternalExecutions(nowIso: string = new Date().toISOString(), limit = 25): ExternalExecutionRecord[] {
+  const bounded = Math.min(Math.max(limit, 1), 100);
+  return getDatabase().prepare(`
+    SELECT * FROM external_executions
+    WHERE status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+      AND remote_job_id IS NOT NULL
+      AND next_poll_at IS NOT NULL
+      AND next_poll_at <= ?
+    ORDER BY next_poll_at ASC
+    LIMIT ?
+  `).all(nowIso, bounded) as ExternalExecutionRecord[];
+}
+
+/**
+ * Atomically take the poll lease for one execution. Returns false when
+ * another sweep already holds it — the caller must then do nothing at all,
+ * including no provider call.
+ */
+function claimPollLease(id: string, nowIso: string): boolean {
+  const res = getDatabase().prepare(`
+    UPDATE external_executions
+       SET next_poll_at = ?, poll_attempts = poll_attempts + 1, updated_at = ?
+     WHERE id = ?
+       AND next_poll_at IS NOT NULL
+       AND next_poll_at <= ?
+  `).run(isoPlusSeconds(nowIso, POLL_LEASE_SECONDS), nowIso, id, nowIso);
+  return Number(res.changes) === 1;
+}
+
+/** Terminal rows stop being polled. Called after every real status read. */
+function settlePollSchedule(execution: ExternalExecutionRecord, nowIso: string): void {
+  if (TERMINAL_STATUSES.includes(execution.status)) {
+    patchRow(execution.id, { next_poll_at: null });
+    return;
+  }
+  if (execution.poll_attempts >= MAX_POLL_ATTEMPTS) {
+    // HONEST TIMEOUT. We stopped asking; we do NOT know how the remote job
+    // ended. UNKNOWN is the ledger's existing word for exactly that, and
+    // inventing FAILED here would be a fabricated outcome.
+    patchRow(execution.id, {
+      status: 'UNKNOWN',
+      next_poll_at: null,
+      error_code: 'POLL_DEADLINE_EXCEEDED',
+      error_message_safe: `SynthOS stopped polling after ${MAX_POLL_ATTEMPTS} attempts. The remote job's final state is unknown; it was not observed to fail.`,
+    });
+    return;
+  }
+  patchRow(execution.id, { next_poll_at: isoPlusSeconds(nowIso, pollBackoffSeconds(execution.poll_attempts)) });
+}
+
+export interface AdvanceResult {
+  execution: ExternalExecutionRecord;
+  polled: boolean;
+  ingested: boolean;
+  /** Set when the lease was held by another sweep, so nothing was done. */
+  skippedReason?: string;
+}
+
+/**
+ * Advance ONE execution by exactly one real step. Idempotent by
+ * construction: the lease prevents a concurrent duplicate poll, and
+ * ingestExternalExecutionResult's own result_ingested_at guard prevents a
+ * duplicate artifact/receipt/knowledge write even if this is called twice.
+ */
+export async function advanceExternalExecution(workspaceId: string, id: string, nowIso: string = new Date().toISOString()): Promise<AdvanceResult> {
+  const existing = getWorkspaceExternalExecution(workspaceId, id);
+  if (!existing) throw Object.assign(new Error('External execution not found.'), { code: 'NOT_FOUND' });
+
+  if (!claimPollLease(id, nowIso)) {
+    return { execution: existing, polled: false, ingested: false, skippedReason: 'Another sweep holds the poll lease for this execution.' };
+  }
+
+  let refreshed = await refreshExternalExecutionStatus(workspaceId, id);
+  let ingested = false;
+
+  if (refreshed.status === 'SUCCEEDED' && !refreshed.result_ingested_at) {
+    try {
+      const result = await ingestExternalExecutionResult(workspaceId, id);
+      refreshed = result.execution;
+      ingested = !result.alreadyIngested;
+    } catch (err: any) {
+      // A result that cannot be ingested (e.g. the remote genuinely returned
+      // no output) is a real, terminal outcome of THIS row. Recorded rather
+      // than retried forever — the remote job itself already succeeded, so
+      // polling it again can never produce a different answer.
+      refreshed = patchRow(id, {
+        error_code: err?.code || 'INGEST_FAILED',
+        error_message_safe: sanitizeError(err?.message),
+        next_poll_at: null,
+      });
+      return { execution: refreshed, polled: true, ingested: false };
+    }
+  }
+
+  settlePollSchedule(refreshed, nowIso);
+  return { execution: row(id)!, polled: true, ingested };
+}
+
+export interface SweepResult {
+  examined: number;
+  advanced: number;
+  ingested: number;
+  errors: number;
+}
+
+/**
+ * THE durable sweep. Called from the existing scheduler tick
+ * (lib/fabric/scheduler.ts) — never from a timer of its own.
+ *
+ * Restart recovery needs no special path: this reads the ledger, and the
+ * ledger is what survived. A process that has just started and one that has
+ * been up for a week execute the identical query.
+ */
+export async function advanceDueExternalExecutions(nowIso: string = new Date().toISOString(), limit = 25): Promise<SweepResult> {
+  const due = listDueExternalExecutions(nowIso, limit);
+  const result: SweepResult = { examined: due.length, advanced: 0, ingested: 0, errors: 0 };
+
+  for (const execution of due) {
+    try {
+      const advanced = await advanceExternalExecution(execution.workspace_id, execution.id, nowIso);
+      if (advanced.polled) result.advanced += 1;
+      if (advanced.ingested) result.ingested += 1;
+    } catch (err) {
+      result.errors += 1;
+      // eslint-disable-next-line no-console
+      console.error('[external-executions] advance failed for', execution.id, err instanceof Error ? err.message : String(err));
+    }
+  }
+  return result;
+}
+
 export interface CancelResult {
   execution: ExternalExecutionRecord;
   confirmed: boolean;
@@ -760,12 +949,12 @@ export async function retryExternalExecution(workspaceId: string, actorUserId: s
 
   const submission = await dispatchForRuntime(runtime, workspaceId, remotePath, targetKind, input);
   if (!submission.ok) {
-    execution = patchRow(execution.id, { status: 'FAILED', error_code: 'SUBMISSION_FAILED', error_message_safe: sanitizeError(submission.error) });
+    execution = patchRow(execution.id, { status: 'FAILED', error_code: 'SUBMISSION_FAILED', error_message_safe: sanitizeError(submission.error), next_poll_at: null });
     recordTransition(execution, 'PENDING', 'FAILED');
     return { execution, created: true, error: submission.error };
   }
   const now = new Date().toISOString();
-  execution = patchRow(execution.id, { status: 'SUBMITTED', remote_job_id: submission.remoteJobId, submitted_at: now });
+  execution = patchRow(execution.id, { status: 'SUBMITTED', remote_job_id: submission.remoteJobId, submitted_at: now, next_poll_at: now });
   recordTransition(execution, 'PENDING', 'SUBMITTED');
   return { execution, created: true };
 }

@@ -34,6 +34,12 @@ import {
 import { resolveCapability } from './registry';
 import { classifyIntent } from './intent';
 import { executeEnvelope, type ExecutionEnvelopeResult, type EnvelopeOutcome, EXTERNAL_ACTION_EXEMPT_FROM_GUARDIAN_RULE } from './envelope';
+// PUSH 2A — the durable external-execution sweep. Deliberately imported into
+// the EXISTING tick rather than given a timer of its own: this file's header
+// already claims to own "the ONE real in-process poll loop", and a second
+// timer would make that false. The sweep's own durability comes from the
+// ledger, not from this loop — see lib/external-executions.ts.
+import { advanceDueExternalExecutions, type SweepResult } from '../external-executions';
 
 // ---------------------------------------------------------------------------
 // Time-phrase parsing. Deterministic, regex-based — no model call, so
@@ -380,13 +386,34 @@ export async function runDueSchedules(nowIso: string = new Date().toISOString())
   return { processed: due.length };
 }
 
+/**
+ * PUSH 2A — one full tick: due schedules, then due external executions.
+ *
+ * Two independent units of work on ONE loop. Kept as separate exported
+ * functions so each is testable alone, and so a failure in one can never
+ * silently stop the other (the sweep is isolated below).
+ */
+export async function runSchedulerTick(nowIso: string = new Date().toISOString()): Promise<{ processed: number; sweep: SweepResult }> {
+  const processed = await runDueSchedules(nowIso);
+  let sweep: SweepResult = { examined: 0, advanced: 0, ingested: 0, errors: 0 };
+  try {
+    sweep = await advanceDueExternalExecutions(nowIso);
+  } catch (err) {
+    // A sweep failure must never take schedules down with it.
+    // eslint-disable-next-line no-console
+    console.error('[scheduler] external-execution sweep failed:', err instanceof Error ? err.message : String(err));
+    sweep = { examined: 0, advanced: 0, ingested: 0, errors: 1 };
+  }
+  return { processed: processed.processed, sweep };
+}
+
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Registers the ONE real in-process poll loop for schedules. Idempotent — calling twice does not start a second timer. */
 export function startScheduler(intervalMs = 10000): void {
   if (schedulerTimer) return;
   schedulerTimer = setInterval(() => {
-    runDueSchedules().catch((err) => {
+    runSchedulerTick().catch((err) => {
       // eslint-disable-next-line no-console
       console.error('[scheduler] tick failed:', err);
     });
