@@ -52,7 +52,7 @@ import {
   type ScheduleStatus
 } from "./lib/persistence";
 import { hermesAdapter } from "./src/services/hermesAdapter";
-import { classifyModelRequest, generateWithFailover, type FailoverResult, DEFAULT_CANDIDATE_MODELS } from "./lib/model-router";
+import { classifyModelRequest, explainUnroutableModel, generateWithFailover, type FailoverResult, DEFAULT_CANDIDATE_MODELS } from "./lib/model-router";
 import { verifyTaskAtGate, checkGuardianRules } from "./lib/kil-gate";
 import { buildTonReadiness } from "./lib/ton-readiness";
 import { probeTonReadiness } from "./lib/ton-probe";
@@ -81,6 +81,7 @@ import {
   listWorkspaceExternalExecutions, getWorkspaceExternalExecution, submitExternalExecution,
   refreshExternalExecutionStatus, cancelExternalExecution, retryExternalExecution,
   ingestExternalExecutionResult, listAllExternalExecutions, submitAndAwaitExternalExecution,
+  isExternalRuntime, EXTERNAL_RUNTIMES,
 } from "./lib/external-executions";
 
 const VALID_EXECUTION_TARGET_TYPES = new Set<ExecutionTargetType>(["model", "deterministic", "mcp_tool", "hermes_runtime", "windmill"]);
@@ -455,12 +456,18 @@ async function startServer() {
       });
 
       const classification = classifyModelRequest(model);
-      if (classification.provider === "UNSUPPORTED") {
+      // PUSH 1 — this route holds a GoogleGenAI client, so the ONLY safe
+      // classification to continue on is GEMINI. Before OpenAI became
+      // executable, "not UNSUPPORTED" and "is Gemini" were the same
+      // statement; they no longer are, and continuing on the old check
+      // would hand an OpenAI model id to Gemini — the precise silent
+      // substitution lib/model-router.ts exists to prevent.
+      if (classification.provider !== "GEMINI") {
         return res.status(200).json({
           success: false,
           status: "DEGRADED",
-          reason: classification.reason,
-          error: classification.message,
+          reason: classification.provider === "UNSUPPORTED" ? classification.reason : "MODEL_MAPPING_NOT_FOUND",
+          error: explainUnroutableModel(classification, "POST /api/generate"),
           requestedModel: classification.requestedModel,
           modelUsed: null,
           timestamp: new Date().toISOString(),
@@ -1989,12 +1996,18 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
             };
           } else {
             const modelClassification = classifyModelRequest(nodeModel);
-            if (modelClassification.provider === "UNSUPPORTED") {
+            // PUSH 1 — same correction as POST /api/generate above: this
+            // branch calls generateViaGemini() with an already-resolved
+            // Gemini API key, so anything that is not GEMINI must stop here
+            // rather than be executed on the wrong provider. Graph nodes
+            // stay Gemini-only in this push; widening them is separate work
+            // with its own evidence.
+            if (modelClassification.provider !== "GEMINI") {
               nodeExecData = {
                 success: false,
                 status: "FAILED",
-                reason: modelClassification.reason,
-                error: modelClassification.message,
+                reason: modelClassification.provider === "UNSUPPORTED" ? modelClassification.reason : "MODEL_MAPPING_NOT_FOUND",
+                error: explainUnroutableModel(modelClassification, "native graph COMPUTE node execution"),
               };
             } else {
               const normalizedModel = modelClassification.resolvedModel;
@@ -3622,9 +3635,16 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
           // classifies GEMINI) — kept so a future change to the classifier
           // can't silently make Jarvis assume a provider that isn't
           // actually configured.
+          //
+          // PUSH 1 — `reason` and `message` no longer exist on every
+          // non-Gemini classification, because OPENAI is now an executable
+          // provider rather than an unsupported one. The reason code is
+          // fixed here instead of read off the union, and the sentence comes
+          // from the one helper that knows the difference between "no
+          // provider can run this" and "this surface does not run it".
           degraded = {
-            reason: jarvisClassification.reason,
-            error: jarvisClassification.message,
+            reason: "MODEL_MAPPING_NOT_FOUND",
+            error: explainUnroutableModel(jarvisClassification, "the Jarvis command route"),
           };
         } else {
           const ai = new GoogleGenAI({
@@ -5257,20 +5277,36 @@ Rules for spokenSummary specifically:
     try {
       const resolved = resolveWorkspaceId(req.body?.workspaceId);
       if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
-      const { targetId, input, taskId, graphRunId, graphNodeId, skillId, idempotencyKey } = req.body || {};
-      if (!targetId || typeof targetId !== "string") {
+      const { targetId, agent, input, taskId, graphRunId, graphNodeId, skillId, idempotencyKey } = req.body || {};
+      // PUSH 1 — the same route now submits to either runtime. It is
+      // deliberately ONE route: the ledger, the workspace authorization,
+      // the rate limit and the evidence spine behind it are identical, and
+      // a second endpoint would have meant a second copy of all four.
+      const runtimeRaw = (req.body || {}).runtime;
+      const runtime = runtimeRaw === undefined ? "windmill" : runtimeRaw;
+      if (!isExternalRuntime(runtime)) {
+        return res.status(400).json({ success: false, error: `Unknown runtime "${String(runtimeRaw)}". Supported runtimes: ${EXTERNAL_RUNTIMES.join(", ")}.` });
+      }
+      if (runtime === "windmill" && (!targetId || typeof targetId !== "string")) {
         return res.status(400).json({ success: false, error: "targetId is required." });
       }
       const actorUserId = (req as AuthedRequest).authUser!.user_id;
       const result = await submitExternalExecution({
-        workspaceId: resolved.workspaceId, createdByUserId: actorUserId, targetId,
+        workspaceId: resolved.workspaceId, createdByUserId: actorUserId, runtime,
+        targetId: typeof targetId === "string" ? targetId : undefined,
+        agent: typeof agent === "string" ? agent : undefined,
         input: input && typeof input === "object" ? input : {},
         taskId, graphRunId, graphNodeId, skillId, idempotencyKey,
       });
       return res.json({ success: result.execution.status !== "FAILED", ...result });
     } catch (err: any) {
-      const code = err?.code === "TARGET_NOT_ALLOWED" ? 403 : err?.code === "INVALID_INPUT" || err?.code === "INPUT_TOO_LARGE" ? 400 : 500;
-      return res.status(code).json({ success: false, error: err?.message || "Failed to submit external execution" });
+      const code =
+        err?.code === "TARGET_NOT_ALLOWED" ? 403
+        : err?.code === "GUARDIAN_BLOCKED" ? 403
+        : err?.code === "RUNTIME_NOT_CONFIGURED" ? 409
+        : err?.code === "INVALID_INPUT" || err?.code === "INPUT_TOO_LARGE" ? 400
+        : 500;
+      return res.status(code).json({ success: false, error: err?.message || "Failed to submit external execution", reason: err?.code || undefined });
     }
   });
 

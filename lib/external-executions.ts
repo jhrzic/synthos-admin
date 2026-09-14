@@ -31,6 +31,14 @@ import { createExecutionContext } from './fabric/context';
 import { recordRuntimeEvent } from './runtime-events';
 import { resolveWindmillTarget, validateAgainstInputSchema, WindmillTargetRecord } from './windmill-targets';
 import * as windmillClient from './windmill-client';
+// PUSH 1 — Antigravity joins this ledger as a SECOND runtime, not as a
+// second ledger. Every guarantee below (workspace ownership at INSERT,
+// status only advancing on real evidence, SUCCESS never implying SynthOS
+// verification, the retry/idempotency rules) is runtime-agnostic and now
+// applies to it unchanged. The `runtime` column already existed and was
+// hardcoded to 'windmill'; it now carries its real value.
+import * as antigravityClient from './antigravity-client';
+import { checkGuardianRules } from './kil-gate';
 
 // ---------------------------------------------------------------------------
 // ADR-006 — the canonical LOCAL truth for a Windmill job (Workstream C).
@@ -47,6 +55,20 @@ import * as windmillClient from './windmill-client';
 
 export type ExternalExecutionStatus =
   | 'PENDING' | 'SUBMITTED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'UNKNOWN';
+
+/** The execution runtimes this ledger can really dispatch to. Not a wish list. */
+export const EXTERNAL_RUNTIMES = ['windmill', 'antigravity'] as const;
+export type ExternalRuntime = (typeof EXTERNAL_RUNTIMES)[number];
+
+export function isExternalRuntime(v: unknown): v is ExternalRuntime {
+  return typeof v === 'string' && (EXTERNAL_RUNTIMES as readonly string[]).includes(v);
+}
+
+/** Human-facing runtime label, used in task titles and artifact headers. */
+const RUNTIME_LABEL: Record<ExternalRuntime, string> = {
+  windmill: 'Windmill',
+  antigravity: 'Antigravity',
+};
 
 const TERMINAL_STATUSES: ExternalExecutionStatus[] = ['SUCCEEDED', 'FAILED', 'CANCELLED'];
 
@@ -123,23 +145,23 @@ function sanitizeError(message: string | undefined | null): string {
 }
 
 function insertRow(params: {
-  workspaceId: string; taskId?: string | null; graphRunId?: string | null; graphNodeId?: string | null;
-  skillId?: string | null; targetId: string; remotePath: string; targetKind: string; correlationId: string;
+  workspaceId: string; runtime: ExternalRuntime; taskId?: string | null; graphRunId?: string | null; graphNodeId?: string | null;
+  skillId?: string | null; targetId: string | null; remotePath: string; targetKind: string; correlationId: string;
   input: Record<string, unknown>; createdByUserId: string; attemptNumber: number; parentExecutionId?: string | null;
 }): ExternalExecutionRecord {
   const db = getDatabase();
   const now = new Date().toISOString();
-  const id = `wmex-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  const id = `${params.runtime === 'antigravity' ? 'agex' : 'wmex'}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
   db.prepare(`
     INSERT INTO external_executions (
       id, workspace_id, runtime, task_id, graph_run_id, graph_node_id, skill_id, target_id, remote_path, target_kind,
       remote_job_id, status, attempt_number, parent_execution_id, correlation_id, input_json,
       submitted_at, started_at, completed_at, last_checked_at, error_code, error_message_safe,
       result_artifact_id, result_receipt_id, result_ingested_at, created_by_user_id, created_at, updated_at
-    ) VALUES (?, ?, 'windmill', ?, ?, ?, ?, ?, ?, ?, NULL, 'PENDING', ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'PENDING', ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)
   `).run(
-    id, params.workspaceId, params.taskId ?? null, params.graphRunId ?? null, params.graphNodeId ?? null,
-    params.skillId ?? null, params.targetId, params.remotePath, params.targetKind,
+    id, params.workspaceId, params.runtime, params.taskId ?? null, params.graphRunId ?? null, params.graphNodeId ?? null,
+    params.skillId ?? null, params.targetId ?? null, params.remotePath, params.targetKind,
     params.attemptNumber, params.parentExecutionId ?? null, params.correlationId, JSON.stringify(params.input ?? {}),
     params.createdByUserId, now, now
   );
@@ -170,6 +192,87 @@ async function dispatchWindmillJob(
   return ctx.invoke('windmill.job', () => windmillClient.submitJob({ remotePath, kind, input }));
 }
 
+// ---------------------------------------------------------------------------
+// PUSH 1 — runtime dispatch. Three small functions, one switch each, rather
+// than an adapter-registry abstraction: there are two runtimes, and an
+// indirection layer would hide which real client call a row went through
+// without removing a single line of real work.
+//
+// The invocation NAME passed to ctx.invoke is the real runtime's, so the
+// observed trace can never claim Windmill ran an Antigravity interaction.
+// ---------------------------------------------------------------------------
+
+/** The instruction an Antigravity interaction runs, read from the ledger's own input payload. */
+export function antigravityInstructionFrom(input: Record<string, unknown>): string {
+  const raw = (input || {}).instruction;
+  return typeof raw === 'string' ? raw : '';
+}
+
+/**
+ * GUARDIAN IS AUTHORITATIVE, INCLUDING OVER A RUNTIME THAT HAS ITS OWN
+ * AUTONOMOUS AGENT LOOP.
+ *
+ * Antigravity executes code in a sandbox Google controls, under its own
+ * planner, and SynthOS cannot supervise a step it never sees. The
+ * enforceable boundary is therefore the one thing SynthOS fully controls:
+ * WHAT IS SENT. The instruction is evaluated by the same, single policy
+ * function that gates the terminal (lib/kil-gate.ts::checkGuardianRules) —
+ * not a second Antigravity-specific policy — and anything it classifies as
+ * BLOCKED or APPROVAL_REQUIRED is never dispatched.
+ *
+ * This is deliberately stated as what it is and not more. It is a
+ * submission gate, not a sandbox supervisor: an instruction that passes may
+ * still cause the remote agent to run commands SynthOS never saw. The
+ * second, independent boundary is that nothing the runtime returns is
+ * trusted — the result must still pass Aegis and the KIL gate before a
+ * receipt exists, exactly like every other execution in this ledger.
+ */
+export function guardianCheckInstruction(instruction: string): { allowed: boolean; error?: string; citation?: string } {
+  const check = checkGuardianRules(instruction);
+  if (check.status === 'SAFE') return { allowed: true };
+  return {
+    allowed: false,
+    error: `Guardian refused this instruction before dispatch (${check.status}, risk ${check.riskLevel}): ${check.warning || 'policy violation'}`,
+    citation: check.ruleCitation,
+  };
+}
+
+async function dispatchAntigravityInteraction(
+  workspaceId: string,
+  agent: string,
+  input: Record<string, unknown>
+): Promise<{ ok: boolean; remoteJobId: string | null; error?: string }> {
+  const instruction = antigravityInstructionFrom(input);
+  if (!instruction.trim()) {
+    return { ok: false, remoteJobId: null, error: 'An "instruction" string is required to run an Antigravity interaction.' };
+  }
+  const guardian = guardianCheckInstruction(instruction);
+  if (!guardian.allowed) {
+    return { ok: false, remoteJobId: null, error: guardian.error };
+  }
+
+  const tools = Array.isArray((input || {}).tools)
+    ? ((input as any).tools as unknown[]).filter((t): t is { type: string } => !!t && typeof (t as any).type === 'string')
+    : undefined;
+  const maxTotalTokens = typeof (input || {}).maxTotalTokens === 'number' ? (input as any).maxTotalTokens : undefined;
+
+  const ctx = createExecutionContext({ workspaceId });
+  return ctx.invoke('runtime.antigravity', () => antigravityClient.submitInteraction({ instruction, agent, tools, maxTotalTokens }));
+}
+
+async function dispatchForRuntime(
+  runtime: ExternalRuntime,
+  workspaceId: string,
+  remotePath: string,
+  targetKind: string,
+  input: Record<string, unknown>
+): Promise<{ ok: boolean; remoteJobId: string | null; error?: string }> {
+  if (runtime === 'antigravity') {
+    return dispatchAntigravityInteraction(workspaceId, remotePath, input);
+  }
+  return dispatchWindmillJob(workspaceId, remotePath, targetKind as 'script' | 'flow', input);
+}
+
 function recordTransition(execution: ExternalExecutionRecord, previousStatus: string | null, eventStatus: 'SUBMITTED' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'CANCELLED') {
   if (previousStatus === execution.status) return;
   recordRuntimeEvent({
@@ -185,7 +288,12 @@ function recordTransition(execution: ExternalExecutionRecord, previousStatus: st
 export interface SubmitExternalExecutionParams {
   workspaceId: string;
   createdByUserId: string;
-  targetId: string;
+  /** Defaults to 'windmill' so every existing caller is byte-for-byte unchanged. */
+  runtime?: ExternalRuntime;
+  /** Required for runtime 'windmill' (a windmill_targets row). Ignored for 'antigravity', which has no local target registry. */
+  targetId?: string;
+  /** Required for runtime 'antigravity': the managed agent id. Defaults to the configured one. */
+  agent?: string;
   input: Record<string, unknown>;
   taskId?: string;
   graphRunId?: string;
@@ -210,6 +318,7 @@ export interface SubmitExternalExecutionResult {
  */
 export async function submitExternalExecution(params: SubmitExternalExecutionParams): Promise<SubmitExternalExecutionResult> {
   const db = getDatabase();
+  const runtime: ExternalRuntime = params.runtime || 'windmill';
 
   // Q1 — idempotent on an explicit key: a real prior row for this exact key
   // in this workspace is returned as-is, never duplicated.
@@ -219,28 +328,64 @@ export async function submitExternalExecution(params: SubmitExternalExecutionPar
     if (existing) return { execution: existing, created: false };
   }
 
-  const target: WindmillTargetRecord | null = resolveWindmillTarget(params.workspaceId, params.targetId);
-  if (!target) {
-    throw Object.assign(new Error('The requested Windmill target does not exist, is disabled, or is not visible to this workspace.'), { code: 'TARGET_NOT_ALLOWED' });
-  }
+  // Per-runtime pre-flight. Both branches produce the same three values —
+  // the target row id (null where a runtime has no local registry), the
+  // remote path, and its kind — so everything below this point is
+  // runtime-agnostic and the ledger's guarantees are not re-implemented
+  // twice.
+  let targetId: string | null;
+  let remotePath: string;
+  let targetKind: string;
 
-  const schemaCheck = validateAgainstInputSchema(target, params.input || {});
-  if (!schemaCheck.valid) {
-    throw Object.assign(new Error(schemaCheck.error || 'Input failed target schema validation.'), { code: 'INVALID_INPUT' });
-  }
-  if (!windmillClient.isJobInputWithinBounds(params.input)) {
-    throw Object.assign(new Error('Job input exceeds the allowed size bound.'), { code: 'INPUT_TOO_LARGE' });
+  if (runtime === 'antigravity') {
+    if (!antigravityClient.isAntigravityConfigured()) {
+      throw Object.assign(new Error('Antigravity is not configured in this deployment — no credential resolves.'), { code: 'RUNTIME_NOT_CONFIGURED' });
+    }
+    if (!antigravityClient.isAntigravityEnabled()) {
+      throw Object.assign(new Error('ANTIGRAVITY_ENABLED is not "true" — outward Antigravity execution is switched off in this deployment.'), { code: 'RUNTIME_NOT_CONFIGURED' });
+    }
+    const instruction = antigravityInstructionFrom(params.input || {});
+    if (!instruction.trim()) {
+      throw Object.assign(new Error('An "instruction" string is required to run an Antigravity interaction.'), { code: 'INVALID_INPUT' });
+    }
+    if (!antigravityClient.isInstructionWithinBounds(instruction)) {
+      throw Object.assign(new Error('Instruction exceeds the allowed size bound.'), { code: 'INPUT_TOO_LARGE' });
+    }
+    // Guardian refuses BEFORE a ledger row exists, so a policy-violating
+    // instruction leaves no record implying it was ever dispatched.
+    const guardian = guardianCheckInstruction(instruction);
+    if (!guardian.allowed) {
+      throw Object.assign(new Error(guardian.error || 'Guardian refused this instruction.'), { code: 'GUARDIAN_BLOCKED' });
+    }
+    targetId = null;
+    remotePath = params.agent || antigravityClient.resolveAntigravityAgent();
+    targetKind = 'agent';
+  } else {
+    const target: WindmillTargetRecord | null = resolveWindmillTarget(params.workspaceId, params.targetId as string);
+    if (!target) {
+      throw Object.assign(new Error('The requested Windmill target does not exist, is disabled, or is not visible to this workspace.'), { code: 'TARGET_NOT_ALLOWED' });
+    }
+    const schemaCheck = validateAgainstInputSchema(target, params.input || {});
+    if (!schemaCheck.valid) {
+      throw Object.assign(new Error(schemaCheck.error || 'Input failed target schema validation.'), { code: 'INVALID_INPUT' });
+    }
+    if (!windmillClient.isJobInputWithinBounds(params.input)) {
+      throw Object.assign(new Error('Job input exceeds the allowed size bound.'), { code: 'INPUT_TOO_LARGE' });
+    }
+    targetId = target.id;
+    remotePath = target.remote_path;
+    targetKind = target.kind;
   }
 
   const correlationId = params.idempotencyKey || `adhoc-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
   let execution = insertRow({
-    workspaceId: params.workspaceId,
+    workspaceId: params.workspaceId, runtime,
     taskId: params.taskId, graphRunId: params.graphRunId, graphNodeId: params.graphNodeId, skillId: params.skillId,
-    targetId: target.id, remotePath: target.remote_path, targetKind: target.kind,
+    targetId, remotePath, targetKind,
     correlationId, input: params.input || {}, createdByUserId: params.createdByUserId, attemptNumber: 1,
   });
 
-  const submission = await dispatchWindmillJob(params.workspaceId, target.remote_path, target.kind, params.input || {});
+  const submission = await dispatchForRuntime(runtime, params.workspaceId, remotePath, targetKind, params.input || {});
   if (!submission.ok) {
     execution = patchRow(execution.id, { status: 'FAILED', error_code: 'SUBMISSION_FAILED', error_message_safe: sanitizeError(submission.error) });
     recordTransition(execution, 'PENDING', 'FAILED');
@@ -262,8 +407,11 @@ export async function refreshExternalExecutionStatus(workspaceId: string, id: st
   }
 
   const previousStatus = existing.status;
+  const runtime: ExternalRuntime = isExternalRuntime(existing.runtime) ? existing.runtime : 'windmill';
   const ctx = createExecutionContext({ workspaceId });
-  const statusResult = await ctx.invoke('windmill.job', () => windmillClient.getJobStatus(existing.remote_job_id));
+  const statusResult = runtime === 'antigravity'
+    ? await ctx.invoke('runtime.antigravity', () => antigravityClient.getInteractionStatus(existing.remote_job_id!))
+    : await ctx.invoke('windmill.job', () => windmillClient.getJobStatus(existing.remote_job_id));
   const now = new Date().toISOString();
 
   if (!statusResult.ok) {
@@ -295,6 +443,17 @@ export async function refreshExternalExecutionStatus(workspaceId: string, id: st
     case 'CANCELLED':
       nextStatus = 'CANCELLED';
       patch.completed_at = now;
+      break;
+    case 'REQUIRES_ACTION':
+      // PUSH 1 (Antigravity) — the remote agent has stopped and is waiting
+      // for an input SynthOS was not asked for and cannot supply. It is
+      // neither running nor finished, and calling it either would be a
+      // false statement: RUNNING would poll forever, SUCCEEDED/FAILED would
+      // invent an outcome. UNKNOWN is the honest state this ledger already
+      // has for "the remote side is not telling us something we can act on".
+      nextStatus = 'UNKNOWN';
+      patch.error_code = 'REMOTE_REQUIRES_ACTION';
+      patch.error_message_safe = 'The remote runtime is waiting for an input SynthOS did not supply. It will not progress on its own.';
       break;
     default:
       nextStatus = 'UNKNOWN';
@@ -330,26 +489,59 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
     throw Object.assign(new Error(`Cannot ingest a result for status "${existing.status}" — only a confirmed SUCCEEDED remote job may be ingested.`), { code: 'NOT_SUCCEEDED' });
   }
 
+  // PUSH 1 — runtime-aware result read. The remote CALL differs per
+  // runtime; everything after it (task spine, artifact, Aegis, receipt,
+  // KIL, memory index) is identical and is not duplicated.
+  const runtime: ExternalRuntime = isExternalRuntime(existing.runtime) ? existing.runtime : 'windmill';
+  const runtimeLabel = RUNTIME_LABEL[runtime];
   const ctx = createExecutionContext({ workspaceId });
-  const resultCall = await ctx.invoke('windmill.job', () => windmillClient.getJobResult(existing.remote_job_id));
-  if (!resultCall.ok) {
-    throw Object.assign(new Error(sanitizeError(resultCall.error)), { code: 'RESULT_FETCH_FAILED' });
+
+  let resultText: string;
+  let resultTruncated = false;
+  /** Real, provider-reported execution evidence. Never estimated, never invented. */
+  let runtimeEvidence: Record<string, unknown> = {};
+
+  if (runtime === 'antigravity') {
+    const interaction = await ctx.invoke('runtime.antigravity', () => antigravityClient.getInteractionResult(existing.remote_job_id!));
+    if (!interaction.ok) {
+      throw Object.assign(new Error(sanitizeError(interaction.error)), { code: 'RESULT_FETCH_FAILED' });
+    }
+    if (!interaction.outputText.trim()) {
+      // A completed interaction that produced no text is a real outcome and
+      // must not become an artifact containing nothing. Ingesting it would
+      // manufacture a verifiable-looking record of no work.
+      throw Object.assign(new Error('The Antigravity interaction completed but returned no output text.'), { code: 'EMPTY_RESULT' });
+    }
+    resultText = interaction.outputText;
+    resultTruncated = interaction.truncated;
+    runtimeEvidence = {
+      stepNames: interaction.stepNames,
+      stepCount: interaction.stepNames.length,
+      usage: interaction.usage ?? null,
+      environmentId: interaction.environmentId,
+    };
+  } else {
+    const resultCall = await ctx.invoke('windmill.job', () => windmillClient.getJobResult(existing.remote_job_id));
+    if (!resultCall.ok) {
+      throw Object.assign(new Error(sanitizeError(resultCall.error)), { code: 'RESULT_FETCH_FAILED' });
+    }
+    resultText = typeof resultCall.result === 'string' ? resultCall.result : JSON.stringify(resultCall.result, null, 2);
+    resultTruncated = !!resultCall.truncated;
   }
 
-  const taskId = existing.task_id || `wmext-${existing.id}`;
-  const title = `Windmill execution — ${existing.remote_path}`;
-  const description = `External execution of Windmill ${existing.target_kind} "${existing.remote_path}" (remote job ${existing.remote_job_id}).`;
+  const taskId = existing.task_id || `${runtime === 'antigravity' ? 'agext' : 'wmext'}-${existing.id}`;
+  const title = `${runtimeLabel} execution — ${existing.remote_path}`;
+  const description = `External execution of ${runtimeLabel} ${existing.target_kind} "${existing.remote_path}" (remote job ${existing.remote_job_id}).`;
   const nowIso = new Date().toISOString();
 
-  createInitialTask({ taskId, workspaceId, title, description, assignedAgent: 'windmill', assignedModel: `windmill:${existing.remote_path}`, createdAt: existing.created_at });
+  createInitialTask({ taskId, workspaceId, title, description, assignedAgent: runtime, assignedModel: `${runtime}:${existing.remote_path}`, createdAt: existing.created_at });
   recordActivityEvent({ taskId, eventType: 'TASK_CREATED', agentId: 'orchestrator', payload: { title, status: 'TODO' }, createdAt: existing.created_at });
   updateTaskStatus(taskId, 'READY');
-  recordActivityEvent({ taskId, eventType: 'AGENT_ASSIGNED', agentId: 'windmill', payload: { agent: 'windmill', model: `windmill:${existing.remote_path}`, status: 'READY' } });
+  recordActivityEvent({ taskId, eventType: 'AGENT_ASSIGNED', agentId: runtime, payload: { agent: runtime, model: `${runtime}:${existing.remote_path}`, status: 'READY' } });
   updateTaskStatus(taskId, 'RUNNING');
-  recordActivityEvent({ taskId, eventType: 'EXECUTION_STARTED', agentId: 'windmill', payload: { status: 'RUNNING', remoteJobId: existing.remote_job_id } });
+  recordActivityEvent({ taskId, eventType: 'EXECUTION_STARTED', agentId: runtime, payload: { status: 'RUNNING', remoteJobId: existing.remote_job_id, correlationId: existing.correlation_id } });
 
-  const resultText = typeof resultCall.result === 'string' ? resultCall.result : JSON.stringify(resultCall.result, null, 2);
-  recordActivityEvent({ taskId, eventType: 'PROVIDER_COMPLETED', agentId: 'windmill', payload: { model: `windmill:${existing.remote_path}`, outputLength: resultText.length, truncated: !!resultCall.truncated } });
+  recordActivityEvent({ taskId, eventType: 'PROVIDER_COMPLETED', agentId: runtime, payload: { model: `${runtime}:${existing.remote_path}`, runtime, outputLength: resultText.length, truncated: resultTruncated, ...runtimeEvidence } });
 
   // STEP 3 — the canonical Vault writer (lib/vault.ts), the same one
   // lib/fabric/kernel.ts's SUCCESS path uses. This replaces a direct
@@ -362,7 +554,22 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
   // `...`" header line (which had to guess the path before writing) is
   // dropped rather than filled with a placeholder baked into the saved
   // document.
-  const artifactContent = `# ${title}\n\n**Runtime**: Windmill\n**Remote job**: ${existing.remote_job_id}\n**Timestamp**: ${nowIso}\n\n---\n\n\`\`\`\n${resultText}\n\`\`\`\n`;
+  // PUSH 1 — the artifact header carries real provenance for whichever
+  // runtime produced it: runtime, remote job id, and the correlation id
+  // that links this document back to the originating SynthOS task. That is
+  // what makes the Vault copy traceable rather than just a saved blob.
+  const provenanceLines = [
+    `**Runtime**: ${runtimeLabel}`,
+    `**Remote job**: ${existing.remote_job_id}`,
+    `**Correlation**: ${existing.correlation_id}`,
+    `**Workspace**: ${workspaceId}`,
+    `**Timestamp**: ${nowIso}`,
+  ];
+  if (runtime === 'antigravity' && Array.isArray(runtimeEvidence.stepNames)) {
+    const steps = runtimeEvidence.stepNames as string[];
+    provenanceLines.push(`**Remote steps**: ${steps.length > 0 ? steps.join(', ') : 'none reported'}`);
+  }
+  const artifactContent = `# ${title}\n\n${provenanceLines.join('\n')}\n\n---\n\n\`\`\`\n${resultText}\n\`\`\`\n`;
   const persistedArtifact = writeWorkspaceArtifact({
     workspaceId,
     taskId,
@@ -372,7 +579,7 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
     createdAt: nowIso,
   });
   recordActivityEvent({
-    taskId, eventType: 'ARTIFACT_SAVED', agentId: 'windmill',
+    taskId, eventType: 'ARTIFACT_SAVED', agentId: runtime,
     payload: { artifactId: persistedArtifact.artifact_id, relativePath: persistedArtifact.relative_path, diskPath: persistedArtifact.disk_path, contentHash: persistedArtifact.content_hash, sizeBytes: persistedArtifact.size_bytes },
     createdAt: nowIso,
   });
@@ -390,11 +597,15 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
     recordActivityEvent({ taskId, eventType: 'AEGIS_REVIEWED', agentId: 'aegis', payload: { reviewId: persistedReview.review_id, decision: 'VERIFIED', score: aegisResult.score, checks: aegisResult.checks }, createdAt: nowIso });
 
     // F5 — SynthOS signs its own receipt with the existing Ed25519 path.
-    // The remote runtime (Windmill) never signs anything authoritative.
+    // The remote runtime (Windmill or Antigravity) never signs anything
+    // authoritative, and never holds the signing key.
     const newReceiptId = `rcpt-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
     const canonicalPayload: CanonicalReceiptPayload = {
       receiptId: newReceiptId, taskId, reviewId: persistedReview.review_id, workspaceId,
-      assignedAgent: 'windmill', provider: 'windmill', modelUsed: existing.remote_path,
+      // PUSH 1 — attests to the runtime that ACTUALLY executed. Signing
+      // 'windmill' over an Antigravity result would be a false statement in
+      // a cryptographically signed record.
+      assignedAgent: runtime, provider: runtime, modelUsed: existing.remote_path,
       artifactId: persistedArtifact.artifact_id, artifactHash: persistedArtifact.content_hash,
       aegisDecision: aegisResult.decision, aegisMethod: aegisResult.method, createdAt: nowIso,
     };
@@ -406,15 +617,15 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
       recordReceipt({ receiptId: newReceiptId, taskId, reviewId: persistedReview.review_id, algorithm, publicKey: publicKeyPem, payloadJson: canonicalPayloadStr, signature, createdAt: nowIso });
       recordActivityEvent({ taskId, eventType: 'RECEIPT_CREATED', agentId: 'guardian', payload: { receiptId: newReceiptId, algorithm, fingerprint, signature, verified: true }, createdAt: nowIso });
       updateTaskStatus(taskId, 'DONE');
-      recordActivityEvent({ taskId, eventType: 'TASK_COMPLETED', agentId: 'windmill', payload: { receiptId: newReceiptId, status: 'DONE' }, createdAt: nowIso });
+      recordActivityEvent({ taskId, eventType: 'TASK_COMPLETED', agentId: runtime, payload: { receiptId: newReceiptId, status: 'DONE' }, createdAt: nowIso });
       receiptId = newReceiptId;
 
       // KIL — isolated in its own try/catch: never affects task/receipt outcome.
       try {
         const gate = verifyTaskAtGate({
           taskId, workspaceId, title, description,
-          groundingContext: [title, description, existing.remote_path].filter(Boolean).join('\n\n'),
-          assignedAgent: 'windmill', output: resultText,
+          groundingContext: [title, description, existing.remote_path, antigravityInstructionFrom(existing.input_json ? JSON.parse(existing.input_json) : {})].filter(Boolean).join('\n\n'),
+          assignedAgent: runtime, output: resultText,
         });
         if (gate.observation.promoted) {
           try {
@@ -431,7 +642,10 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
       recordActivityEvent({ taskId, eventType: 'RECEIPT_VERIFICATION_FAILED', agentId: 'guardian', payload: { reviewId: persistedReview.review_id }, createdAt: nowIso });
     }
   } else {
-    // F4/rule 15 — Windmill succeeding never implies SynthOS verification.
+    // F4/rule 15 — a remote runtime succeeding never implies SynthOS
+    // verification. This is the load-bearing rule for Antigravity too: it
+    // runs its own autonomous agent loop and reports its own success, and
+    // that report buys it nothing here.
     // No receipt, task explicitly FAILED, exactly like a failed Aegis
     // decision on the native /api/execute-agent-task path (N4).
     updateTaskStatus(taskId, 'FAILED');
@@ -462,6 +676,20 @@ export async function cancelExternalExecution(workspaceId: string, id: string): 
     return { execution: existing, confirmed: false, error: `Cannot cancel an execution in terminal or unsubmitted status "${existing.status}".` };
   }
 
+  const runtime: ExternalRuntime = isExternalRuntime(existing.runtime) ? existing.runtime : 'windmill';
+  if (runtime === 'antigravity') {
+    // HONEST LIMITATION, stated rather than faked. Google's managed
+    // interactions API publishes no cancel operation, so there is nothing
+    // real to call. Marking the row CANCELLED locally would be the exact
+    // fabrication rule O1/O2/O3 exists to prevent: the remote sandbox would
+    // keep running — and keep billing — behind a UI that said it stopped.
+    return {
+      execution: existing,
+      confirmed: false,
+      error: 'Cancellation is NOT_IMPLEMENTED for the Antigravity runtime — its managed API exposes no cancel operation, and SynthOS will not mark a remote interaction cancelled that it cannot actually stop.',
+    };
+  }
+
   const previousStatus = existing.status;
   const ctx = createExecutionContext({ workspaceId });
   const result = await ctx.invoke('windmill.job', () => windmillClient.cancelJob(existing.remote_job_id));
@@ -488,22 +716,49 @@ export async function retryExternalExecution(workspaceId: string, actorUserId: s
   if (!TERMINAL_STATUSES.includes(prior.status) || prior.status === 'SUCCEEDED') {
     throw Object.assign(new Error(`Cannot retry an execution in status "${prior.status}" — only a failed or cancelled attempt may be retried.`), { code: 'NOT_RETRYABLE' });
   }
-  if (!prior.target_id) {
-    throw Object.assign(new Error('The prior attempt has no resolvable target to retry.'), { code: 'NOT_RETRYABLE' });
-  }
-
+  const runtime: ExternalRuntime = isExternalRuntime(prior.runtime) ? prior.runtime : 'windmill';
   const input = prior.input_json ? JSON.parse(prior.input_json) : {};
-  const target = resolveWindmillTarget(workspaceId, prior.target_id);
-  if (!target) throw Object.assign(new Error('The target for this execution is no longer allowed.'), { code: 'TARGET_NOT_ALLOWED' });
+
+  // Per-runtime target re-resolution. A retry must re-check that the target
+  // is STILL allowed and the runtime STILL enabled — a prior row is not
+  // standing permission to dispatch again.
+  let targetId: string | null;
+  let remotePath: string;
+  let targetKind: string;
+
+  if (runtime === 'antigravity') {
+    if (!antigravityClient.isAntigravityConfigured() || !antigravityClient.isAntigravityEnabled()) {
+      throw Object.assign(new Error('The Antigravity runtime is no longer configured or enabled in this deployment.'), { code: 'RUNTIME_NOT_CONFIGURED' });
+    }
+    // Guardian is re-evaluated on every retry, never inherited from the
+    // first attempt: policy can change between attempts, and a retry is a
+    // new outward dispatch decision.
+    const guardian = guardianCheckInstruction(antigravityInstructionFrom(input));
+    if (!guardian.allowed) {
+      throw Object.assign(new Error(guardian.error || 'Guardian refused this instruction.'), { code: 'GUARDIAN_BLOCKED' });
+    }
+    targetId = null;
+    remotePath = prior.remote_path;
+    targetKind = prior.target_kind;
+  } else {
+    if (!prior.target_id) {
+      throw Object.assign(new Error('The prior attempt has no resolvable target to retry.'), { code: 'NOT_RETRYABLE' });
+    }
+    const target = resolveWindmillTarget(workspaceId, prior.target_id);
+    if (!target) throw Object.assign(new Error('The target for this execution is no longer allowed.'), { code: 'TARGET_NOT_ALLOWED' });
+    targetId = target.id;
+    remotePath = target.remote_path;
+    targetKind = target.kind;
+  }
 
   const correlationId = `${prior.correlation_id}::retry-${prior.attempt_number + 1}`;
   let execution = insertRow({
-    workspaceId, taskId: prior.task_id, graphRunId: prior.graph_run_id, graphNodeId: prior.graph_node_id, skillId: prior.skill_id,
-    targetId: target.id, remotePath: target.remote_path, targetKind: target.kind,
+    workspaceId, runtime, taskId: prior.task_id, graphRunId: prior.graph_run_id, graphNodeId: prior.graph_node_id, skillId: prior.skill_id,
+    targetId, remotePath, targetKind,
     correlationId, input, createdByUserId: actorUserId, attemptNumber: prior.attempt_number + 1, parentExecutionId: prior.id,
   });
 
-  const submission = await dispatchWindmillJob(workspaceId, target.remote_path, target.kind, input);
+  const submission = await dispatchForRuntime(runtime, workspaceId, remotePath, targetKind, input);
   if (!submission.ok) {
     execution = patchRow(execution.id, { status: 'FAILED', error_code: 'SUBMISSION_FAILED', error_message_safe: sanitizeError(submission.error) });
     recordTransition(execution, 'PENDING', 'FAILED');

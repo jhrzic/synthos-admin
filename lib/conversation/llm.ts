@@ -28,7 +28,7 @@
 // that is never asked cannot answer from its own priors.
 // ---------------------------------------------------------------------------
 
-import { classifyModelRequest, generateWithFailover, type FailoverAttemptLog } from '../model-router';
+import { classifyModelRequest, explainUnroutableModel, generateWithFailover, type FailoverAttemptLog } from '../model-router';
 import type { BusinessProfile, ConversationMessage } from './engine';
 import type { ScopedMemoryResult } from '../memory-index';
 import { resolveModelApiKey } from '../model-credentials';
@@ -67,10 +67,17 @@ export function resolveConversationProvider(preferredModel?: string): LlmAvailab
   }
   const classified = classifyModelRequest(preferredModel);
   if (classified.provider !== 'GEMINI') {
+    // PUSH 1 — the customer-facing conversation engine stays Gemini-only on
+    // purpose. Its grounding rules, refusal logic and evidence boundary were
+    // built and tested against one provider; quietly widening them because a
+    // second provider became executable elsewhere in the platform would
+    // change what a customer's chat window can say without anyone having
+    // verified it. The message names the real reason rather than claiming an
+    // unsupported provider.
     return {
       available: false,
       reason: 'MODEL_UNSUPPORTED',
-      detail: classified.message,
+      detail: explainUnroutableModel(classified, 'the customer conversation engine'),
     };
   }
   return { available: true, provider: 'gemini', candidateModels: [classified.resolvedModel] };

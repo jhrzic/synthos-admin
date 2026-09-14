@@ -86,15 +86,28 @@ describe('F1: /api/execute-agent-task never claims a tool ran (originally server
     expect(kernelContent).toContain('const packageMetadataResult = read_package_metadata();');
   });
 
-  it('the real ctx.invoke() call site in the kernel wraps the real Gemini retry mechanics, named "model.gemini" — not a fabricated or per-role tool name', () => {
-    expect(kernelContent).toContain('await ctx.invoke("model.gemini", async () => {');
-    // STEP 4 — the wrapped block now calls the shared generateViaGemini()
-    // helper (lib/fabric/model-gemini.ts) rather than inlining the retry
-    // loop; the real, unchanged loop lives there now, not a different or
-    // fabricated mechanism.
-    const invokeIdx = kernelContent.indexOf('await ctx.invoke("model.gemini"');
+  // PUSH 1 — the invocation name is no longer the literal "model.gemini";
+  // it is derived from the classified provider, because the kernel now
+  // dispatches to two of them. The RULE this test protects is unchanged and
+  // is asserted more precisely than before: the name must come from real
+  // provider identity, must be one of the real provider names, and must
+  // never be a per-role or fabricated label. A run on OpenAI leaving a
+  // trace that says "model.gemini" is exactly the falsehood F1 existed to
+  // prevent, so the derivation is pinned rather than a single literal.
+  it('the real ctx.invoke() call site in the kernel is named from real provider identity — never a fabricated or per-role tool name', () => {
+    expect(kernelContent).toContain('await ctx.invoke(invocationName, async () => {');
+    // The name is computed from the classified provider, and from nothing
+    // else — not from the agent role, not from a caller-supplied string.
+    expect(kernelContent).toContain('const invocationName = provider === "OPENAI" ? "model.openai" : "model.gemini";');
+
+    // The wrapped block calls the shared real adapters — one per provider,
+    // neither inlining its own retry loop nor inventing a mechanism.
+    const invokeIdx = kernelContent.indexOf('await ctx.invoke(invocationName');
     const wrappedBlock = kernelContent.slice(invokeIdx, invokeIdx + 2000);
     expect(wrappedBlock).toContain('generateViaGemini({');
+    expect(wrappedBlock).toContain('generateViaOpenAI({');
+
+    // The real Gemini mechanics are still the real Gemini mechanics.
     expect(modelGeminiContent).toContain('for (const m of candidateModels) {');
     expect(modelGeminiContent).toContain('ai.models.generateContent({');
   });

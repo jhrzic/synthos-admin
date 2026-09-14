@@ -69,7 +69,8 @@ import {
   read_package_metadata,
   projectKnowledgeCandidate,
 } from '../persistence';
-import { classifyModelRequest, DEFAULT_CANDIDATE_MODELS } from '../model-router';
+import { classifyModelRequest, DEFAULT_CANDIDATE_MODELS, PROVIDER_ENV_VAR, type ExecutableProvider } from '../model-router';
+import { resolveModelApiKey, type ModelProvider } from '../model-credentials';
 import { verifyTaskAtGate } from '../kil-gate';
 import { indexVaultArtifact } from '../memory-index';
 // STEP 2 — the canonical Vault writer (lib/vault.ts). Replaces this file's
@@ -84,7 +85,24 @@ import { writeWorkspaceArtifact } from '../vault';
 // to remain equivalent to before, not because graph execution needs an
 // agent-persona concept of its own.
 import { generateViaGemini } from './model-gemini';
+// PUSH 1 — the OpenAI counterpart of model-gemini.ts, same shape, same
+// never-throws contract. Imported alongside it rather than behind a new
+// abstraction: two providers do not justify a plugin layer, and the one
+// switch below is easier to read than an indirection would be.
+import { generateViaOpenAI } from './model-openai';
 import type { ExecuteAgentTaskInput, ExecutionResult, ExecutionContext } from './types';
+
+/**
+ * The provider identity written into a signed receipt. Deliberately the
+ * vendor's own name rather than the router's internal enum: a receipt is
+ * read by people outside this codebase, and "google-genai" is the exact
+ * string every receipt signed before PUSH 1 already carries — changing it
+ * would break comparability with the existing signed history.
+ */
+export const PROVIDER_RECEIPT_IDENTITY: Record<ExecutableProvider, string> = {
+  GEMINI: "google-genai",
+  OPENAI: "openai",
+};
 
 export interface AgentRolePromptParams {
   assignedAgent: string;
@@ -284,32 +302,24 @@ export async function executeAgentTask(
       payload: { agent: assignedAgent, model: assignedModel, status: "READY" },
     });
 
-    // Check API Key
-    const apiKey = process.env.GEMINI_API_KEY || "";
-    if (!apiKey) {
-      updateTaskStatus(taskId, "FAILED", undefined, resolvedWorkspaceId);
-      recordActivityEvent({
-        taskId,
-        expectedWorkspaceId: resolvedWorkspaceId,
-        eventType: "PROVIDER_FAILED",
-        agentId: assignedAgent,
-        payload: { reason: "BLOCKED_MISSING_CREDENTIAL", error: "GEMINI_API_KEY environment variable is not configured" },
-      });
-      return {
-        status: 400,
-        body: {
-          success: false,
-          status: "BLOCKED",
-          reason: "BLOCKED_MISSING_CREDENTIAL",
-          error: "GEMINI_API_KEY environment variable is not configured on the server",
-          taskId,
-        },
-      };
-    }
-
-    // 2b. Provider identity gate — a non-Gemini model request must fail
-    // explicitly here, before the task ever claims RUNNING, rather than
-    // being silently substituted with a Gemini model.
+    // 2a. Provider identity gate — a model request must be attributed to a
+    // real provider before anything else, and must fail explicitly here,
+    // before the task ever claims RUNNING, rather than being silently
+    // substituted with another provider's model.
+    //
+    // PUSH 1 ORDERING CHANGE, stated plainly because it is a real behavior
+    // change: this gate used to run AFTER the credential check, which meant
+    // an unsupported model in a deployment with no key reported
+    // BLOCKED_MISSING_CREDENTIAL rather than the true reason
+    // (test/fabric-characterization.test.ts LIVE 4 characterized exactly
+    // that, and called it deferred). It had to move, because with two
+    // executable providers there is no single "the" credential to check
+    // until the provider is known — you cannot ask whether the key exists
+    // before you know whose key it is. LIVE 3's Gemini responses are
+    // byte-identical (see the credential message built below), and LIVE 4's
+    // "gpt-4" assertion still holds, now because OpenAI genuinely has no
+    // credential in that environment rather than because Gemini's check
+    // shadowed it.
     const modelClassification = classifyModelRequest(assignedModel);
     if (modelClassification.provider === "UNSUPPORTED") {
       updateTaskStatus(taskId, "FAILED", undefined, resolvedWorkspaceId);
@@ -337,6 +347,36 @@ export async function executeAgentTask(
       };
     }
 
+    // 2b. Provider-specific credential gate. Resolved through the existing
+    // server-side credential store (lib/model-credentials.ts — environment
+    // first, then the encrypted row), not a private process.env read, so
+    // this route and the conversation engine agree about what "configured"
+    // means instead of holding two opinions. The key never leaves this
+    // scope: it is passed to the provider adapter and to nothing else.
+    const provider: ExecutableProvider = modelClassification.provider;
+    const { apiKey } = resolveModelApiKey(provider.toLowerCase() as ModelProvider);
+    if (!apiKey) {
+      const envVar = PROVIDER_ENV_VAR[provider];
+      updateTaskStatus(taskId, "FAILED", undefined, resolvedWorkspaceId);
+      recordActivityEvent({
+        taskId,
+        expectedWorkspaceId: resolvedWorkspaceId,
+        eventType: "PROVIDER_FAILED",
+        agentId: assignedAgent,
+        payload: { reason: "BLOCKED_MISSING_CREDENTIAL", provider, error: `${envVar} environment variable is not configured` },
+      });
+      return {
+        status: 400,
+        body: {
+          success: false,
+          status: "BLOCKED",
+          reason: "BLOCKED_MISSING_CREDENTIAL",
+          error: `${envVar} environment variable is not configured on the server`,
+          taskId,
+        },
+      };
+    }
+
     // 3. Immediately before provider call: RUNNING & EXECUTION_STARTED
     updateTaskStatus(taskId, "RUNNING", undefined, resolvedWorkspaceId);
     recordActivityEvent({
@@ -353,9 +393,18 @@ export async function executeAgentTask(
     let hadProviderError = false;
     let providerUsageMetadata: any = null;
 
-    // Step 1: Execute tool/model logic based on role with Live Gemini Model
+    // Step 1: Execute tool/model logic based on role against the real,
+    // classified provider.
     const normalizedAssignedModel = modelClassification.resolvedModel;
-    const candidateModels = [normalizedAssignedModel, ...DEFAULT_CANDIDATE_MODELS].filter((v, i, a) => a.indexOf(v) === i);
+    // PUSH 1 — DEFAULT_CANDIDATE_MODELS is a GEMINI candidate list, so it is
+    // only appended for a Gemini request. Appending it to an OpenAI request
+    // would build exactly the cross-provider substitution chain the router's
+    // header forbids: an OpenAI call that quietly succeeded on Gemini.
+    // OpenAI therefore gets a single-model candidate list, and a failure is
+    // reported as a failure.
+    const candidateModels = provider === "GEMINI"
+      ? [normalizedAssignedModel, ...DEFAULT_CANDIDATE_MODELS].filter((v, i, a) => a.indexOf(v) === i)
+      : [normalizedAssignedModel];
 
     // STEP 1b — the only sanctioned path for a model/tool/external-service
     // call inside the kernel. Wraps the exact existing multi-candidate
@@ -375,13 +424,20 @@ export async function executeAgentTask(
     // model-gemini.ts) are now the same two calls graph execution's native
     // COMPUTE nodes use (server.ts POST /api/graphs/execute) — extracted
     // verbatim, not reimplemented, so this route's behavior is unchanged.
-    await ctx.invoke("model.gemini", async () => {
+    // PUSH 1 — the invocation NAME is the real provider's, never a generic
+    // "model" label. toolsInvoked/toolCalls is built from these names, so a
+    // run executed on OpenAI must not leave a trace claiming Gemini ran.
+    const invocationName = provider === "OPENAI" ? "model.openai" : "model.gemini";
+
+    await ctx.invoke(invocationName, async () => {
       const rolePrompt = buildAgentRolePrompt({ assignedAgent, taskTitle, description, sourceUrl, inputs });
       // No exclude-list needed here: the provider identity gate above already
-      // rejects any non-Gemini model before this point, so every candidate in
-      // this queue is guaranteed Gemini-family.
+      // fixed the provider before this point, so every candidate in this
+      // queue is guaranteed to belong to it.
       const modelsToTry = [normalizedAssignedModel, ...candidateModels].filter((v, i, a) => a.indexOf(v) === i);
-      const genResult = await generateViaGemini({ apiKey, contents: rolePrompt, candidateModels: modelsToTry });
+      const genResult = provider === "OPENAI"
+        ? await generateViaOpenAI({ apiKey, contents: rolePrompt, candidateModels: modelsToTry })
+        : await generateViaGemini({ apiKey, contents: rolePrompt, candidateModels: modelsToTry });
       executionOutput = genResult.output;
       if (genResult.modelUsed) modelUsed = genResult.modelUsed;
       if (genResult.providerUsageMetadata) providerUsageMetadata = genResult.providerUsageMetadata;
@@ -442,6 +498,10 @@ export async function executeAgentTask(
       agentId: assignedAgent,
       payload: {
         model: modelUsed,
+        // PUSH 1 — the activity ledger records WHICH provider ran, not just
+        // which model string came back. Two providers can return similar
+        // looking ids; the knowledge layer downstream must not have to guess.
+        provider: PROVIDER_RECEIPT_IDENTITY[provider],
         outputLength: executionOutput.length,
         usage: providerUsageMetadata || null,
       },
@@ -548,7 +608,13 @@ export async function executeAgentTask(
         // never a second, independent guess at it.
         workspaceId: resolvedWorkspaceId,
         assignedAgent,
-        provider: "google-genai",
+        // PUSH 1 — the receipt attests to the provider that ACTUALLY
+        // executed, resolved from the same classification the dispatch
+        // used. This was the literal "google-genai" when Gemini was the
+        // only executable provider; leaving it literal once a second
+        // provider exists would have signed a false statement about which
+        // company processed the customer's prompt.
+        provider: PROVIDER_RECEIPT_IDENTITY[provider],
         modelUsed,
         artifactId: persistedArtifact.artifact_id,
         artifactHash: persistedArtifact.content_hash,

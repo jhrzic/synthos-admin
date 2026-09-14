@@ -445,9 +445,15 @@ describe('STATIC: provider-error and empty-response failure branches (unreachabl
 const vaultContent = fs.readFileSync(path.resolve(REPO_ROOT, 'lib/vault.ts'), 'utf-8');
 
 describe('STATIC: the success path (VERIFIED) — ordering that Step 3+ must preserve', () => {
-  it('exact order: model.gemini invocation -> PROVIDER_COMPLETED -> writeWorkspaceArtifact (canonical writer, DB+disk) -> ARTIFACT_SAVED -> AWAITING_VERIFICATION -> Aegis run -> recordQualityReview -> (VERIFIED branch) AWAITING_RECEIPT -> AEGIS_REVIEWED -> sign -> verify -> recordReceipt -> RECEIPT_CREATED -> DONE -> TASK_COMPLETED -> KIL (best-effort) -> memory index (best-effort)', () => {
+  // PUSH 1 — the first marker changed from the literal ctx.invoke("model.gemini")
+  // to the provider-derived ctx.invoke(invocationName). The ORDERING this
+  // test exists to pin is what matters and is entirely unchanged: the
+  // provider call still happens first, and every persistence, verification
+  // and signing step after it still happens in exactly this sequence, for
+  // both providers, from this one shared block.
+  it('exact order: provider invocation -> PROVIDER_COMPLETED -> writeWorkspaceArtifact (canonical writer, DB+disk) -> ARTIFACT_SAVED -> AWAITING_VERIFICATION -> Aegis run -> recordQualityReview -> (VERIFIED branch) AWAITING_RECEIPT -> AEGIS_REVIEWED -> sign -> verify -> recordReceipt -> RECEIPT_CREATED -> DONE -> TASK_COMPLETED -> KIL (best-effort) -> memory index (best-effort)', () => {
     const order = [
-      'await ctx.invoke("model.gemini", async () => {',
+      'await ctx.invoke(invocationName, async () => {',
       'eventType: "PROVIDER_COMPLETED"',
       'writeWorkspaceArtifact({',
       'eventType: "ARTIFACT_SAVED"',
@@ -558,7 +564,11 @@ describe('STATIC (STEP 1b — the one permitted evidence correction over Phase 0
 
   it('this changes nothing observable in this environment: BLOCKED_MISSING_CREDENTIAL (the only reachable outcome, per LIVE 3 above) returns before ctx.invoke() is ever called, so ctx.getInvocations() is empty and toolCalls would still be [] if that response included the field at all — and it does not (LIVE 3 already asserts the exact response body, which has no toolCalls key)', () => {
     const apiKeyCheckIdx = kernelContent.indexOf('if (!apiKey) {');
-    const invokeIdx = kernelContent.indexOf('await ctx.invoke("model.gemini"');
+    // PUSH 1 — same marker change as the ordering test above. The property
+    // asserted is unchanged: the credential gate still returns before any
+    // provider call can be observed, so a blocked run can never leave an
+    // invocation trace implying a provider ran.
+    const invokeIdx = kernelContent.indexOf('await ctx.invoke(invocationName');
     expect(apiKeyCheckIdx).toBeGreaterThan(-1);
     expect(invokeIdx).toBeGreaterThan(apiKeyCheckIdx); // the only live-reachable return in this environment happens first
   });

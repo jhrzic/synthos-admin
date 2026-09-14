@@ -28,6 +28,7 @@ import { getDatabase } from '../persistence';
 import { isWindmillConfigured } from '../windmill-client';
 import { getVoiceCredentialStatus } from '../voice-credentials';
 import { getModelCredentialStatus } from '../model-credentials';
+import { isAntigravityConfigured, isAntigravityEnabled } from '../antigravity-client';
 
 export type CapabilityEffectClass = 'READ' | 'COMPUTE' | 'EXTERNAL_ACTION' | 'CONTROL';
 
@@ -101,6 +102,75 @@ function modelGeminiCapability(report: RuntimeStatusReport): CapabilityDescripto
     reason: configured
       ? 'GEMINI_API_KEY is configured (see lib/runtime-status.ts geminiStatus() — real per-call health is proven at call time, not re-probed here).'
       : (gemini?.detail || 'GEMINI_API_KEY is not configured.'),
+  };
+}
+
+/**
+ * PUSH 1 — OpenAI as a real, executable capability.
+ *
+ * Status comes from getModelCredentialStatus('openai'), which is the exact
+ * resolution lib/fabric/kernel.ts performs at execution time (environment
+ * first, then the encrypted server-side row). Reading process.env directly
+ * here — as the Gemini row above still does via runtime-status.ts — would
+ * report NOT_CONFIGURED for a deployment whose key lives in the credential
+ * store and which can in fact execute. A capability registry that
+ * disagrees with the executor about what is configured is worse than no
+ * registry.
+ *
+ * AVAILABLE here means "a credential resolves", never "the provider is up".
+ * Real per-call health is proven at call time, exactly as for Gemini.
+ */
+function modelOpenAiCapability(): CapabilityDescriptor {
+  const credential = getModelCredentialStatus('openai');
+  return {
+    key: 'model.openai',
+    runtime: 'openai',
+    status: credential.apiKeyPresent ? 'AVAILABLE' : 'NOT_CONFIGURED',
+    effectClass: 'COMPUTE',
+    riskTier: 'LOW',
+    approvalPolicy: 'NONE',
+    workspaceScope: 'member',
+    reference: 'lib/fabric/model-openai.ts::generateViaOpenAI',
+    reason: credential.apiKeyPresent
+      ? `An OpenAI credential resolves from ${credential.source === 'environment' ? `the ${credential.envVar} environment variable` : 'the encrypted server-side credential store'}. Real per-call health is proven at call time, not re-probed here.`
+      : `No OpenAI credential is configured — neither ${credential.envVar} nor an encrypted server-side credential row is present.`,
+  };
+}
+
+/**
+ * PUSH 1 — Antigravity as a real execution runtime.
+ *
+ * effectClass is EXTERNAL_ACTION, not COMPUTE, and that classification is
+ * the honest one: unlike a model call, this dispatches work to a remote
+ * autonomous agent that executes code and browses the web in a sandbox
+ * SynthOS does not control. Treating it as ordinary compute would let it
+ * past lib/fabric/envelope.ts Section 7, which is precisely the check that
+ * should apply to it.
+ *
+ * approvalPolicy is GUARDIAN_ENFORCED because real, wired code enforces it:
+ * lib/external-executions.ts runs every instruction through
+ * checkGuardianRules() before dispatch, and refuses BLOCKED and
+ * APPROVAL_REQUIRED outright. That is a submission gate, and the reason
+ * string says so rather than implying SynthOS supervises the remote loop.
+ */
+function antigravityRuntimeCapability(): CapabilityDescriptor {
+  const configured = isAntigravityConfigured();
+  const enabled = isAntigravityEnabled();
+  const status: CapabilityStatus = !configured ? 'NOT_CONFIGURED' : !enabled ? 'NOT_CONFIGURED' : 'AVAILABLE';
+  return {
+    key: 'runtime.antigravity',
+    runtime: 'antigravity',
+    status,
+    effectClass: 'EXTERNAL_ACTION',
+    riskTier: 'HIGH',
+    approvalPolicy: 'GUARDIAN_ENFORCED',
+    workspaceScope: 'admin',
+    reference: 'lib/external-executions.ts::submitExternalExecution (runtime: antigravity) -> lib/antigravity-client.ts::submitInteraction',
+    reason: !configured
+      ? 'No Antigravity credential resolves (neither ANTIGRAVITY_API_KEY nor a Gemini credential).'
+      : !enabled
+        ? 'A credential resolves, but ANTIGRAVITY_ENABLED is not "true" — outward execution is switched off in this deployment.'
+        : 'A credential resolves and ANTIGRAVITY_ENABLED is "true". Every instruction is evaluated by the real checkGuardianRules() gate before dispatch; BLOCKED and APPROVAL_REQUIRED are refused. Results are never trusted: they pass Aegis and the KIL gate before any receipt exists.',
   };
 }
 
@@ -687,6 +757,8 @@ async function buildAllCapabilities(report: RuntimeStatusReport): Promise<Capabi
     graphReadCapability(),
     receiptReadCapability(),
     graphExecuteCapability(report),
+    modelOpenAiCapability(),
+    antigravityRuntimeCapability(),
     skillExecuteCapability(report),
     windmillJobCapability(report),
     windmillReadCapability(report),

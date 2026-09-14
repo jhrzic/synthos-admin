@@ -34,14 +34,34 @@ describe('lib/graph-execution: real routing estimate, never a fabricated dollar 
     expect(est.nodes[0].routing.provider).toBe('GEMINI');
   });
 
-  it('a node requesting an unconfigured provider is flagged UNSUPPORTED and drives allNodesRoutable=false', () => {
+  it('a node requesting a provider no one can run is flagged UNSUPPORTED and drives allNodesRoutable=false', () => {
+    const est = estimateGraphExecution([
+      { id: 'n1', type: 'agent', label: 'A', assignedModel: 'gemini-3.1-flash-lite' },
+      { id: 'n2', type: 'agent', label: 'B', assignedModel: 'claude' },
+    ]);
+    expect(est.allNodesRoutable).toBe(false);
+    expect(est.unroutableNodes.map((n) => n.nodeId)).toEqual(['n2']);
+    expect(est.unroutableNodes[0].routing.provider).toBe('UNSUPPORTED');
+  });
+
+  // PUSH 1 — the case this test previously covered with 'gpt-4o', restated
+  // now that OpenAI is genuinely executable elsewhere in the platform. The
+  // node is still unroutable, and for the honest reason: graph execution
+  // holds a Gemini key and calls generateViaGemini, so a provider it cannot
+  // dispatch to is unroutable HERE even though SynthOS can run it via
+  // POST /api/execute-agent-task. The estimate must agree with the executor
+  // — reporting it routable would be an estimate that lies.
+  it('a node requesting a provider SynthOS can run but graph execution cannot is still unroutable', () => {
     const est = estimateGraphExecution([
       { id: 'n1', type: 'agent', label: 'A', assignedModel: 'gemini-3.1-flash-lite' },
       { id: 'n2', type: 'agent', label: 'B', assignedModel: 'gpt-4o' },
     ]);
     expect(est.allNodesRoutable).toBe(false);
     expect(est.unroutableNodes.map((n) => n.nodeId)).toEqual(['n2']);
-    expect(est.unroutableNodes[0].routing.provider).toBe('UNSUPPORTED');
+    // Classified honestly as OpenAI — never mislabelled UNSUPPORTED just to
+    // make it unroutable. Unroutable-here and unsupported-anywhere are two
+    // different facts and the estimate keeps them apart.
+    expect(est.unroutableNodes[0].routing.provider).toBe('OPENAI');
   });
 
   it('non-agent nodes are excluded from the estimate entirely (agentNodeCount != totalNodeCount)', () => {

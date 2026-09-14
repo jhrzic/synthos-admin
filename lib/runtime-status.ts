@@ -6,6 +6,8 @@ import { listBackups } from './backup';
 import { getDatabase } from './persistence';
 import { listRecentRuntimeEvents } from './runtime-events';
 import { health as windmillHealth, isWindmillConfigured } from './windmill-client';
+import { getModelCredentialStatus } from './model-credentials';
+import { health as antigravityHealth, isAntigravityConfigured, isAntigravityEnabled } from './antigravity-client';
 
 // ---------------------------------------------------------------------------
 // Pass V / Workstream G — one small, truthful runtime-status aggregator.
@@ -58,6 +60,30 @@ function geminiStatus(): RuntimeSystemReport {
     detail: configured
       ? 'GEMINI_API_KEY is set — no live call is made on every status check (cost/latency); actual health is proven per real call, see the Provider Capability Matrix.'
       : 'GEMINI_API_KEY is not configured.',
+  };
+}
+
+/**
+ * PUSH 1 — OpenAI is now an executable provider, so it gets a real row in
+ * the same table Gemini/Hermes/Windmill already appear in. No new UI: the
+ * Master Admin "Runtime & Infrastructure Status" panel renders whatever
+ * getRuntimeStatus() returns.
+ *
+ * Reported through the credential store rather than a bare process.env
+ * read, so this row agrees with what the executor can actually do. Status
+ * is UNKNOWN when a credential is present — configured is not connected,
+ * and no live billable call is made on a status check.
+ */
+function openAiStatus(): RuntimeSystemReport {
+  const credential = getModelCredentialStatus('openai');
+  return {
+    system: 'OpenAI Provider',
+    status: credential.apiKeyPresent ? 'UNKNOWN' : 'NOT_CONFIGURED',
+    evidenceSource: 'configuration_only',
+    lastCheck: null,
+    detail: credential.apiKeyPresent
+      ? `A credential resolves from ${credential.source === 'environment' ? credential.envVar : 'the encrypted server-side credential store'} — no live call is made on every status check (cost/latency); actual health is proven per real call through lib/fabric/model-openai.ts.`
+      : `${credential.envVar} is not configured and no encrypted server-side credential row exists.`,
   };
 }
 
@@ -200,9 +226,38 @@ async function windmillStatus(): Promise<RuntimeSystemReport> {
   };
 }
 
+/**
+ * PUSH 1 — Antigravity's row. This one DOES make a live probe, because
+ * unlike a model provider it has a zero-cost reachability check (a GET for
+ * a non-existent interaction id distinguishes reachable+authenticated from
+ * rejected without starting a billable sandbox run). Where a real probe is
+ * free, configuration presence is not good enough evidence.
+ */
+async function antigravityStatus(): Promise<RuntimeSystemReport> {
+  if (!isAntigravityConfigured()) {
+    return { system: 'Antigravity Runtime', status: 'NOT_CONFIGURED', evidenceSource: 'configuration_only', lastCheck: null, detail: 'No credential resolves (neither ANTIGRAVITY_API_KEY nor a Gemini credential).' };
+  }
+  if (!isAntigravityEnabled()) {
+    return { system: 'Antigravity Runtime', status: 'NOT_CONFIGURED', evidenceSource: 'configuration_only', lastCheck: null, detail: 'A credential resolves, but ANTIGRAVITY_ENABLED is not "true" — outward execution is switched off.' };
+  }
+  const probe = await antigravityHealth();
+  const statusMap: Record<string, RuntimeSystemStatus> = {
+    CONNECTED: 'HEALTHY', FAILED: 'FAILED', INVALID_RESPONSE: 'DEGRADED',
+    NOT_CONFIGURED: 'NOT_CONFIGURED', DISABLED: 'NOT_CONFIGURED',
+  };
+  return {
+    system: 'Antigravity Runtime',
+    status: statusMap[probe.status] ?? 'UNKNOWN',
+    evidenceSource: 'live_probe',
+    lastCheck: probe.checkedAt,
+    detail: probe.error || `reachable=${probe.reachable}, authenticated=${probe.authenticated}, agent=${probe.agent}`,
+  };
+}
+
 export async function getRuntimeStatus(): Promise<RuntimeStatusReport> {
   const systems: RuntimeSystemReport[] = [
     geminiStatus(),
+    openAiStatus(),
     openRouterStatus(),
     await hermesRuntimeStatus(),
     mcpStatus(),
@@ -211,6 +266,7 @@ export async function getRuntimeStatus(): Promise<RuntimeStatusReport> {
     vaultStatus(),
     memoryIndexStatus(),
     await windmillStatus(),
+    await antigravityStatus(),
   ];
   return { systems, generatedAt: new Date().toISOString() };
 }

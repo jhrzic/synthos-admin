@@ -37,6 +37,25 @@ export const ENV_VAR_SPECS: EnvVarSpec[] = [
   { variable: 'GEMINI_API_KEY', subsystem: 'Provider Router (Gemini)', requiredFor: '/api/generate, model-backed skills, graph/task execution', requirement: 'OPTIONAL', secrecy: 'SECRET' },
   { variable: 'OPENROUTER_API_KEY', subsystem: 'Provider Router (OpenRouter)', requiredFor: 'Recognized but UNSUPPORTED — no execution mapping wired (see lib/model-router.ts)', requirement: 'OPTIONAL', secrecy: 'SECRET' },
 
+  // --- Provider routing: OpenAI (PUSH 1) ---
+  // OPENAI_API_KEY was already read by the voice TTS route before this push
+  // but was undeclared here. It is declared now because this push gives it a
+  // materially larger blast radius: it authorizes real, billable TEXT
+  // generation through the Execution Fabric, not just speech synthesis.
+  { variable: 'OPENAI_API_KEY', subsystem: 'Provider Router (OpenAI) + Voice (TTS provider: OpenAI)', requiredFor: 'Text generation via POST /api/execute-agent-task when the requested model routes to OpenAI (lib/fabric/model-openai.ts, the Responses API), AND POST /api/voice/speak when provider=openai. Both are real, billable api.openai.com calls.', requirement: 'OPTIONAL', secrecy: 'SECRET' },
+  { variable: 'OPENAI_MODEL', subsystem: 'Provider Router (OpenAI)', requiredFor: 'Overrides the default OpenAI model id used when a caller names the provider without a specific model. Unset uses lib/model-router.ts DEFAULT_OPENAI_MODEL.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  { variable: 'OPENAI_BASE_URL', subsystem: 'Provider Router (OpenAI)', requiredFor: 'Overrides the OpenAI API base URL (an Azure/proxy/enterprise gateway, or a test double). Unset uses https://api.openai.com/v1.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
+
+  // --- Antigravity execution runtime (PUSH 1) ---
+  // ANTIGRAVITY_ENABLED is a real kill switch, not documentation: the client
+  // and the external-execution ledger both refuse to dispatch unless it is
+  // literally "true", so a deployment that holds a Gemini credential does not
+  // silently acquire the ability to run autonomous remote agents.
+  { variable: 'ANTIGRAVITY_ENABLED', subsystem: 'Antigravity Runtime', requiredFor: 'Must be exactly "true" for ANY outward Antigravity execution. Unset or anything else disables submission entirely, even when a credential is present.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  { variable: 'ANTIGRAVITY_API_KEY', subsystem: 'Antigravity Runtime', requiredFor: 'Optional dedicated credential for the managed Antigravity agent API. Unset falls back to the resolved Gemini credential — same Google endpoint, same key type. Set it only to bill or scope agent execution separately.', requirement: 'OPTIONAL', secrecy: 'SECRET' },
+  { variable: 'ANTIGRAVITY_AGENT', subsystem: 'Antigravity Runtime', requiredFor: 'Overrides the managed agent id. Unset uses lib/antigravity-client.ts ANTIGRAVITY_DEFAULT_AGENT.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  { variable: 'ANTIGRAVITY_BASE_URL', subsystem: 'Antigravity Runtime', requiredFor: 'Overrides the managed agent API base URL (an enterprise gateway, or a test double). Unset uses https://generativelanguage.googleapis.com/v1beta.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
+
   // --- Hermes dedicated runtime (ADR-001) ---
   { variable: 'HERMES_ADAPTER_BASE_URL', subsystem: 'Hermes Runtime Adapter', requiredFor: 'hermesAdapter.health()/execute() real network calls', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
   { variable: 'HERMES_ADAPTER_TOKEN', subsystem: 'Hermes Runtime Adapter', requiredFor: 'Authenticated calls to the Hermes adapter base URL', requirement: 'OPTIONAL', secrecy: 'SECRET' },

@@ -44,10 +44,23 @@ describe('SYNTHOS PROVIDER IDENTITY RULE: non-Gemini requests must never silentl
     expect(result.provider).toBe('UNSUPPORTED');
   });
 
-  it('7. "chatgpt" is never classified GEMINI', () => {
+  // PUSH 1 — this test's SECOND assertion changed, and the change is real.
+  // "chatgpt" used to be UNSUPPORTED because this build had no OpenAI
+  // execution mapping. It now has one (lib/fabric/model-openai.ts), so
+  // asserting UNSUPPORTED would be asserting a falsehood about the
+  // deployment.
+  //
+  // What the test file actually exists to protect is unchanged and is
+  // asserted more strictly than before: an OpenAI identifier must never be
+  // classified GEMINI, and must never come back carrying a Gemini model id
+  // that could reach the GoogleGenAI SDK. That is the defect; "UNSUPPORTED"
+  // was only ever one way of satisfying it.
+  it('7. "chatgpt" is never classified GEMINI, and never resolves to a Gemini model id', () => {
     const result = classifyModelRequest('chatgpt');
     expect(result.provider).not.toBe('GEMINI');
-    expect(result.provider).toBe('UNSUPPORTED');
+    expect(result.provider).toBe('OPENAI');
+    const resolved = result.provider === 'OPENAI' ? result.resolvedModel : '';
+    expect(resolved.toLowerCase().startsWith('gemini')).toBe(false);
   });
 
   it('8. a wholly unknown alias fails explicitly as UNSUPPORTED_PROVIDER, not a silent pass-through', () => {
@@ -57,8 +70,11 @@ describe('SYNTHOS PROVIDER IDENTITY RULE: non-Gemini requests must never silentl
     expect(result.provider === 'UNSUPPORTED' && result.message.length).toBeGreaterThan(0);
   });
 
+  // PUSH 1 — "chatgpt" removed from this list because it is no longer a
+  // recognized-but-unavailable provider; it is an available one. The rest
+  // of the list is unchanged and still genuinely unavailable in this build.
   it('9. a recognized-but-unavailable provider fails with a precise, truthful reason (not a generic 500 or a Gemini substitution)', () => {
-    for (const alias of ['claude', 'deepseek', 'hermes', 'perplexity', 'chatgpt']) {
+    for (const alias of ['claude', 'deepseek', 'hermes', 'perplexity']) {
       const result = classifyModelRequest(alias);
       expect(result.provider).toBe('UNSUPPORTED');
       expect(result.provider === 'UNSUPPORTED' && result.reason).toBe('MODEL_MAPPING_NOT_FOUND');
@@ -66,10 +82,34 @@ describe('SYNTHOS PROVIDER IDENTITY RULE: non-Gemini requests must never silentl
     }
   });
 
-  it('10a. no silent cross-provider fallback: every non-Gemini alias classification carries no resolvedModel at all', () => {
-    for (const alias of ['claude', 'deepseek', 'hermes', 'perplexity', 'chatgpt', 'unknown-thing']) {
+  it('10a. no silent cross-provider fallback: an UNSUPPORTED alias carries no resolvedModel at all', () => {
+    for (const alias of ['claude', 'deepseek', 'hermes', 'perplexity', 'unknown-thing']) {
       const result = classifyModelRequest(alias);
       expect('resolvedModel' in result).toBe(false);
+    }
+  });
+
+  // PUSH 1 — the rule restated for a provider that IS executable. An
+  // executable non-Gemini provider does carry a resolvedModel (it needs one
+  // to run), so the original "no resolvedModel at all" check no longer
+  // expresses the rule for it. The rule itself is the same: whatever comes
+  // back must belong to the provider that was asked for.
+  it('10a-bis. an executable non-Gemini alias resolves only to that provider\'s own model, never a Gemini one', () => {
+    for (const alias of ['chatgpt', 'openai', 'gpt-4o', 'o3-mini', 'gpt-6-astra']) {
+      const result = classifyModelRequest(alias);
+      expect(result.provider).toBe('OPENAI');
+      const resolved = result.provider === 'OPENAI' ? result.resolvedModel : '';
+      expect(resolved.toLowerCase().startsWith('gemini')).toBe(false);
+      expect(resolved.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('10a-ter. the reverse direction holds too: a Gemini alias never resolves to an OpenAI model id', () => {
+    for (const alias of ['gemini', 'google', 'gemini-3.1-flash-lite', 'gemini-9.9-future-preview']) {
+      const result = classifyModelRequest(alias);
+      expect(result.provider).toBe('GEMINI');
+      const resolved = result.provider === 'GEMINI' ? result.resolvedModel : '';
+      expect(resolved.toLowerCase().startsWith('gpt')).toBe(false);
     }
   });
 

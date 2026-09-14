@@ -19,7 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { getDatabase } from './persistence';
-import { classifyModelRequest } from './model-router';
+import { classifyModelRequest, explainUnroutableModel } from './model-router';
 import { encryptCredential, credentialEncryptionConfigured } from './mcp-client';
 import { resolveWindmillTarget } from './windmill-targets';
 import { isWindmillConfigured } from './windmill-client';
@@ -307,7 +307,7 @@ export function classifySkillExecutability(skill: SkillRecord): SkillExecutabili
     case 'model': {
       const classification = classifyModelRequest(skill.execution_target_ref || undefined);
       if (classification.provider !== 'GEMINI') {
-        return { executable: false, reason: 'MISSING_PROVIDER', message: classification.message };
+        return { executable: false, reason: 'MISSING_PROVIDER', message: explainUnroutableModel(classification, 'model-backed skill execution') };
       }
       if (!process.env.GEMINI_API_KEY) {
         return { executable: false, reason: 'MISSING_PROVIDER', message: 'GEMINI_API_KEY is not configured in this deployment.' };

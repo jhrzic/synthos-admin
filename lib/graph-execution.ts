@@ -107,7 +107,14 @@ export function estimateGraphExecution(nodes: GraphExecutionNodeInput[]): GraphE
       routing: classifyModelRequest(requestedModel),
     };
   });
-  const unroutableNodes = nodeEstimates.filter((e) => e.routing.provider === 'UNSUPPORTED');
+  // PUSH 1 — "routable" means routable BY GRAPH EXECUTION, which is Gemini
+  // only (server.ts POST /api/graphs/execute holds a resolved Gemini key and
+  // calls generateViaGemini). OpenAI became an executable provider elsewhere
+  // in the platform, which made the old `=== 'UNSUPPORTED'` test wrong here:
+  // it would have reported an OpenAI node routable while the executor
+  // refused it, and an estimate that disagrees with the executor is worse
+  // than no estimate. The rule is now stated as what it actually is.
+  const unroutableNodes = nodeEstimates.filter((e) => e.routing.provider !== 'GEMINI');
 
   return {
     agentNodeCount: agentNodes.length,

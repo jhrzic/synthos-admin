@@ -23,7 +23,7 @@ import { getDatabase } from './persistence';
 import { encryptVoiceSecret, decryptVoiceSecret } from './voice-credentials';
 
 /** Providers this build can actually execute. Not a wish list. */
-export const SUPPORTED_MODEL_PROVIDERS = ['gemini'] as const;
+export const SUPPORTED_MODEL_PROVIDERS = ['gemini', 'openai'] as const;
 export type ModelProvider = (typeof SUPPORTED_MODEL_PROVIDERS)[number];
 
 export function isModelProvider(v: unknown): v is ModelProvider {
@@ -33,6 +33,7 @@ export function isModelProvider(v: unknown): v is ModelProvider {
 /** The environment variable each provider reads, so precedence is inspectable. */
 const PROVIDER_ENV_VAR: Record<ModelProvider, string> = {
   gemini: 'GEMINI_API_KEY',
+  openai: 'OPENAI_API_KEY',
 };
 
 export type ModelKeySource = 'environment' | 'server_store' | 'none';
@@ -52,9 +53,18 @@ interface Row {
 }
 
 function readRow(provider: ModelProvider): Row | undefined {
-  return getDatabase()
-    .prepare('SELECT provider, api_key_encrypted, updated_at FROM model_credentials WHERE provider = ?')
-    .get(provider) as Row | undefined;
+  // A credential lookup must never be the thing that takes a request down.
+  // This is now called from the execution kernel, where an unreachable or
+  // not-yet-migrated database would otherwise turn "no key stored" into a
+  // 500. Absent is reported as absent; the environment is still consulted
+  // by the caller either way.
+  try {
+    return getDatabase()
+      .prepare('SELECT provider, api_key_encrypted, updated_at FROM model_credentials WHERE provider = ?')
+      .get(provider) as Row | undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -129,7 +139,8 @@ export async function verifyModelCredential(provider: ModelProvider): Promise<
 > {
   const { apiKey } = resolveModelApiKey(provider);
   if (!apiKey) return { ok: false, error: 'No API key is configured for this provider.' };
-  if (provider !== 'gemini') return { ok: false, error: `No verification path is implemented for ${provider}.` };
+
+  if (provider === 'openai') return verifyOpenAiCredential(apiKey);
 
   const { normalizeGeminiModel } = await import('./model-router');
   const model = normalizeGeminiModel();
@@ -154,4 +165,33 @@ export async function verifyModelCredential(provider: ModelProvider): Promise<
       .slice(0, 300);
     return { ok: false, error: safe };
   }
+}
+
+/**
+ * A real OpenAI call proving the key works, before it is ever relied on in
+ * a run. Deliberately routed through the SAME adapter the kernel executes
+ * with (lib/fabric/model-openai.ts) rather than a private fetch: a
+ * verification that exercises a different code path than production can
+ * pass while production fails, which is worse than no verification.
+ *
+ * Returns the model the PROVIDER reported running, never the key.
+ */
+async function verifyOpenAiCredential(
+  apiKey: string
+): Promise<{ ok: true; model: string; sample: string } | { ok: false; error: string }> {
+  const { resolveDefaultOpenAiModel } = await import('./model-router');
+  const { generateViaOpenAI } = await import('./fabric/model-openai');
+  const model = resolveDefaultOpenAiModel();
+
+  const result = await generateViaOpenAI({
+    apiKey,
+    contents: 'Reply with the single word: ready',
+    candidateModels: [model],
+    timeoutMs: 20_000,
+  });
+
+  if (!result.output.trim()) {
+    return { ok: false, error: result.lastProviderError || 'The provider accepted the key but returned nothing.' };
+  }
+  return { ok: true, model: result.modelUsed || model, sample: result.output.trim().slice(0, 80) };
 }

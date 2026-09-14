@@ -20,7 +20,7 @@
 
 import { GoogleGenAI } from '@google/genai';
 import { getWorkspaceSkill, classifySkillExecutability, getRawCredentialCiphertext, DeterministicAction } from './skills';
-import { classifyModelRequest } from './model-router';
+import { classifyModelRequest, explainUnroutableModel } from './model-router';
 import { decryptCredential, probeMcpServer, readBoundedText } from './mcp-client';
 import { searchWorkspaceMemory } from './memory-index';
 import { listWorkspaceVaultEntries } from './vault';
@@ -178,7 +178,10 @@ async function runModelAction(
 
   const classification = classifyModelRequest(modelRef || undefined);
   if (classification.provider !== 'GEMINI') {
-    throw new Error(classification.message);
+    // PUSH 1 — skills remain Gemini-only. Widening them was not part of this
+    // push, and a skill silently changing provider would change its output
+    // with no record of why.
+    throw new Error(explainUnroutableModel(classification, 'model-backed skill execution'));
   }
   const model = classification.resolvedModel;
 
