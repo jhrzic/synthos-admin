@@ -339,13 +339,54 @@ export interface AntigravityResultPayload {
 }
 
 /**
+ * Pull the agent's final text out of an interaction payload.
+ *
+ * LIVE CONTRACT CORRECTION (2026-09-14). Google's published documentation
+ * describes `output_text` as the interaction's final agent output, and this
+ * client was built against that. A real `completed` interaction against
+ * generativelanguage.googleapis.com/v1beta carries NO `output_text` key at
+ * all — the top-level keys are agent, agent_config, environment,
+ * environment_id, id, object, status, steps, tools, usage. The final text is
+ * inside `steps[]` where `type === 'model_output'`, under `content[].text`.
+ *
+ * `output_text` is still read first rather than removed: it costs nothing,
+ * and if the field is reinstated or appears on another interaction shape,
+ * this keeps working. The steps walk is the fallback that actually fires
+ * today. Same preference order, and the same reason, as
+ * lib/fabric/model-openai.ts::extractOpenAiText.
+ *
+ * Only `model_output` steps are read. `function_result` steps also carry
+ * text — for this verification run, the literal contents of the file the
+ * agent read back — but that is raw tool payload, not the agent's answer,
+ * and it is deliberately not treated as output.
+ */
+export function extractAntigravityText(payload: any): string {
+  if (!payload || typeof payload !== 'object') return '';
+
+  if (typeof payload.output_text === 'string' && payload.output_text.trim()) {
+    return payload.output_text;
+  }
+
+  const parts: string[] = [];
+  for (const step of Array.isArray(payload.steps) ? payload.steps : []) {
+    if (step?.type !== 'model_output') continue;
+    for (const content of Array.isArray(step?.content) ? step.content : []) {
+      if (typeof content?.text === 'string' && content.text.trim()) parts.push(content.text);
+    }
+  }
+  return parts.join('\n\n').trim();
+}
+
+/**
  * Read one completed interaction's real result.
  *
  * `stepNames` deliberately carries tool NAMES only. The step objects also
  * carry `arguments`, which for a coding agent routinely contain file
  * contents and command lines; persisting those into an artifact would put
  * unreviewed remote payload data into the Vault. The same reasoning
- * lib/fabric/context.ts applies to its invocation trace.
+ * lib/fabric/context.ts applies to its invocation trace. The live run
+ * confirmed this matters: the `write_file` step's arguments held the entire
+ * file body.
  */
 export async function getInteractionResult(remoteJobId: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<AntigravityResultPayload> {
   const empty = { outputText: '', stepNames: [] as string[], usage: null, environmentId: null, truncated: false };
@@ -363,7 +404,7 @@ export async function getInteractionResult(remoteJobId: string, timeoutMs = DEFA
 
   return {
     ok: true,
-    outputText: typeof payload?.output_text === 'string' ? payload.output_text : '',
+    outputText: extractAntigravityText(payload),
     stepNames,
     usage: payload?.usage ?? null,
     environmentId: typeof payload?.environment_id === 'string' ? payload.environment_id : null,

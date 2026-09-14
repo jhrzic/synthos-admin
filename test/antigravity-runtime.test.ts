@@ -108,11 +108,18 @@ beforeAll(async () => {
         const id = decodeURIComponent(getMatch[1]);
         const record = interactions.get(id);
         if (!record) return json(404, { error: { message: 'Interaction not found.' } });
+        // LIVE CONTRACT (verified 2026-09-14 against the real endpoint):
+        // a completed interaction carries NO `output_text` key. The final
+        // text lives in a `model_output` step under content[].text. This
+        // stub serves that real shape, not the documented one, so the test
+        // exercises the path production actually takes.
+        const steps = record.outputText
+          ? [...record.steps, { type: 'model_output', content: [{ type: 'text', text: record.outputText }] }]
+          : record.steps;
         return json(200, {
           id,
           status: record.status,
-          output_text: record.outputText,
-          steps: record.steps,
+          steps,
           usage: record.usage,
           environment_id: record.environmentId,
         });
@@ -238,6 +245,40 @@ describe('1. TRUTHFUL STATUS — an unconfigured or disabled runtime says so, an
     } finally {
       disableRuntime();
     }
+  });
+
+  // LIVE CONTRACT CORRECTION (2026-09-14). The first live run against
+  // generativelanguage.googleapis.com returned a `completed` interaction
+  // whose top-level keys were agent, agent_config, environment,
+  // environment_id, id, object, status, steps, tools, usage — no
+  // `output_text` at all, despite the published docs describing it. Reading
+  // only `output_text` made every successful live run look like it returned
+  // nothing. These assertions pin the real shape so the fix cannot regress.
+  it('extracts the final text from a model_output step, which is where the LIVE API actually puts it', () => {
+    const livePayload = {
+      status: 'completed',
+      steps: [
+        { type: 'function_call', name: 'write_file', arguments: { content: 'SECRET_FILE_BODY' } },
+        { type: 'function_result', name: 'write_file', result: [{ type: 'text', text: '{"success":true}' }] },
+        { type: 'model_output', content: [{ type: 'text', text: 'The file contains: SynthOS Antigravity live verification' }] },
+      ],
+    };
+    expect(antigravity.extractAntigravityText(livePayload)).toBe('The file contains: SynthOS Antigravity live verification');
+  });
+
+  it('prefers output_text when a payload does carry it, so a reinstated field keeps working', () => {
+    expect(antigravity.extractAntigravityText({
+      output_text: 'documented shape',
+      steps: [{ type: 'model_output', content: [{ type: 'text', text: 'steps shape' }] }],
+    })).toBe('documented shape');
+  });
+
+  it('never treats a function_result as the agent output — that is raw tool payload, not an answer', () => {
+    const onlyToolOutput = {
+      status: 'completed',
+      steps: [{ type: 'function_result', name: 'read_file', result: [{ type: 'text', text: 'raw file body that is not an answer' }] }],
+    };
+    expect(antigravity.extractAntigravityText(onlyToolOutput)).toBe('');
   });
 
   it('the ledger accepts exactly the runtimes it can really dispatch to', () => {
