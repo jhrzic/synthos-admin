@@ -65,6 +65,7 @@ import { ReceiptsView } from './components/ReceiptsView';
 import { CanonicalReceiptsView } from './components/CanonicalReceiptsView';
 import { SchedulerView } from './components/SchedulerView';
 import { ExternalExecutionsView } from './components/ExternalExecutionsView';
+import { DevelopmentView } from './components/DevelopmentView';
 import { AeoAuditView } from './components/AeoAuditView';
 import { BusinessAssistantView } from './components/BusinessAssistantView';
 import { GuardianAegisControlView } from './components/GuardianAegisControlView';
@@ -1836,6 +1837,15 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               plane (ADR-006). No second execution mechanism. */}
           {activeTab === 'external-executions' && (
             <ExternalExecutionsView activeWorkspaceId={activeWorkspaceId} />
+          )}
+
+          {/* Development — the production surface over the existing
+              development-loop backend (/api/development/*). It owns no state
+              machine and no execution mechanism: the task queue, review,
+              approval, Antigravity execution and evidence are all real server
+              rows, and the scheduler advances execution without a poll button. */}
+          {activeTab === 'development' && (
+            <DevelopmentView activeWorkspaceId={activeWorkspaceId} />
           )}
 
           {/* Real crawl-based SEO/AEO/GEO audit. No demo mode — see

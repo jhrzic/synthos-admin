@@ -9,6 +9,10 @@ import {
 import { JarvisSettings } from '../types';
 import { SetupWizardCard } from './SetupWizardCard';
 import { synthesizeFishAudio, playFishAudioBuffer, DEFAULT_FISH_AUDIO_VOICE_ID } from '../services/fishAudio';
+// PUSH 2C — the server-side encrypted credential store (Push 2B's
+// provider-parameterized API). Kept as its own card so it is never confused
+// with the browser-held BYOK fields below it.
+import { ModelProviderCredentialsCard } from './ModelProviderCredentialsCard';
 
 interface SettingsViewProps {
   settings?: JarvisSettings;
@@ -878,6 +882,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       {/* HIERARCHY LEVEL 2: Connected Services (OpenAI BYOK, WhatsApp, iMessage Bridge) */}
       {activeSubTab === 'connected' && (
         <div className="space-y-6 animate-fadeIn">
+          <ModelProviderCredentialsCard activeWorkspaceId={activeWorkspaceId} />
+
           <div className="bg-[#090A14] border border-[#1F233C] rounded-2xl p-6 space-y-6">
             <div className="border-b border-[#161828] pb-4">
               <h3 className="text-base font-bold text-white font-['Space_Grotesk'] flex items-center gap-2">

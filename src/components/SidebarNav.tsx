@@ -164,6 +164,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
     {
       category: 'BUILD',
       items: [
+        { id: 'development' as ActiveTab, label: 'Development', icon: Code2, color: '#615EFF' },
         { id: 'graph-builder' as ActiveTab, label: 'Graph Builder', icon: GitMerge, color: '#38BDF8' },
         { id: 'graph-runs' as ActiveTab, navId: 'graph-runs-orchestration', label: 'Graph Runtime', icon: Activity, color: '#EC4899' },
         { id: 'skill-registry' as ActiveTab, label: 'Skills Registry', icon: Cpu, color: '#615EFF' },
