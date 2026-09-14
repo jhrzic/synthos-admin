@@ -342,7 +342,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         sectionTitle="Global Swarm & Security Configuration"
         sectionSubtitle="3-Step global configuration for Fish Audio neural voice, OpenRouter API keys, and Obsidian vault security policies."
         statusBadge={{
-          isConnected: Boolean(credentialStatus?.apiKeyPresent || settings.customApiKeys?.openrouter || settings.security?.vault_permissions.write_access),
+          // PUSH 2F — customApiKeys.openrouter was removed from this test. It is
+          // a browser-only value that no server route reads, so it could turn
+          // this badge "connected" while nothing was configured at all. Only
+          // real server-side credential state counts.
+          isConnected: Boolean(credentialStatus?.apiKeyPresent || settings.security?.vault_permissions.write_access),
           connectedLabel: "Swarm Credentials Configured",
           pendingLabel: "Default Config",
         }}
@@ -812,21 +816,39 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <span>Connected API Services & Messaging Bridges</span>
               </h3>
               <p className="text-xs text-[#8E94B8] mt-0.5">
-                Manage OpenAI BYOK keys, iMessage Web Gateway, WhatsApp pairing, and frontier API endpoints.
+                Messaging bridges and endpoints. Provider credentials are configured in Model Providers above — rows here are
+                labelled with what they are really wired to.
               </p>
             </div>
 
+            {/* PUSH 2F — every row now declares what it is REALLY wired to.
+                This grid used to accept a real API key for eight services and
+                store all of them in browser localStorage, where no server
+                route has ever read them. A user who pasted an OpenAI key here
+                was told nothing, and the platform reported NOT_CONFIGURED
+                forever — which is exactly the "button that changes frontend
+                state and implies success" AGENTS.md section 3 forbids. It cost
+                a real debugging session to find.
+
+                `wiring` is the fix, and it is per-row honest:
+                  SERVER           — really persists server-side (Fish Audio).
+                  MODEL_PROVIDERS  — a real encrypted store exists; the card
+                                     above owns it, so this row points there
+                                     rather than becoming a second input.
+                  NOT_WIRED        — no server mapping exists at all. The input
+                                     is disabled instead of quietly collecting
+                                     a credential nothing will ever read. */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {[
-                { key: 'openrouter', name: 'OpenRouter Gateway Key', placeholder: 'sk-or-v1-...', url: 'https://openrouter.ai' },
-                { key: 'openai', name: 'OpenAI BYOK (ChatGPT o3 / Codex)', placeholder: 'sk-proj-...', url: 'https://platform.openai.com' },
-                { key: 'anthropic', name: 'Anthropic (Claude 3.7 / Claude Code)', placeholder: 'sk-ant-...', url: 'https://console.anthropic.com' },
-                { key: 'deepseek', name: 'DeepSeek API Key (R1 Reasoning)', placeholder: 'sk-...', url: 'https://platform.deepseek.com' },
-                { key: 'perplexity', name: 'Perplexity API Key (Sonar Web Crawl)', placeholder: 'pplx-...', url: 'https://perplexity.ai' },
-                { key: 'kimi', name: 'Moonshot / Kimi 3 (2M Context)', placeholder: 'sk-...', url: 'https://platform.moonshot.cn' },
-                { key: 'fish_audio', name: 'Fish Audio (Ultra-Low Latency TTS)', placeholder: 'Enter Fish Audio Key...', url: 'https://fish.audio' },
-                { key: 'cursor', name: 'Cursor Automation Bridge', placeholder: 'cur_...', url: 'https://cursor.com' },
-              ].map((item) => (
+              {([
+                { key: 'openai', name: 'OpenAI (ChatGPT / Codex)', placeholder: 'sk-proj-...', url: 'https://platform.openai.com', wiring: 'MODEL_PROVIDERS' },
+                { key: 'fish_audio', name: 'Fish Audio (Ultra-Low Latency TTS)', placeholder: 'Enter Fish Audio Key...', url: 'https://fish.audio', wiring: 'SERVER' },
+                { key: 'openrouter', name: 'OpenRouter Gateway Key', placeholder: 'sk-or-v1-...', url: 'https://openrouter.ai', wiring: 'NOT_WIRED' },
+                { key: 'anthropic', name: 'Anthropic (Claude)', placeholder: 'sk-ant-...', url: 'https://console.anthropic.com', wiring: 'NOT_WIRED' },
+                { key: 'deepseek', name: 'DeepSeek API Key', placeholder: 'sk-...', url: 'https://platform.deepseek.com', wiring: 'NOT_WIRED' },
+                { key: 'perplexity', name: 'Perplexity API Key', placeholder: 'pplx-...', url: 'https://perplexity.ai', wiring: 'NOT_WIRED' },
+                { key: 'kimi', name: 'Moonshot / Kimi', placeholder: 'sk-...', url: 'https://platform.moonshot.cn', wiring: 'NOT_WIRED' },
+                { key: 'cursor', name: 'Cursor Automation Bridge', placeholder: 'cur_...', url: 'https://cursor.com', wiring: 'NOT_WIRED' },
+              ] as const).map((item) => (
                 <div key={item.key} className="space-y-1.5 bg-[#05060C] border border-[#1A1E36] p-3.5 rounded-xl">
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-mono font-bold text-white">{item.name}</label>
@@ -841,33 +863,57 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     </a>
                   </div>
 
-                  <div className="relative">
-                    <input
-                      type={showKeys[item.key] ? 'text' : 'password'}
-                      value={(settings.customApiKeys as any)[item.key] || ''}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setSettings(s => ({
-                          ...s,
-                          // fish_audio deliberately omitted: the Fish Audio key
-                          // is server-side state, not settings state.
-                          customApiKeys: { ...s.customApiKeys, [item.key]: item.key === 'fish_audio' ? '' : val },
-                        }));
-                        if (item.key === 'fish_audio' && val.trim()) {
-                          void persistVoiceCredential(val);
-                        }
-                      }}
-                      placeholder={item.placeholder}
-                      className="w-full bg-[#090A16] border border-[#1E223D] rounded-lg px-3 py-2 text-xs text-white placeholder-[#4C5274] focus:outline-none focus:border-[#615EFF]"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => toggleShowKey(item.key)}
-                      className="absolute right-2.5 top-2.5 text-[#585E82] hover:text-white"
-                    >
-                      {showKeys[item.key] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                    </button>
-                  </div>
+                  {item.wiring === 'MODEL_PROVIDERS' && (
+                    <div className="p-2.5 rounded-lg bg-[#615EFF]/10 border border-[#615EFF]/40 text-[11px] text-[#A8A5FF]">
+                      Configured in <span className="font-bold">Model Providers</span>, at the top of this tab — the server-side
+                      encrypted store the Execution Fabric actually reads. Entering it here would be a second, weaker copy, so this
+                      field is deliberately gone.
+                    </div>
+                  )}
+
+                  {item.wiring === 'NOT_WIRED' && (
+                    <div className="space-y-1.5">
+                      <input
+                        type="password"
+                        disabled
+                        value=""
+                        placeholder="Not wired to any runtime"
+                        className="w-full bg-[#07080F] border border-[#161A2E] rounded-lg px-3 py-2 text-xs text-[#4C5274] cursor-not-allowed"
+                      />
+                      <p className="text-[10px] text-[#6A7097]">
+                        No server-side execution mapping exists for this provider, so a key entered here would be stored in this
+                        browser and never used. Disabled rather than silently collecting a credential.
+                      </p>
+                    </div>
+                  )}
+
+                  {item.wiring === 'SERVER' && (
+                    <div className="relative">
+                      <input
+                        type={showKeys[item.key] ? 'text' : 'password'}
+                        value={(settings.customApiKeys as any)[item.key] || ''}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setSettings(s => ({
+                            ...s,
+                            // The Fish Audio key is server-side state, not
+                            // settings state — it is never kept in the browser.
+                            customApiKeys: { ...s.customApiKeys, [item.key]: '' },
+                          }));
+                          if (val.trim()) void persistVoiceCredential(val);
+                        }}
+                        placeholder={item.placeholder}
+                        className="w-full bg-[#090A16] border border-[#1E223D] rounded-lg px-3 py-2 text-xs text-white placeholder-[#4C5274] focus:outline-none focus:border-[#615EFF]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => toggleShowKey(item.key)}
+                        className="absolute right-2.5 top-2.5 text-[#585E82] hover:text-white"
+                      >
+                        {showKeys[item.key] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

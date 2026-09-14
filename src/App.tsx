@@ -94,6 +94,22 @@ interface AppProps {
   onLogout?: () => void;
 }
 
+/**
+ * Provider keys the browser must not persist — see the persistence effect
+ * below for why each one is here, and why elevenlabs is not.
+ */
+const BROWSER_UNPERSISTED_PROVIDER_KEYS = {
+  fish_audio: undefined,
+  openai: undefined,
+  gemini: undefined,
+  openrouter: undefined,
+  anthropic: undefined,
+  deepseek: undefined,
+  perplexity: undefined,
+  kimi: undefined,
+  cursor: undefined,
+} as const;
+
 const LAST_WORKSPACE_STORAGE_KEY = 'synthos_last_workspace_id';
 
 export default function App({ currentUser, authorizedWorkspaces = [], onLogout }: AppProps = {}) {
@@ -189,6 +205,22 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
   // (lib/voice-credentials.ts). Persisting it here is what created two
   // competing browser copies of the secret — Jarvis read the store it was not
   // saved in, sent an empty key, and fell back to the robot voice.
+  //
+  // PUSH 2F extends the same rule to every provider key the browser has no
+  // business holding. A credential is only kept here if browser code really
+  // uses it:
+  //   fish_audio — server-side store owns it (/api/voice/credentials).
+  //   openai     — server-side encrypted store owns it (Model Providers).
+  //   the rest   — no server execution mapping exists, so a key stored here
+  //                would sit in localStorage being read by nothing.
+  //
+  // elevenlabs is deliberately NOT in this list: JarvisView really does send
+  // it as an xi-api-key header from the browser, so dropping it would break a
+  // working feature. Preserved exactly because it is genuinely used.
+  //
+  // Setting each to undefined removes it on the next save, so a key an earlier
+  // build collected stops being stored. It is never read, and never migrated
+  // anywhere — a credential the server never saw is not ours to move.
   useEffect(() => {
     try {
       const { FISH_AUDIO_API_KEY, ...safeSettings } = jarvisSettings as any;
@@ -198,7 +230,7 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
           ? { ...safeSettings.fishAudioConfig, apiKey: undefined }
           : safeSettings.fishAudioConfig,
         customApiKeys: safeSettings.customApiKeys
-          ? { ...safeSettings.customApiKeys, fish_audio: undefined }
+          ? { ...safeSettings.customApiKeys, ...BROWSER_UNPERSISTED_PROVIDER_KEYS }
           : safeSettings.customApiKeys,
       };
       localStorage.setItem('hermes_jarvis_settings', JSON.stringify(redacted));
