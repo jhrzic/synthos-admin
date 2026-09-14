@@ -34,7 +34,12 @@ import {
 import { resolveCapability } from './registry';
 import { classifyIntent } from './intent';
 import { executeEnvelope, type ExecutionEnvelopeResult, type EnvelopeOutcome, EXTERNAL_ACTION_EXEMPT_FROM_GUARDIAN_RULE } from './envelope';
-import { reconcileExternalExecutions } from '../external-executions';
+// The durable external-execution sweep. Imported into the EXISTING tick
+// rather than given a timer of its own: this file owns "the ONE real
+// in-process poll loop", and a second timer would make that false. The
+// sweep's own durability comes from the ledger, not from this loop — see
+// lib/external-executions.ts.
+import { advanceDueExternalExecutions } from '../external-executions';
 
 // ---------------------------------------------------------------------------
 // Time-phrase parsing. Deterministic, regex-based — no model call, so
@@ -382,25 +387,28 @@ export async function runDueSchedules(nowIso: string = new Date().toISOString())
 }
 
 /**
- * The second thing the one timer does: reconcile external executions whose
- * remote job may have finished while SynthOS was not watching.
+ * The second thing the one timer does: advance external executions whose
+ * remote job may have moved on, including ones that finished while SynthOS
+ * was not watching.
  *
- * This is a reconciliation sweep, NOT a second scheduler. It dispatches
- * nothing new and creates no work — it reads rows the ledger already owns and
- * asks the provider what happened, through the same refresh/ingest pair the
- * UI's refresh button uses.
+ * This is NOT a second scheduler and NOT a dispatch path. It submits nothing
+ * and creates no work — it reads rows the ledger already owns, takes a poll
+ * lease on each, and asks the provider what happened through the same
+ * refresh/ingest pair the UI uses. There is exactly one such sweep
+ * (advanceDueExternalExecutions); an earlier parallel reconciliation sweep
+ * over the same columns was removed when the two lines were integrated.
  *
  * Kept as its own exported function, and deliberately isolated from
  * runDueSchedules in the tick below, because a provider outage must not stop
  * scheduled work from dispatching. They share a timer, not a fate.
  */
-export async function runExternalExecutionReconciliation(nowIso: string = new Date().toISOString()): Promise<{ considered: number; ingested: number }> {
-  const sweep = await reconcileExternalExecutions(nowIso);
+export async function runExternalExecutionReconciliation(nowIso: string = new Date().toISOString()): Promise<{ considered: number; advanced: number; ingested: number; errors: number }> {
+  const sweep = await advanceDueExternalExecutions(nowIso);
   if (sweep.ingested > 0 || sweep.errors > 0) {
     // eslint-disable-next-line no-console
-    console.log(`[reconcile] considered=${sweep.considered} reconciled=${sweep.reconciled} ingested=${sweep.ingested} stillPending=${sweep.stillPending} errors=${sweep.errors}`);
+    console.log(`[reconcile] examined=${sweep.examined} advanced=${sweep.advanced} ingested=${sweep.ingested} errors=${sweep.errors}`);
   }
-  return { considered: sweep.considered, ingested: sweep.ingested };
+  return { considered: sweep.examined, advanced: sweep.advanced, ingested: sweep.ingested, errors: sweep.errors };
 }
 
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;

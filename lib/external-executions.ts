@@ -98,13 +98,13 @@ export interface ExternalExecutionRecord {
   result_artifact_id: string | null;
   result_receipt_id: string | null;
   result_ingested_at: string | null;
+  /** When the durable sweep should next look at this row. NULL means "never again" (terminal, or polling deliberately stopped). */
+  next_poll_at: string | null;
+  /** How many times the sweep has leased this row. Bounds a row that never resolves. */
+  poll_attempts: number;
   created_by_user_id: string;
   created_at: string;
   updated_at: string;
-  /** Earliest instant the reconciliation sweep may poll this row again. NULL means "eligible now". */
-  next_poll_at: string | null;
-  /** How many times the sweep has polled this row. Bounds a row that never resolves. */
-  poll_attempts: number;
 }
 
 function row(id: string): ExternalExecutionRecord | null {
@@ -161,8 +161,8 @@ function insertRow(params: {
       id, workspace_id, runtime, task_id, graph_run_id, graph_node_id, skill_id, target_id, remote_path, target_kind,
       remote_job_id, status, attempt_number, parent_execution_id, correlation_id, input_json,
       submitted_at, started_at, completed_at, last_checked_at, error_code, error_message_safe,
-      result_artifact_id, result_receipt_id, result_ingested_at, created_by_user_id, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'PENDING', ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)
+      result_artifact_id, result_receipt_id, result_ingested_at, next_poll_at, poll_attempts, created_by_user_id, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'PENDING', ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?, ?, ?)
   `).run(
     id, params.workspaceId, params.runtime, params.taskId ?? null, params.graphRunId ?? null, params.graphNodeId ?? null,
     params.skillId ?? null, params.targetId ?? null, params.remotePath, params.targetKind,
@@ -391,13 +391,15 @@ export async function submitExternalExecution(params: SubmitExternalExecutionPar
 
   const submission = await dispatchForRuntime(runtime, params.workspaceId, remotePath, targetKind, params.input || {});
   if (!submission.ok) {
-    execution = patchRow(execution.id, { status: 'FAILED', error_code: 'SUBMISSION_FAILED', error_message_safe: sanitizeError(submission.error) });
+    execution = patchRow(execution.id, { status: 'FAILED', error_code: 'SUBMISSION_FAILED', error_message_safe: sanitizeError(submission.error), next_poll_at: null });
     recordTransition(execution, 'PENDING', 'FAILED');
     return { execution, created: true, error: submission.error };
   }
 
   const now = new Date().toISOString();
-  execution = patchRow(execution.id, { status: 'SUBMITTED', remote_job_id: submission.remoteJobId, submitted_at: now });
+  // PUSH 2A — arm the durable sweep. A real submission is due for its first
+  // poll immediately; from then on settlePollSchedule() owns the cadence.
+  execution = patchRow(execution.id, { status: 'SUBMITTED', remote_job_id: submission.remoteJobId, submitted_at: now, next_poll_at: now });
   recordTransition(execution, 'PENDING', 'SUBMITTED');
   return { execution, created: true };
 }
@@ -675,6 +677,227 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
   return { execution: updated, alreadyIngested: false, verified: !!receiptId };
 }
 
+// ---------------------------------------------------------------------------
+// PUSH 2A — DURABLE ADVANCEMENT.
+//
+// THE GAP THIS CLOSES. Antigravity interactions are submitted with
+// background:true and can run for minutes. Before this, nothing moved them
+// forward: a human had to call refresh. A background runtime that only
+// completes when someone is watching is not a background runtime.
+//
+// WHY THE EXISTING SCHEDULER OWNS THIS, AND NOT WINDMILL. The requirement is
+// durable polling that survives a restart. Durability here comes from the
+// LEDGER, not from the thing doing the polling: every fact needed to resume
+// (remote job id, status, attempt count, when to look next) is already a
+// column, so a restarted process rebuilds its entire work queue with one
+// SELECT. Windmill would add a second service that must be installed,
+// credentialed and operated, and it would still have to hand the result back
+// to this process — because Aegis, the KIL gate, receipt signing and the
+// Vault writer all live in SynthOS. It cannot shorten the critical path; it
+// can only lengthen it. lib/fabric/scheduler.ts already runs THE one
+// in-process loop, so this is one more unit of work on that loop, not a
+// second scheduler.
+//
+// CONCURRENCY. next_poll_at doubles as a LEASE. A sweep claims a row by
+// compare-and-swapping next_poll_at forward in a single UPDATE and checking
+// that exactly one row changed. Two overlapping ticks therefore cannot poll
+// the same execution, without a second claims table.
+// ---------------------------------------------------------------------------
+
+/** Bounded exponential backoff, in seconds, by poll attempt. Capped so a long job is never polled aggressively. */
+export const POLL_BACKOFF_SECONDS = [2, 3, 5, 8, 13, 21, 30, 45, 60] as const;
+
+/** Stop polling after this many attempts. At the backoff above this is roughly 25 minutes of real elapsed time. */
+export const MAX_POLL_ATTEMPTS = 60;
+
+/** Rows handled per sweep, so one tick can never take unbounded time. */
+export const EXTERNAL_SWEEP_BATCH_SIZE = 10;
+
+/** How long a claimed row is leased before another sweep may retry it, if the claiming sweep dies mid-poll. */
+const POLL_LEASE_SECONDS = 120;
+
+export function pollBackoffSeconds(attempt: number): number {
+  const i = Math.max(0, Math.min(attempt, POLL_BACKOFF_SECONDS.length - 1));
+  return POLL_BACKOFF_SECONDS[i];
+}
+
+function isoPlusSeconds(fromIso: string, seconds: number): string {
+  return new Date(new Date(fromIso).getTime() + seconds * 1000).toISOString();
+}
+
+/**
+ * Rows the durable sweep should look at now: non-terminal, really submitted
+ * (a remote job id exists, so there is something to ask about), and due.
+ *
+ * A row with next_poll_at NULL is deliberately excluded — that is how
+ * polling is stopped for good, and a stopped row must never silently
+ * restart.
+ *
+ * REMOTE_REQUIRES_ACTION is excluded too. That row is UNKNOWN because the
+ * remote agent is blocked on an input SynthOS was never asked for and cannot
+ * supply, so polling it is guaranteed-useless work. Excluding it is not the
+ * same as calling it finished: the status stays UNKNOWN.
+ *
+ * The attempt cap is in the selector as well as in settlePollSchedule, because
+ * a row whose provider call THROWS never reaches settlePollSchedule. Without
+ * it, such a row would be re-leased every POLL_LEASE_SECONDS forever.
+ */
+export function listDueExternalExecutions(nowIso: string = new Date().toISOString(), limit = EXTERNAL_SWEEP_BATCH_SIZE): ExternalExecutionRecord[] {
+  const bounded = Math.min(Math.max(limit, 1), 100);
+  return getDatabase().prepare(`
+    SELECT * FROM external_executions
+    WHERE status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+      AND remote_job_id IS NOT NULL
+      AND (error_code IS NULL OR error_code != 'REMOTE_REQUIRES_ACTION')
+      AND poll_attempts < ?
+      AND next_poll_at IS NOT NULL
+      AND next_poll_at <= ?
+    ORDER BY next_poll_at ASC
+    LIMIT ?
+  `).all(MAX_POLL_ATTEMPTS, nowIso, bounded) as ExternalExecutionRecord[];
+}
+
+/**
+ * Atomically take the poll lease for one execution. Returns false when
+ * another sweep already holds it — the caller must then do nothing at all,
+ * including no provider call.
+ */
+function claimPollLease(id: string, nowIso: string): boolean {
+  const res = getDatabase().prepare(`
+    UPDATE external_executions
+       SET next_poll_at = ?, poll_attempts = poll_attempts + 1, updated_at = ?
+     WHERE id = ?
+       AND next_poll_at IS NOT NULL
+       AND next_poll_at <= ?
+  `).run(isoPlusSeconds(nowIso, POLL_LEASE_SECONDS), nowIso, id, nowIso);
+  return Number(res.changes) === 1;
+}
+
+/**
+ * HONEST TIMEOUT. We stopped asking; we do NOT know how the remote job
+ * ended. UNKNOWN is the ledger's existing word for exactly that, and
+ * inventing FAILED here would be a fabricated outcome.
+ */
+function markPollDeadlineExceeded(id: string): void {
+  patchRow(id, {
+    status: 'UNKNOWN',
+    next_poll_at: null,
+    error_code: 'POLL_DEADLINE_EXCEEDED',
+    error_message_safe: `SynthOS stopped polling after ${MAX_POLL_ATTEMPTS} attempts. The remote job's final state is unknown; it was not observed to fail.`,
+  });
+}
+
+/** Terminal rows stop being polled. Called after every real status read. */
+function settlePollSchedule(execution: ExternalExecutionRecord, nowIso: string): void {
+  if (TERMINAL_STATUSES.includes(execution.status)) {
+    patchRow(execution.id, { next_poll_at: null });
+    return;
+  }
+  if (execution.error_code === 'REMOTE_REQUIRES_ACTION') {
+    // Blocked on an input SynthOS cannot supply. Stop polling; stay UNKNOWN.
+    patchRow(execution.id, { next_poll_at: null });
+    return;
+  }
+  if (execution.poll_attempts >= MAX_POLL_ATTEMPTS) {
+    markPollDeadlineExceeded(execution.id);
+    return;
+  }
+  patchRow(execution.id, { next_poll_at: isoPlusSeconds(nowIso, pollBackoffSeconds(execution.poll_attempts)) });
+}
+
+export interface AdvanceResult {
+  execution: ExternalExecutionRecord;
+  polled: boolean;
+  ingested: boolean;
+  /** Set when the lease was held by another sweep, so nothing was done. */
+  skippedReason?: string;
+}
+
+/**
+ * Advance ONE execution by exactly one real step. Idempotent by
+ * construction: the lease prevents a concurrent duplicate poll, and
+ * ingestExternalExecutionResult's own result_ingested_at guard prevents a
+ * duplicate artifact/receipt/knowledge write even if this is called twice.
+ */
+export async function advanceExternalExecution(workspaceId: string, id: string, nowIso: string = new Date().toISOString()): Promise<AdvanceResult> {
+  const existing = getWorkspaceExternalExecution(workspaceId, id);
+  if (!existing) throw Object.assign(new Error('External execution not found.'), { code: 'NOT_FOUND' });
+
+  if (!claimPollLease(id, nowIso)) {
+    return { execution: existing, polled: false, ingested: false, skippedReason: 'Another sweep holds the poll lease for this execution.' };
+  }
+
+  let refreshed: ExternalExecutionRecord;
+  try {
+    refreshed = await refreshExternalExecutionStatus(workspaceId, id);
+  } catch (err) {
+    // The lease already pushed next_poll_at out, so this row is backed off.
+    // If it has also used its last attempt, stop here honestly rather than
+    // leaving it to be re-leased forever by a provider that always throws.
+    const claimed = row(id);
+    if (claimed && claimed.poll_attempts >= MAX_POLL_ATTEMPTS && !TERMINAL_STATUSES.includes(claimed.status)) {
+      markPollDeadlineExceeded(id);
+    }
+    throw err;
+  }
+  let ingested = false;
+
+  if (refreshed.status === 'SUCCEEDED' && !refreshed.result_ingested_at) {
+    try {
+      const result = await ingestExternalExecutionResult(workspaceId, id);
+      refreshed = result.execution;
+      ingested = !result.alreadyIngested;
+    } catch (err: any) {
+      // A result that cannot be ingested (e.g. the remote genuinely returned
+      // no output) is a real, terminal outcome of THIS row. Recorded rather
+      // than retried forever — the remote job itself already succeeded, so
+      // polling it again can never produce a different answer.
+      refreshed = patchRow(id, {
+        error_code: err?.code || 'INGEST_FAILED',
+        error_message_safe: sanitizeError(err?.message),
+        next_poll_at: null,
+      });
+      return { execution: refreshed, polled: true, ingested: false };
+    }
+  }
+
+  settlePollSchedule(refreshed, nowIso);
+  return { execution: row(id)!, polled: true, ingested };
+}
+
+export interface SweepResult {
+  examined: number;
+  advanced: number;
+  ingested: number;
+  errors: number;
+}
+
+/**
+ * THE durable sweep. Called from the existing scheduler tick
+ * (lib/fabric/scheduler.ts) — never from a timer of its own.
+ *
+ * Restart recovery needs no special path: this reads the ledger, and the
+ * ledger is what survived. A process that has just started and one that has
+ * been up for a week execute the identical query.
+ */
+export async function advanceDueExternalExecutions(nowIso: string = new Date().toISOString(), limit = 25): Promise<SweepResult> {
+  const due = listDueExternalExecutions(nowIso, limit);
+  const result: SweepResult = { examined: due.length, advanced: 0, ingested: 0, errors: 0 };
+
+  for (const execution of due) {
+    try {
+      const advanced = await advanceExternalExecution(execution.workspace_id, execution.id, nowIso);
+      if (advanced.polled) result.advanced += 1;
+      if (advanced.ingested) result.ingested += 1;
+    } catch (err) {
+      result.errors += 1;
+      // eslint-disable-next-line no-console
+      console.error('[external-executions] advance failed for', execution.id, err instanceof Error ? err.message : String(err));
+    }
+  }
+  return result;
+}
+
 export interface CancelResult {
   execution: ExternalExecutionRecord;
   confirmed: boolean;
@@ -776,12 +999,12 @@ export async function retryExternalExecution(workspaceId: string, actorUserId: s
 
   const submission = await dispatchForRuntime(runtime, workspaceId, remotePath, targetKind, input);
   if (!submission.ok) {
-    execution = patchRow(execution.id, { status: 'FAILED', error_code: 'SUBMISSION_FAILED', error_message_safe: sanitizeError(submission.error) });
+    execution = patchRow(execution.id, { status: 'FAILED', error_code: 'SUBMISSION_FAILED', error_message_safe: sanitizeError(submission.error), next_poll_at: null });
     recordTransition(execution, 'PENDING', 'FAILED');
     return { execution, created: true, error: submission.error };
   }
   const now = new Date().toISOString();
-  execution = patchRow(execution.id, { status: 'SUBMITTED', remote_job_id: submission.remoteJobId, submitted_at: now });
+  execution = patchRow(execution.id, { status: 'SUBMITTED', remote_job_id: submission.remoteJobId, submitted_at: now, next_poll_at: now });
   recordTransition(execution, 'PENDING', 'SUBMITTED');
   return { execution, created: true };
 }
@@ -840,124 +1063,4 @@ export async function submitAndAwaitExternalExecution(
     return execution;
   }
   return current;
-}
-
-
-// ---------------------------------------------------------------------------
-// RESTART RECONCILIATION.
-//
-// The gap this closes: refreshAndIngestIfComplete() already existed and its
-// own docstring named "an orphan reconciliation sweep after a SynthOS
-// restart" as a caller — but nothing ever called it on a timer. A job that
-// finished while SynthOS was down stayed non-terminal forever, and its result
-// was never ingested, so no artifact and no receipt were produced for work
-// the provider had actually completed.
-//
-// Nothing here re-implements polling, status mapping or ingestion. Every row
-// goes through the same refreshExternalExecutionStatus/
-// ingestExternalExecutionResult pair the UI's refresh button uses, so there
-// is one status machine and one ingestion boundary, not two.
-//
-// The four properties that make it safe to run unattended:
-//
-//   Restart-safe  — eligibility is computed entirely from persisted columns
-//                   (status, remote_job_id, next_poll_at, poll_attempts), so
-//                   a restart resumes exactly where it left off. No in-memory
-//                   queue to lose.
-//   Idempotent    — ingestExternalExecutionResult is the idempotency
-//                   boundary (result_ingested_at). A row already ingested is
-//                   a no-op read, so a sweep cannot produce a second artifact
-//                   or a second receipt however many times it runs.
-//   Bounded       — terminal rows are excluded, and every poll pushes
-//                   next_poll_at out with exponential backoff, so one stuck
-//                   job cannot be hammered.
-//   Honest        — a row that exhausts the attempt cap is LEFT AS IT IS.
-//                   It is never flipped to FAILED to tidy the queue: the
-//                   provider's state is unknown, and UNKNOWN is what unknown
-//                   looks like.
-// ---------------------------------------------------------------------------
-
-/** Rows past this many sweep attempts stop being polled. Their status is not changed. */
-export const RECONCILE_MAX_POLL_ATTEMPTS = 40;
-/** First backoff step; doubles per attempt up to the ceiling. */
-export const RECONCILE_BASE_BACKOFF_MS = 30_000;
-export const RECONCILE_MAX_BACKOFF_MS = 15 * 60_000;
-/** Rows handled per sweep, so one tick can never take unbounded time. */
-export const RECONCILE_BATCH_SIZE = 10;
-
-export function computeReconcileBackoffMs(pollAttempts: number): number {
-  const exponent = Math.max(0, pollAttempts);
-  const delay = RECONCILE_BASE_BACKOFF_MS * Math.pow(2, Math.min(exponent, 20));
-  return Math.min(delay, RECONCILE_MAX_BACKOFF_MS);
-}
-
-/**
- * Rows the sweep may poll right now.
- *
- * REMOTE_REQUIRES_ACTION is excluded deliberately. That row is UNKNOWN
- * because the remote agent is blocked waiting for an input SynthOS was never
- * asked for and cannot supply — its own error message says it "will not
- * progress on its own". Polling it is guaranteed-useless work, and excluding
- * it is not the same as calling it finished: the status stays UNKNOWN.
- */
-export function listReconcilableExternalExecutions(nowIso: string = new Date().toISOString(), limit = RECONCILE_BATCH_SIZE): ExternalExecutionRecord[] {
-  const db = getDatabase();
-  const bounded = Math.min(Math.max(limit, 1), 100);
-  const placeholders = TERMINAL_STATUSES.map(() => '?').join(', ');
-  return db.prepare(`
-    SELECT * FROM external_executions
-     WHERE remote_job_id IS NOT NULL
-       AND status NOT IN (${placeholders})
-       AND (error_code IS NULL OR error_code != 'REMOTE_REQUIRES_ACTION')
-       AND poll_attempts < ?
-       AND (next_poll_at IS NULL OR next_poll_at <= ?)
-     ORDER BY COALESCE(next_poll_at, created_at) ASC
-     LIMIT ?
-  `).all(...TERMINAL_STATUSES, RECONCILE_MAX_POLL_ATTEMPTS, nowIso, bounded) as ExternalExecutionRecord[];
-}
-
-export interface ReconcileSweepResult {
-  considered: number;
-  reconciled: number;
-  ingested: number;
-  stillPending: number;
-  errors: number;
-  details: Array<{ id: string; workspaceId: string; from: ExternalExecutionStatus; to: ExternalExecutionStatus; ingested: boolean; error?: string }>;
-}
-
-/**
- * One reconciliation pass. Called by the scheduler tick; also callable
- * directly by a test or an operator without a timer.
- */
-export async function reconcileExternalExecutions(nowIso: string = new Date().toISOString()): Promise<ReconcileSweepResult> {
-  const due = listReconcilableExternalExecutions(nowIso);
-  const result: ReconcileSweepResult = { considered: due.length, reconciled: 0, ingested: 0, stillPending: 0, errors: 0, details: [] };
-
-  for (const row of due) {
-    const from = row.status;
-    const alreadyIngested = !!row.result_ingested_at;
-
-    // The backoff is written FIRST, so a refresh that throws still pushes the
-    // next attempt out. Without this, a row whose provider call always throws
-    // would be retried on every single tick.
-    patchRow(row.id, {
-      poll_attempts: (row.poll_attempts || 0) + 1,
-      next_poll_at: new Date(new Date(nowIso).getTime() + computeReconcileBackoffMs(row.poll_attempts || 0)).toISOString(),
-    });
-
-    try {
-      const updated = await refreshAndIngestIfComplete(row.workspace_id, row.id);
-      result.reconciled += 1;
-      const nowIngested = !!updated.result_ingested_at && !alreadyIngested;
-      if (nowIngested) result.ingested += 1;
-      if (!TERMINAL_STATUSES.includes(updated.status)) result.stillPending += 1;
-      result.details.push({ id: row.id, workspaceId: row.workspace_id, from, to: updated.status, ingested: nowIngested });
-    } catch (err: any) {
-      // One bad row must not end the sweep for the rest.
-      result.errors += 1;
-      result.details.push({ id: row.id, workspaceId: row.workspace_id, from, to: from, ingested: false, error: err?.message || String(err) });
-    }
-  }
-
-  return result;
 }

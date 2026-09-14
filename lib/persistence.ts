@@ -864,6 +864,24 @@ export function getDatabase(): any {
     if (externalExecCols.length > 0 && !externalExecCols.some((c) => c.name === 'poll_attempts')) {
       dbInstance.exec("ALTER TABLE external_executions ADD COLUMN poll_attempts INTEGER NOT NULL DEFAULT 0");
     }
+    // ONE POLLER, ONE MEANING FOR NULL. Two sweeps used to share these
+    // columns: the old reconciliation sweep read next_poll_at NULL as "due
+    // now", the durable sweep (lib/external-executions.ts) reads it as
+    // "stopped for good". Only the durable sweep remains, so a row written
+    // under the old meaning — in flight, never stopped on purpose — is made
+    // due once here instead of being stranded. Every deliberate stop sets a
+    // terminal status or an error_code, so this cannot restart one, and it is
+    // a no-op on every run after the first.
+    if (externalExecCols.length > 0) {
+      dbInstance.exec(`
+        UPDATE external_executions
+           SET next_poll_at = COALESCE(last_checked_at, updated_at, created_at)
+         WHERE next_poll_at IS NULL
+           AND remote_job_id IS NOT NULL
+           AND status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+           AND error_code IS NULL
+      `);
+    }
 
     // NO-COPY/PASTE ORCHESTRATION — additive task columns. Same
     // check-then-ALTER pattern used above, so an existing database gains them
@@ -1030,6 +1048,49 @@ export function getDatabase(): any {
       CREATE INDEX IF NOT EXISTS idx_external_executions_next_poll ON external_executions(status, next_poll_at);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_external_executions_correlation ON external_executions(correlation_id);
       CREATE INDEX IF NOT EXISTS idx_external_executions_remote_job ON external_executions(remote_job_id);
+      -- PUSH 2A — durable advancement. next_poll_at is the lease: the sweep
+      -- claims a row by compare-and-swapping it forward, so two concurrent
+      -- ticks can never poll the same execution. Both columns live on the
+      -- EXISTING ledger rather than in a second table, because "when should
+      -- this job next be looked at" is a property of the job.
+      CREATE INDEX IF NOT EXISTS idx_external_executions_due ON external_executions(next_poll_at);
+
+      -- PUSH 2A — the development loop. This is an EXTENSION of the canonical
+      -- task, never a replacement for it: task_id points at the real tasks
+      -- row that owns the artifacts, Aegis reviews and receipts, exactly as
+      -- external_executions does. It exists because the canonical execution
+      -- vocabulary (TODO/READY/RUNNING/AWAITING_VERIFICATION/AWAITING_RECEIPT/
+      -- DONE/FAILED) describes ONE execution's lifecycle and genuinely cannot
+      -- express WAITING_FOR_REVIEW or WAITING_FOR_APPROVAL — states that occur
+      -- before any execution exists. Overloading tasks.status with them would
+      -- corrupt the vocabulary every other surface reads.
+      CREATE TABLE IF NOT EXISTS development_tasks (
+        dev_task_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        task_id TEXT,
+        title TEXT NOT NULL,
+        instruction TEXT NOT NULL,
+        state TEXT NOT NULL,
+        state_reason TEXT,
+        requires_review INTEGER NOT NULL DEFAULT 1,
+        requires_approval INTEGER NOT NULL DEFAULT 1,
+        review_provider TEXT,
+        review_model TEXT,
+        review_text TEXT,
+        review_at TEXT,
+        approved_by_user_id TEXT,
+        approved_at TEXT,
+        execution_id TEXT,
+        result_artifact_id TEXT,
+        result_receipt_id TEXT,
+        aegis_decision TEXT,
+        created_by_user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_development_tasks_workspace ON development_tasks(workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_development_tasks_state ON development_tasks(state);
+      CREATE INDEX IF NOT EXISTS idx_development_tasks_execution ON development_tasks(execution_id);
 
       -- P0 voice regression fix. The TTS provider credential now has a real
       -- server-side home instead of living in browser localStorage and

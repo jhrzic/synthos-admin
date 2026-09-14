@@ -207,18 +207,31 @@ describe('PATH 4 — retry and reconciliation cannot launder an action past Guar
   // Reconciliation is the subtler one: it must never be a dispatch path.
   it('the reconciliation sweep only refreshes and ingests — it never submits new work', () => {
     const source = fs.readFileSync(path.join(process.cwd(), 'lib/external-executions.ts'), 'utf8');
-    const sweep = source.slice(source.indexOf('export async function reconcileExternalExecutions'));
-    expect(sweep).toContain('refreshAndIngestIfComplete');
+    // Bounded to the sweep itself: cancel and retry are defined right after it.
+    const start = source.indexOf('export async function advanceExternalExecution');
+    const end = source.indexOf('export interface CancelResult');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const sweep = source.slice(start, end);
+    expect(sweep).toContain('refreshExternalExecutionStatus');
+    expect(sweep).toContain('ingestExternalExecutionResult');
     // A submit or a retry inside the sweep would make an unattended timer a
     // dispatcher, which is exactly what the Guardian boundary exists to stop.
     expect(sweep).not.toContain('submitExternalExecution');
     expect(sweep).not.toContain('retryExternalExecution');
+    expect(sweep).not.toContain('dispatchForRuntime');
   });
 
   it('terminal executions are excluded from the sweep, so nothing is re-run after completion', () => {
     const source = fs.readFileSync(path.join(process.cwd(), 'lib/external-executions.ts'), 'utf8');
-    const selector = source.slice(source.indexOf('export function listReconcilableExternalExecutions'));
+    const selector = source.slice(source.indexOf('export function listDueExternalExecutions'));
     expect(selector).toContain('status NOT IN');
+  });
+
+  it('there is exactly one external-execution sweep', () => {
+    const source = fs.readFileSync(path.join(process.cwd(), 'lib/external-executions.ts'), 'utf8');
+    expect(source).not.toContain('function reconcileExternalExecutions');
+    expect(source).not.toContain('function listReconcilableExternalExecutions');
   });
 });
 

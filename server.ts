@@ -124,6 +124,14 @@ import {
   ingestExternalExecutionResult, listAllExternalExecutions, submitAndAwaitExternalExecution,
   isExternalRuntime, EXTERNAL_RUNTIMES,
 } from "./lib/external-executions";
+// PUSH 2A — the development-loop backend contract. Sequencing only: every
+// step it runs is an existing primitive (memory index, model router, the
+// external-execution ledger, the scheduler sweep, Aegis/receipts).
+import {
+  createDevelopmentTask, getWorkspaceDevelopmentTask, listWorkspaceDevelopmentTasks,
+  requestDevelopmentReview, approveDevelopmentTask, dispatchDevelopmentTask,
+  reconcileDevelopmentTask,
+} from "./lib/development-loop";
 
 const VALID_EXECUTION_TARGET_TYPES = new Set<ExecutionTargetType>(["model", "deterministic", "mcp_tool", "hermes_runtime", "windmill"]);
 import { createJarvisSession, listUserJarvisSessions, getOwnedJarvisSession, listSessionMessages, appendJarvisMessage, selectBoundedContext, type JarvisMessageRecord } from "./lib/jarvis-sessions";
@@ -6089,6 +6097,107 @@ Rules for spokenSummary specifically:
     } catch (err: any) {
       const code = err?.code === "NOT_FOUND" ? 404 : err?.code === "NOT_RETRYABLE" || err?.code === "TARGET_NOT_ALLOWED" ? 400 : 500;
       return res.status(code).json({ success: false, error: err?.message || "Failed to retry external execution" });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // PUSH 2A — DEVELOPMENT LOOP.
+  //
+  // Authorization posture matches the risk, and matches what the capability
+  // registry already says about runtime.antigravity (EXTERNAL_ACTION, HIGH,
+  // workspaceScope 'admin'): reads are member-level, but anything that can
+  // cause remote code execution — creating, reviewing, approving,
+  // dispatching — is workspace-admin. Dispatch additionally carries the same
+  // EXPENSIVE_EXECUTION rate limit as a raw external execution, because it
+  // is one.
+  //
+  // There is no "advance" route on purpose. Advancement belongs to the
+  // scheduler sweep; an HTTP endpoint that polled providers would be a
+  // second mechanism for the thing this push exists to make automatic.
+  // -------------------------------------------------------------------------
+
+  app.get("/api/development/tasks", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const limit = req.query.limit ? Number(req.query.limit) : undefined;
+      // Reconcile on read so a caller always sees the task's REAL state
+      // against its execution. This performs no provider call — it only reads
+      // what the sweep already persisted.
+      const tasks = listWorkspaceDevelopmentTasks(workspaceId, limit).map((t) => {
+        try { return reconcileDevelopmentTask(workspaceId, t.dev_task_id); } catch { return t; }
+      });
+      return res.json({ success: true, tasks });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list development tasks" });
+    }
+  });
+
+  app.get("/api/development/tasks/:id", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const task = reconcileDevelopmentTask(workspaceId, req.params.id);
+      return res.json({ success: true, task });
+    } catch (err: any) {
+      const code = err?.code === "NOT_FOUND" ? 404 : 500;
+      return res.status(code).json({ success: false, error: err?.message || "Failed to read development task" });
+    }
+  });
+
+  app.post("/api/development/tasks", requireWorkspaceAdmin(fromBody), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const actorUserId = (req as AuthedRequest).authUser!.user_id;
+      const task = createDevelopmentTask({
+        workspaceId, createdByUserId: actorUserId,
+        title: String(req.body?.title || ""),
+        instruction: String(req.body?.instruction || ""),
+        requiresReview: req.body?.requiresReview !== false,
+        requiresApproval: req.body?.requiresApproval !== false,
+      });
+      return res.json({ success: true, task });
+    } catch (err: any) {
+      const code = err?.code === "INVALID_INPUT" ? 400 : 500;
+      return res.status(code).json({ success: false, error: err?.message || "Failed to create development task" });
+    }
+  });
+
+  app.post("/api/development/tasks/:id/review", requireWorkspaceAdmin(fromBody), async (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const review = await requestDevelopmentReview(workspaceId, req.params.id, req.body?.model);
+      // NOT_CONFIGURED is a truthful 200 state, not an error: the task is
+      // untouched and the operator is told exactly what is missing.
+      return res.json({ success: review.outcome === "REVIEWED", review, task: getWorkspaceDevelopmentTask(workspaceId, req.params.id) });
+    } catch (err: any) {
+      const code = err?.code === "NOT_FOUND" ? 404 : 500;
+      return res.status(code).json({ success: false, error: err?.message || "Failed to review development task" });
+    }
+  });
+
+  app.post("/api/development/tasks/:id/approve", requireWorkspaceAdmin(fromBody), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const approverUserId = (req as AuthedRequest).authUser!.user_id;
+      const task = approveDevelopmentTask(workspaceId, req.params.id, approverUserId);
+      return res.json({ success: true, task });
+    } catch (err: any) {
+      const code = err?.code === "NOT_FOUND" ? 404 : err?.code === "INVALID_STATE" ? 409 : 500;
+      return res.status(code).json({ success: false, error: err?.message || "Failed to approve development task" });
+    }
+  });
+
+  app.post("/api/development/tasks/:id/dispatch", requireWorkspaceAdmin(fromBody), rateLimit("EXPENSIVE_EXECUTION", byUserOrIp, "development-dispatch"), async (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const actorUserId = (req as AuthedRequest).authUser!.user_id;
+      const result = await dispatchDevelopmentTask(workspaceId, req.params.id, actorUserId);
+      // A Guardian refusal is a real, recorded outcome of the task, not a
+      // server error — the task is BLOCKED and says why.
+      const blocked = result.task.state === "BLOCKED";
+      return res.status(blocked ? 403 : 200).json({ success: !blocked && result.task.state === "RUNNING", ...result });
+    } catch (err: any) {
+      const code = err?.code === "NOT_FOUND" ? 404 : err?.code === "INVALID_STATE" ? 409 : 500;
+      return res.status(code).json({ success: false, error: err?.message || "Failed to dispatch development task" });
     }
   });
 

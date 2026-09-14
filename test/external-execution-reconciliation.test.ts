@@ -7,27 +7,27 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'synthos-reconcile-'));
 process.env.SYNTHOS_DB_PATH = path.join(TMP, 'reconcile.db');
 process.env.SYNTHOS_SIGNING_KEY_DIR = path.join(TMP, 'keys');
 
-import { getDatabase } from '../lib/persistence';
+import { getDatabase, closeDatabase } from '../lib/persistence';
 import {
-  listReconcilableExternalExecutions,
-  reconcileExternalExecutions,
-  computeReconcileBackoffMs,
-  RECONCILE_MAX_POLL_ATTEMPTS,
-  RECONCILE_BASE_BACKOFF_MS,
-  RECONCILE_MAX_BACKOFF_MS,
+  listDueExternalExecutions,
+  advanceDueExternalExecutions,
+  pollBackoffSeconds,
+  POLL_BACKOFF_SECONDS,
+  MAX_POLL_ATTEMPTS,
+  EXTERNAL_SWEEP_BATCH_SIZE,
 } from '../lib/external-executions';
 
 // ---------------------------------------------------------------------------
-// The gap: refreshAndIngestIfComplete()'s own docstring named "an orphan
-// reconciliation sweep after a SynthOS restart" as one of its callers, and
-// nothing ever called it on a timer. A remote job that finished while SynthOS
-// was down stayed non-terminal forever and its result was never ingested — so
-// no artifact and no receipt existed for work the provider had completed.
+// The gap: a remote job that finished while SynthOS was down stayed
+// non-terminal forever and its result was never ingested — so no artifact
+// and no receipt existed for work the provider had completed.
 //
-// These tests are about the sweep's SELECTION and BOUNDS, which is where a
-// reconciliation loop goes wrong: polling terminal rows, polling a blocked row
-// forever, double-ingesting, or quietly marking an unknown row FAILED to tidy
-// the queue.
+// There is exactly ONE sweep that closes it: advanceDueExternalExecutions.
+// Two sweeps once shared these columns with opposite readings of
+// next_poll_at NULL; these tests pin the SELECTION and BOUNDS of the one that
+// remains, which is where an unattended loop goes wrong: polling terminal
+// rows, polling a blocked row forever, double-ingesting, or quietly marking
+// an unknown row FAILED to tidy the queue.
 // ---------------------------------------------------------------------------
 
 let seq = 0;
@@ -64,7 +64,8 @@ function insertExecution(fields: Partial<Record<string, unknown>> = {}): string 
     created_by_user_id: 'test',
     created_at: now,
     updated_at: now,
-    next_poll_at: null,
+    // Due now. NULL means "stopped for good" in the one surviving sweep.
+    next_poll_at: new Date(Date.now() - 1000).toISOString(),
     poll_attempts: 0,
     ...fields,
   };
@@ -86,20 +87,19 @@ beforeEach(() => {
 describe('what the sweep will and will not poll', () => {
   it('picks up a non-terminal row with a remote job — the orphan case this exists for', () => {
     const id = insertExecution({ status: 'RUNNING' });
-    const due = listReconcilableExternalExecutions();
-    expect(due.map((r) => r.id)).toContain(id);
+    expect(listDueExternalExecutions().map((r) => r.id)).toContain(id);
   });
 
   it('never polls a terminal row', () => {
     for (const status of ['SUCCEEDED', 'FAILED', 'CANCELLED']) {
       insertExecution({ status });
     }
-    expect(listReconcilableExternalExecutions()).toHaveLength(0);
+    expect(listDueExternalExecutions()).toHaveLength(0);
   });
 
   it('polls UNKNOWN, because unknown may still resolve', () => {
     const id = insertExecution({ status: 'UNKNOWN' });
-    expect(listReconcilableExternalExecutions().map((r) => r.id)).toContain(id);
+    expect(listDueExternalExecutions().map((r) => r.id)).toContain(id);
   });
 
   // A row blocked on an input SynthOS was never asked for cannot progress on
@@ -107,16 +107,20 @@ describe('what the sweep will and will not poll', () => {
   // same as declaring it finished — the assertion below pins that.
   it('does not poll a row blocked on REMOTE_REQUIRES_ACTION, and leaves it UNKNOWN', async () => {
     const id = insertExecution({ status: 'UNKNOWN', error_code: 'REMOTE_REQUIRES_ACTION' });
-    expect(listReconcilableExternalExecutions()).toHaveLength(0);
+    expect(listDueExternalExecutions()).toHaveLength(0);
 
-    await reconcileExternalExecutions();
-    // Still UNKNOWN. Not tidied into FAILED.
+    await advanceDueExternalExecutions();
     expect(readRow(id).status).toBe('UNKNOWN');
   });
 
   it('never polls a row with no remote job id — there is nothing to ask about', () => {
     insertExecution({ remote_job_id: null, status: 'PENDING' });
-    expect(listReconcilableExternalExecutions()).toHaveLength(0);
+    expect(listDueExternalExecutions()).toHaveLength(0);
+  });
+
+  it('never polls a row whose polling was stopped (next_poll_at NULL)', () => {
+    insertExecution({ status: 'RUNNING', next_poll_at: null });
+    expect(listDueExternalExecutions()).toHaveLength(0);
   });
 
   it('respects next_poll_at, so a stuck job is not hammered every tick', () => {
@@ -124,40 +128,40 @@ describe('what the sweep will and will not poll', () => {
     const held = insertExecution({ next_poll_at: future });
     const ready = insertExecution({ next_poll_at: new Date(Date.now() - 1000).toISOString() });
 
-    const due = listReconcilableExternalExecutions().map((r) => r.id);
+    const due = listDueExternalExecutions().map((r) => r.id);
     expect(due).toContain(ready);
     expect(due).not.toContain(held);
   });
 
-  it('stops polling a row that has exhausted the attempt cap, without changing its status', async () => {
-    const id = insertExecution({ status: 'RUNNING', poll_attempts: RECONCILE_MAX_POLL_ATTEMPTS });
-    expect(listReconcilableExternalExecutions()).toHaveLength(0);
+  it('does not select a row that has exhausted the attempt cap, and does not invent an outcome for it', async () => {
+    const id = insertExecution({ status: 'RUNNING', poll_attempts: MAX_POLL_ATTEMPTS });
+    expect(listDueExternalExecutions()).toHaveLength(0);
 
-    await reconcileExternalExecutions();
+    await advanceDueExternalExecutions();
     const row = readRow(id);
-    // The provider's state is genuinely unknown to us; RUNNING is what was
-    // last observed and inventing a terminal state would be a lie.
     expect(row.status).toBe('RUNNING');
-    expect(row.poll_attempts).toBe(RECONCILE_MAX_POLL_ATTEMPTS);
+    expect(row.poll_attempts).toBe(MAX_POLL_ATTEMPTS);
   });
 
   it('is batched, so one tick cannot take unbounded time', () => {
     for (let i = 0; i < 25; i++) insertExecution();
-    expect(listReconcilableExternalExecutions().length).toBeLessThanOrEqual(10);
+    expect(listDueExternalExecutions().length).toBeLessThanOrEqual(EXTERNAL_SWEEP_BATCH_SIZE);
+    expect(EXTERNAL_SWEEP_BATCH_SIZE).toBeLessThanOrEqual(10);
   });
 });
 
 describe('backoff is bounded and monotonic', () => {
-  it('starts at the base interval and doubles', () => {
-    expect(computeReconcileBackoffMs(0)).toBe(RECONCILE_BASE_BACKOFF_MS);
-    expect(computeReconcileBackoffMs(1)).toBe(RECONCILE_BASE_BACKOFF_MS * 2);
-    expect(computeReconcileBackoffMs(2)).toBe(RECONCILE_BASE_BACKOFF_MS * 4);
+  it('never decreases as attempts rise', () => {
+    for (let i = 1; i < POLL_BACKOFF_SECONDS.length + 5; i++) {
+      expect(pollBackoffSeconds(i)).toBeGreaterThanOrEqual(pollBackoffSeconds(i - 1));
+    }
   });
 
   it('never exceeds the ceiling, however many attempts have happened', () => {
+    const ceiling = POLL_BACKOFF_SECONDS[POLL_BACKOFF_SECONDS.length - 1];
     for (const attempts of [10, 50, 1000, Number.MAX_SAFE_INTEGER]) {
-      const delay = computeReconcileBackoffMs(attempts);
-      expect(delay).toBeLessThanOrEqual(RECONCILE_MAX_BACKOFF_MS);
+      const delay = pollBackoffSeconds(attempts);
+      expect(delay).toBeLessThanOrEqual(ceiling);
       expect(Number.isFinite(delay)).toBe(true);
     }
   });
@@ -166,33 +170,43 @@ describe('backoff is bounded and monotonic', () => {
 describe('the sweep is safe to run unattended', () => {
   // Without this, a row whose provider call always throws would be retried on
   // every single tick forever.
-  it('advances backoff even when the refresh itself fails', async () => {
+  it('advances the attempt count and holds the row off even when the refresh itself fails', async () => {
     // remote_job_id is set but no provider is configured, so the refresh
     // attempt cannot succeed — the realistic failure shape.
     const id = insertExecution({ status: 'RUNNING' });
-    const before = readRow(id);
-    expect(before.poll_attempts).toBe(0);
-    expect(before.next_poll_at).toBeNull();
+    expect(readRow(id).poll_attempts).toBe(0);
 
-    await reconcileExternalExecutions();
+    await advanceDueExternalExecutions();
 
     const after = readRow(id);
     expect(after.poll_attempts).toBe(1);
-    expect(after.next_poll_at).not.toBeNull();
-    // And it is now held off, so the next tick will skip it.
-    expect(listReconcilableExternalExecutions().map((r) => r.id)).not.toContain(id);
+    expect(new Date(after.next_poll_at).getTime()).toBeGreaterThan(Date.now());
+    expect(listDueExternalExecutions().map((r) => r.id)).not.toContain(id);
+  });
+
+  // The gap the integration found: a provider that ALWAYS throws never reached
+  // the deadline check, so the row was re-leased forever. The last attempt now
+  // ends it honestly — UNKNOWN, never FAILED.
+  it('a row whose provider always throws stops at the cap as UNKNOWN / POLL_DEADLINE_EXCEEDED', async () => {
+    const id = insertExecution({ status: 'RUNNING', poll_attempts: MAX_POLL_ATTEMPTS - 1 });
+    await advanceDueExternalExecutions();
+
+    const row = readRow(id);
+    expect(row.poll_attempts).toBe(MAX_POLL_ATTEMPTS);
+    expect(row.status).toBe('UNKNOWN');
+    expect(row.error_code).toBe('POLL_DEADLINE_EXCEEDED');
+    expect(row.next_poll_at).toBeNull();
   });
 
   it('a failing row does not abort the sweep for the rest of the batch', async () => {
     const ids = [insertExecution(), insertExecution(), insertExecution()];
-    const sweep = await reconcileExternalExecutions();
+    const sweep = await advanceDueExternalExecutions();
 
-    expect(sweep.considered).toBe(3);
-    // Every row was attempted — errors are counted, not thrown.
+    expect(sweep.examined).toBe(3);
     for (const id of ids) {
       expect(readRow(id).poll_attempts).toBe(1);
     }
-    expect(sweep.reconciled + sweep.errors).toBe(3);
+    expect(sweep.advanced + sweep.errors).toBe(3);
   });
 
   // The idempotency boundary is result_ingested_at, inside
@@ -206,32 +220,49 @@ describe('the sweep is safe to run unattended', () => {
       result_receipt_id: 'rcpt-existing',
     });
 
-    expect(listReconcilableExternalExecutions()).toHaveLength(0);
-    await reconcileExternalExecutions();
+    expect(listDueExternalExecutions()).toHaveLength(0);
+    await advanceDueExternalExecutions();
 
     const row = readRow(id);
     expect(row.result_artifact_id).toBe('art-existing');
     expect(row.result_receipt_id).toBe('rcpt-existing');
   });
 
-  it('reconciliation state lives in columns, so a restart resumes where it stopped', async () => {
+  it('sweep state lives in columns, so a restart resumes where it stopped', async () => {
     const id = insertExecution();
-    await reconcileExternalExecutions();
+    await advanceDueExternalExecutions();
 
-    // Everything the next process needs is persisted — there is no in-memory
-    // queue to lose across a restart.
     const row = readRow(id);
     expect(row.poll_attempts).toBe(1);
     expect(typeof row.next_poll_at).toBe('string');
 
-    // Simulate the backoff elapsing after a restart: the row becomes eligible
-    // again purely from persisted state.
     const later = new Date(new Date(row.next_poll_at).getTime() + 1000).toISOString();
-    expect(listReconcilableExternalExecutions(later).map((r) => r.id)).toContain(id);
+    expect(listDueExternalExecutions(later).map((r) => r.id)).toContain(id);
   });
 
   it('an empty ledger is a no-op sweep, not an error', async () => {
-    const sweep = await reconcileExternalExecutions();
-    expect(sweep).toMatchObject({ considered: 0, reconciled: 0, ingested: 0, errors: 0 });
+    const sweep = await advanceDueExternalExecutions();
+    expect(sweep).toMatchObject({ examined: 0, advanced: 0, ingested: 0, errors: 0 });
+  });
+});
+
+describe('legacy rows from the removed second sweep are not stranded', () => {
+  // The removed sweep read next_poll_at NULL as "due now"; the surviving one
+  // reads it as "stopped". An in-flight row written under the old meaning is
+  // made due once, on open. A deliberately stopped row is never restarted.
+  it('on reopen, an in-flight NULL row becomes due; stopped rows stay stopped', () => {
+    const legacy = insertExecution({ status: 'RUNNING', next_poll_at: null });
+    const blocked = insertExecution({ status: 'UNKNOWN', error_code: 'REMOTE_REQUIRES_ACTION', next_poll_at: null });
+    const deadline = insertExecution({ status: 'UNKNOWN', error_code: 'POLL_DEADLINE_EXCEEDED', next_poll_at: null });
+    const done = insertExecution({ status: 'SUCCEEDED', next_poll_at: null });
+
+    closeDatabase();
+    getDatabase();
+
+    expect(readRow(legacy).next_poll_at).not.toBeNull();
+    expect(listDueExternalExecutions().map((r) => r.id)).toContain(legacy);
+    for (const id of [blocked, deadline, done]) {
+      expect(readRow(id).next_poll_at).toBeNull();
+    }
   });
 });
