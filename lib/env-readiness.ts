@@ -47,6 +47,7 @@ export const ENV_VAR_SPECS: EnvVarSpec[] = [
   { variable: 'OPENAI_MODEL', subsystem: 'Provider Router (OpenAI)', requiredFor: 'Overrides the default OpenAI model id used when a caller names the provider without a specific model. Unset uses lib/model-router.ts DEFAULT_OPENAI_MODEL.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
   { variable: 'OPENAI_BASE_URL', subsystem: 'Provider Router (OpenAI)', requiredFor: 'Overrides the OpenAI API base URL (an Azure/proxy/enterprise gateway, or a test double). Unset uses https://api.openai.com/v1.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
 
+  { variable: 'SYNTHOS_BIND_HOST', subsystem: 'HTTP Server', requiredFor: 'Network interface the Admin binds to. Defaults to 127.0.0.1 (loopback only). Set to 0.0.0.0 ONLY for a containerised deployment that must be reachable from outside its namespace.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
   // --- Antigravity execution runtime (PUSH 1) ---
   // ANTIGRAVITY_ENABLED is a real kill switch, not documentation: the client
   // and the external-execution ledger both refuse to dispatch unless it is

@@ -6964,8 +6964,24 @@ Rules for spokenSummary specifically:
     console.error(`[Startup] REQUIRED environment variables missing/invalid: ${[...envReport.requiredMissing, ...envReport.invalid].join(', ')}`);
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
+  // SECURITY — bind to loopback by DEFAULT.
+  //
+  // This listened on 0.0.0.0 unconditionally, which put the Admin (and the
+  // Vite HMR port) on every interface, reachable by anything on the local
+  // network. A local-first admin plane has no reason to be LAN-visible
+  // unless someone deliberately asks for it.
+  //
+  // Kept configurable rather than hardcoded to 127.0.0.1, because a
+  // containerised deployment genuinely needs 0.0.0.0 to be reachable from
+  // outside its namespace — see docs/deploy/PRODUCTION-DEPLOYMENT.md. The
+  // difference is that exposure is now an explicit choice a deployment
+  // makes, not the default a laptop inherits.
+  const BIND_HOST = (process.env.SYNTHOS_BIND_HOST || "").trim() || "127.0.0.1";
+  app.listen(PORT, BIND_HOST, () => {
+    console.log(`Server running on http://${BIND_HOST}:${PORT}`);
+    if (BIND_HOST !== "127.0.0.1" && BIND_HOST !== "localhost") {
+      console.log(`[Startup] NOTE: bound to ${BIND_HOST} — reachable beyond this machine. Set SYNTHOS_BIND_HOST=127.0.0.1 to restrict it.`);
+    }
   });
 
   // STEP 7 — the one real in-process scheduler, started once per server
