@@ -5491,6 +5491,7 @@ Rules for spokenSummary specifically:
         instruction: String(req.body?.instruction || ""),
         requiresReview: req.body?.requiresReview !== false,
         requiresApproval: req.body?.requiresApproval !== false,
+        kind: req.body?.kind === "CODING" ? "CODING" : "GENERAL",
       });
       return res.json({ success: true, task });
     } catch (err: any) {

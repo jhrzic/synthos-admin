@@ -23,6 +23,7 @@ export type ActiveTab =
   | 'receipts'
   | 'scheduler'
   | 'external-executions'
+  | 'development'
   | 'aeo-audit'
   | 'business-assistant'
   | 'dev-kanban-receipts'

@@ -725,6 +725,17 @@ export function getDatabase(): any {
       dbInstance.exec("ALTER TABLE external_executions ADD COLUMN poll_attempts INTEGER NOT NULL DEFAULT 0");
     }
 
+    // PUSH 2C — development task kind + structured evidence, added as a
+    // migration as well as in the CREATE TABLE for installs from earlier
+    // builds of this branch.
+    const devTaskCols = dbInstance.prepare("PRAGMA table_info(development_tasks)").all() as Array<{ name: string }>;
+    if (devTaskCols.length > 0 && !devTaskCols.some((c) => c.name === 'task_kind')) {
+      dbInstance.exec("ALTER TABLE development_tasks ADD COLUMN task_kind TEXT NOT NULL DEFAULT 'GENERAL'");
+    }
+    if (devTaskCols.length > 0 && !devTaskCols.some((c) => c.name === 'evidence_json')) {
+      dbInstance.exec("ALTER TABLE development_tasks ADD COLUMN evidence_json TEXT");
+    }
+
     // Unanswered questions — the commercial feedback loop. A customer asks
     // something the business never published; the business sees it and can
     // publish an answer. Deliberately NOT auto-learned: a customer's own
@@ -876,6 +887,11 @@ export function getDatabase(): any {
         result_artifact_id TEXT,
         result_receipt_id TEXT,
         aegis_decision TEXT,
+        -- PUSH 2C — coding tasks ask the runtime for structured engineering
+        -- evidence. NULL whenever the runtime did not actually produce it;
+        -- never back-filled with placeholders.
+        task_kind TEXT NOT NULL DEFAULT 'GENERAL',
+        evidence_json TEXT,
         created_by_user_id TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL

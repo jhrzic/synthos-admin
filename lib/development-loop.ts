@@ -38,6 +38,7 @@
 // ---------------------------------------------------------------------------
 
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { getDatabase, recordActivityEvent } from './persistence';
 import { recordRuntimeEvent, type RuntimeEventStatus } from './runtime-events';
 import { searchWorkspaceMemory, type MemorySearchResult } from './memory-index';
@@ -64,6 +65,13 @@ export type DevelopmentTaskState =
   | 'FAILED'
   | 'BLOCKED';
 
+/**
+ * A CODING task asks the runtime for structured engineering evidence; a
+ * GENERAL one does not. This is a change to the INSTRUCTION contract only —
+ * no runtime, adapter or execution architecture differs between them.
+ */
+export type DevelopmentTaskKind = 'GENERAL' | 'CODING';
+
 export interface DevelopmentTaskRecord {
   dev_task_id: string;
   workspace_id: string;
@@ -84,6 +92,9 @@ export interface DevelopmentTaskRecord {
   result_artifact_id: string | null;
   result_receipt_id: string | null;
   aegis_decision: string | null;
+  task_kind: DevelopmentTaskKind;
+  /** Structured engineering evidence, ONLY when the runtime really returned it. JSON string, or null. */
+  evidence_json: string | null;
   created_by_user_id: string;
   created_at: string;
   updated_at: string;
@@ -177,6 +188,7 @@ export function createDevelopmentTask(params: {
   instruction: string;
   requiresReview?: boolean;
   requiresApproval?: boolean;
+  kind?: DevelopmentTaskKind;
 }): DevelopmentTaskRecord {
   const title = String(params.title || '').trim();
   const instruction = String(params.instruction || '').trim();
@@ -185,6 +197,7 @@ export function createDevelopmentTask(params: {
 
   const requiresReview = params.requiresReview !== false;
   const requiresApproval = params.requiresApproval !== false;
+  const kind: DevelopmentTaskKind = params.kind === 'CODING' ? 'CODING' : 'GENERAL';
   const now = new Date().toISOString();
   const devTaskId = `dev-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
 
@@ -199,9 +212,9 @@ export function createDevelopmentTask(params: {
       dev_task_id, workspace_id, task_id, title, instruction, state, state_reason,
       requires_review, requires_approval, review_provider, review_model, review_text, review_at,
       approved_by_user_id, approved_at, execution_id, result_artifact_id, result_receipt_id,
-      aegis_decision, created_by_user_id, created_at, updated_at
-    ) VALUES (?, ?, NULL, ?, ?, ?, NULL, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)
-  `).run(devTaskId, params.workspaceId, title, instruction, state, requiresReview ? 1 : 0, requiresApproval ? 1 : 0, params.createdByUserId, now, now);
+      aegis_decision, task_kind, evidence_json, created_by_user_id, created_at, updated_at
+    ) VALUES (?, ?, NULL, ?, ?, ?, NULL, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, ?, ?, ?)
+  `).run(devTaskId, params.workspaceId, title, instruction, state, requiresReview ? 1 : 0, requiresApproval ? 1 : 0, kind, params.createdByUserId, now, now);
 
   const created = row(devTaskId)!;
   emitDevelopmentTaskEvent(created);
@@ -384,6 +397,114 @@ export function approveDevelopmentTask(workspaceId: string, devTaskId: string, a
 // EXECUTION
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// PUSH 2C — THE CODING EVIDENCE CONTRACT.
+//
+// A development task needs engineering evidence, and the runtime returns
+// prose. Push 2B recorded this honestly as a gap: inventing a diff parser
+// for text that may contain no diff would be fabrication.
+//
+// The fix is to ASK. This extends the INSTRUCTION contract only — no runtime,
+// adapter, ledger or execution architecture changes. A coding task appends a
+// request for one fenced JSON block with named fields; if the agent returns
+// it, we record exactly what it said. If it does not, evidence stays null and
+// the surface shows nothing. No field is ever defaulted, inferred from prose,
+// or filled with a placeholder.
+//
+// Raw command and file payloads are deliberately NOT requested: filesChanged
+// carries paths, not diffs, so unreviewed remote file content does not flow
+// into telemetry or the Vault through this door.
+// ---------------------------------------------------------------------------
+
+export interface CodingEvidence {
+  summary?: string;
+  filesChanged?: string[];
+  testsRun?: string;
+  testResult?: string;
+  typecheckResult?: string;
+  buildResult?: string;
+  commitSha?: string;
+  blockers?: string[];
+}
+
+export const CODING_EVIDENCE_INSTRUCTION = [
+  '',
+  '---',
+  'When you have finished, append a single fenced code block tagged `json` containing ONLY this object:',
+  '{',
+  '  "synthos_evidence": {',
+  '    "summary": "one or two sentences on what you actually changed",',
+  '    "filesChanged": ["path/one.ts", "path/two.ts"],',
+  '    "testsRun": "the exact test command you ran, or null if you ran none",',
+  '    "testResult": "PASS | FAIL | NOT_RUN, with counts if you have them",',
+  '    "typecheckResult": "PASS | FAIL | NOT_RUN",',
+  '    "buildResult": "PASS | FAIL | NOT_RUN",',
+  '    "commitSha": "the SHA if you created a commit, otherwise null",',
+  '    "blockers": ["anything that stopped you, or an empty array"]',
+  '  }',
+  '}',
+  'Report only what you really did. Use NOT_RUN rather than guessing, and null rather than inventing a value.',
+  'Do not include file contents, diffs or raw command output in this block — paths only.',
+].join('\n');
+
+/**
+ * The text actually sent to the runtime. A GENERAL task is sent verbatim;
+ * only a CODING task carries the evidence request.
+ */
+export function buildExecutionInstruction(task: DevelopmentTaskRecord): string {
+  return task.task_kind === 'CODING' ? `${task.instruction}\n${CODING_EVIDENCE_INSTRUCTION}` : task.instruction;
+}
+
+/**
+ * Pull the evidence block out of a real runtime output.
+ *
+ * Returns null whenever the agent did not produce one — which is the common
+ * case and must stay visible as "no evidence returned" rather than an object
+ * of empty strings. Only known fields are kept, and only when they carry a
+ * real value, so a surface can never render a field the runtime never sent.
+ */
+export function parseCodingEvidence(output: string): CodingEvidence | null {
+  const text = String(output || '');
+  // Every fenced block is considered, because an agent may emit several and
+  // the evidence one is rarely first.
+  const candidates: string[] = [];
+  for (const m of text.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)) candidates.push(m[1]);
+  candidates.push(text);
+
+  for (const candidate of candidates) {
+    const start = candidate.indexOf('{');
+    const end = candidate.lastIndexOf('}');
+    if (start === -1 || end <= start) continue;
+    let parsed: any;
+    try { parsed = JSON.parse(candidate.slice(start, end + 1)); } catch { continue; }
+    const block = parsed?.synthos_evidence;
+    if (!block || typeof block !== 'object') continue;
+
+    const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+    const list = (v: unknown) => {
+      if (!Array.isArray(v)) return undefined;
+      const items = v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((x) => x.trim());
+      return items.length ? items : undefined;
+    };
+
+    const evidence: CodingEvidence = {
+      summary: str(block.summary),
+      filesChanged: list(block.filesChanged),
+      testsRun: str(block.testsRun),
+      testResult: str(block.testResult),
+      typecheckResult: str(block.typecheckResult),
+      buildResult: str(block.buildResult),
+      commitSha: str(block.commitSha),
+      blockers: list(block.blockers),
+    };
+    for (const k of Object.keys(evidence) as (keyof CodingEvidence)[]) {
+      if (evidence[k] === undefined) delete evidence[k];
+    }
+    return Object.keys(evidence).length > 0 ? evidence : null;
+  }
+  return null;
+}
+
 export interface DevelopmentDispatchResult {
   task: DevelopmentTaskRecord;
   execution: ExternalExecutionRecord | null;
@@ -421,7 +542,7 @@ export async function dispatchDevelopmentTask(
       workspaceId,
       createdByUserId: actorUserId,
       runtime: 'antigravity',
-      input: { instruction: task.instruction },
+      input: { instruction: buildExecutionInstruction(task) },
       idempotencyKey: `devtask:${devTaskId}`,
     });
 
@@ -500,6 +621,10 @@ export function reconcileDevelopmentTask(workspaceId: string, devTaskId: string)
     result_artifact_id: execution.result_artifact_id,
     result_receipt_id: execution.result_receipt_id,
     aegis_decision: review?.decision ?? null,
+    // Null whenever the runtime returned no evidence block, which is the
+    // common case. A surface must be able to say "none returned" rather than
+    // render an object of empty fields.
+    evidence_json: readCodingEvidence(task, execution.result_artifact_id),
     state: verified ? 'VERIFIED' : 'FAILED',
     state_reason: verified
       ? 'Execution completed, Aegis verified the result, and a signed receipt was issued.'
@@ -508,6 +633,32 @@ export function reconcileDevelopmentTask(workspaceId: string, devTaskId: string)
 
   writeBackDevelopmentCycle(updated, execution);
   return updated;
+}
+
+/**
+ * Read the runtime's structured evidence back out of the artifact it already
+ * wrote.
+ *
+ * Deliberately sourced from the persisted artifact rather than held in
+ * memory: the artifact is the record, it survives a restart, and reading it
+ * here means reconciliation produces the same answer whenever it runs.
+ *
+ * Every failure mode returns null rather than throwing — a task's real
+ * verified outcome must never depend on whether an optional evidence block
+ * could be parsed.
+ */
+function readCodingEvidence(task: DevelopmentTaskRecord, artifactId: string | null): string | null {
+  if (task.task_kind !== 'CODING' || !artifactId) return null;
+  try {
+    const artifact = getDatabase()
+      .prepare('SELECT disk_path FROM artifacts WHERE artifact_id = ?')
+      .get(artifactId) as { disk_path: string } | undefined;
+    if (!artifact?.disk_path || !fs.existsSync(artifact.disk_path)) return null;
+    const evidence = parseCodingEvidence(fs.readFileSync(artifact.disk_path, 'utf8'));
+    return evidence ? JSON.stringify(evidence) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
