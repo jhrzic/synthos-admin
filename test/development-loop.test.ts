@@ -10,8 +10,9 @@ import {
   createDevelopmentTask, getWorkspaceDevelopmentTask, listWorkspaceDevelopmentTasks,
   requestDevelopmentReview, approveDevelopmentTask, dispatchDevelopmentTask,
   reconcileDevelopmentTask, buildDevelopmentContext, buildReviewPrompt,
-  MAX_CONTEXT_ITEMS, MAX_CONTEXT_CHARS_PER_ITEM,
+  MAX_CONTEXT_ITEMS, MAX_CONTEXT_CHARS_PER_ITEM, REVIEW_SEAT_DIRECTIVE,
 } from '../lib/development-loop';
+import { DEFAULT_OPENAI_REVIEW_MODEL, resolveReviewSeatModel } from '../lib/model-router';
 import { advanceDueExternalExecutions, getWorkspaceExternalExecution } from '../lib/external-executions';
 import { getDatabase, getTaskArtifacts, getTaskReceipts, getTaskQualityReviews, verifyReceipt } from '../lib/persistence';
 
@@ -172,7 +173,11 @@ describe('2. BRAIN CONTEXT is scoped, bounded, and honest when empty', () => {
     const t = newTask();
     const prompt = buildReviewPrompt(t, { items: [], reason: 'none' });
     expect(prompt).toContain(t.instruction);
-    expect(prompt).toContain('(no indexed project knowledge matched this task)');
+    // PUSH 2D — the empty-context line now also tells the seat what to DO
+    // about it, so an empty Brain produces a stated gap in Risks rather than a
+    // review written as if the context had been sufficient.
+    expect(prompt).toContain('no indexed project knowledge matched this task');
+    expect(prompt).toContain('say so in Risks rather than assuming');
     // The bounds are a decision, not an accident.
     expect(MAX_CONTEXT_ITEMS).toBeLessThanOrEqual(10);
     expect(MAX_CONTEXT_CHARS_PER_ITEM).toBeLessThanOrEqual(2000);
@@ -245,6 +250,58 @@ describe('3. OPENAI SEAT — absent credential degrades honestly and never subst
       expect(r.reason).toContain('401');
       expect(getWorkspaceDevelopmentTask(WS, t.dev_task_id)!.state).toBe('WAITING_FOR_REVIEW');
     } finally { delete process.env.OPENAI_API_KEY; }
+  });
+});
+
+describe('3b. THE REVIEW SEAT is a SynthOS reviewer, not a generic API call', () => {
+  it('runs on the flagship reasoning model, kept separate from the general worker default', () => {
+    expect(DEFAULT_OPENAI_REVIEW_MODEL).toBe('gpt-5.6-sol');
+    expect(resolveReviewSeatModel()).toBe('gpt-5.6-sol');
+  });
+
+  it('the seat model is configurable, so a retired snapshot is an env change not a code change', () => {
+    process.env.OPENAI_REVIEW_MODEL = 'gpt-6-astra';
+    try { expect(resolveReviewSeatModel()).toBe('gpt-6-astra'); }
+    finally { delete process.env.OPENAI_REVIEW_MODEL; }
+  });
+
+  it('the directive names the role and the things this project actually gets wrong', () => {
+    expect(REVIEW_SEAT_DIRECTIVE).toContain('SynthOS Development Review Seat');
+    // The two failure modes a generic "is this clear?" reviewer waves through.
+    expect(REVIEW_SEAT_DIRECTIVE).toMatch(/Reuse/);
+    expect(REVIEW_SEAT_DIRECTIVE).toMatch(/Duplicate architecture/i);
+    expect(REVIEW_SEAT_DIRECTIVE).toMatch(/second execution engine/i);
+    expect(REVIEW_SEAT_DIRECTIVE).toMatch(/Contradiction/i);
+    expect(REVIEW_SEAT_DIRECTIVE).toMatch(/Guardian/);
+    expect(REVIEW_SEAT_DIRECTIVE).toMatch(/Readiness/i);
+  });
+
+  it('it is told not to redesign, and not to invent project facts', () => {
+    expect(REVIEW_SEAT_DIRECTIVE).toMatch(/Do not redesign/i);
+    expect(REVIEW_SEAT_DIRECTIVE).toMatch(/Do not invent project facts/i);
+  });
+
+  it('it never claims authority it does not have — approval and Guardian still stand after it', () => {
+    expect(REVIEW_SEAT_DIRECTIVE).toMatch(/your verdict does not authorise execution/i);
+  });
+
+  it('continuity is NOT hard-coded: the directive carries no project history, only the role', () => {
+    // Everything the seat knows about SynthOS must arrive as retrieved context,
+    // so the seat improves as the Vault grows rather than as this string grows.
+    expect(REVIEW_SEAT_DIRECTIVE.length).toBeLessThan(2500);
+    expect(REVIEW_SEAT_DIRECTIVE).not.toMatch(/Antigravity|Windmill|gpt-5|Push 2/i);
+  });
+
+  it('the assembled prompt carries the directive, the task and the scoped context', () => {
+    const task = newTask();
+    const prompt = buildReviewPrompt(task, {
+      items: [{ artifactId: 'a1', title: 'Prior cycle', path: 'p.md', excerpt: 'The scheduler advances executions.' }],
+      reason: 'one item',
+    });
+    expect(prompt).toContain('SynthOS Development Review Seat');
+    expect(prompt).toContain(task.instruction);
+    expect(prompt).toContain('The scheduler advances executions.');
+    expect(prompt).toContain('Reuse and duplication');
   });
 });
 

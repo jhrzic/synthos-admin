@@ -43,6 +43,7 @@ export const ENV_VAR_SPECS: EnvVarSpec[] = [
   // materially larger blast radius: it authorizes real, billable TEXT
   // generation through the Execution Fabric, not just speech synthesis.
   { variable: 'OPENAI_API_KEY', subsystem: 'Provider Router (OpenAI) + Voice (TTS provider: OpenAI)', requiredFor: 'Text generation via POST /api/execute-agent-task when the requested model routes to OpenAI (lib/fabric/model-openai.ts, the Responses API), AND POST /api/voice/speak when provider=openai. Both are real, billable api.openai.com calls.', requirement: 'OPTIONAL', secrecy: 'SECRET' },
+  { variable: 'OPENAI_REVIEW_MODEL', subsystem: 'Provider Router (OpenAI)', requiredFor: 'Overrides the model the SynthOS Development Review Seat runs on. Kept separate from OPENAI_MODEL so raising the reasoning model does not raise the cost of ordinary generation. Unset uses lib/model-router.ts DEFAULT_OPENAI_REVIEW_MODEL.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
   { variable: 'OPENAI_MODEL', subsystem: 'Provider Router (OpenAI)', requiredFor: 'Overrides the default OpenAI model id used when a caller names the provider without a specific model. Unset uses lib/model-router.ts DEFAULT_OPENAI_MODEL.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
   { variable: 'OPENAI_BASE_URL', subsystem: 'Provider Router (OpenAI)', requiredFor: 'Overrides the OpenAI API base URL (an Azure/proxy/enterprise gateway, or a test double). Unset uses https://api.openai.com/v1.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
 

@@ -42,7 +42,7 @@ import fs from 'node:fs';
 import { getDatabase, recordActivityEvent } from './persistence';
 import { recordRuntimeEvent, type RuntimeEventStatus } from './runtime-events';
 import { searchWorkspaceMemory, type MemorySearchResult } from './memory-index';
-import { classifyModelRequest, resolveDefaultOpenAiModel, explainUnroutableModel } from './model-router';
+import { classifyModelRequest, resolveReviewSeatModel, explainUnroutableModel } from './model-router';
 import { resolveModelApiKey } from './model-credentials';
 import { generateViaOpenAI } from './fabric/model-openai';
 import {
@@ -287,28 +287,62 @@ export interface DevelopmentReviewResult {
   contextItems: number;
 }
 
+/**
+ * The Development Review Seat's standing directive.
+ *
+ * WHY THIS IS NOT A GENERIC PROMPT. A reviewer that only asks "is this
+ * instruction clear?" will approve the two things that have actually cost
+ * this project time: work that duplicates something already built, and work
+ * that quietly contradicts a decision already made. So the seat is given a
+ * role and a specific set of things to look for, and is told what NOT to do —
+ * a reviewer with licence to redesign will redesign, every time.
+ *
+ * CONTINUITY IS NOT HARD-CODED HERE. This directive carries no project
+ * history and no conversation. Everything the seat knows about SynthOS
+ * arrives as scoped Brain context retrieved per task, which is what lets the
+ * seat improve as the Vault grows rather than as this string grows.
+ */
+export const REVIEW_SEAT_DIRECTIVE = [
+  'You are the SynthOS Development Review Seat.',
+  '',
+  'You review a development task BEFORE an autonomous coding agent executes it in a sandbox.',
+  'You do not execute anything yourself, and your verdict does not authorise execution — a human approval gate and Guardian both still stand between you and the runtime.',
+  '',
+  'YOUR RESPONSIBILITIES, in priority order:',
+  '1. Reuse — does SynthOS already have a component, route, table or library that does this? Name it if so. Building a second one is the most expensive mistake available here.',
+  '2. Duplicate architecture — would this create a second execution engine, task ledger, scheduler, memory/Brain, credential store or admin surface? Say so plainly.',
+  '3. Contradiction — does this conflict with an architectural decision visible in the supplied context? Quote the conflicting part.',
+  '4. Guardian and security — does the instruction imply destructive, privileged or outward-facing action? Does it risk exposing a credential, or writing unreviewed remote payload into the Vault?',
+  '5. Readiness — is the instruction specific enough to execute without guessing? If not, state exactly what must change.',
+  '',
+  'WHAT YOU MUST NOT DO:',
+  '- Do not redesign the existing architecture because you would have built it differently. Preserve it, and raise a concern instead.',
+  '- Do not invent project facts. If the supplied context does not cover something, say the context is insufficient and name what is missing.',
+  '- Do not pad the review. A short review that names one real problem is worth more than a thorough one that names none.',
+].join('\n');
+
 export function buildReviewPrompt(task: DevelopmentTaskRecord, context: DevelopmentContext): string {
   const contextBlock = context.items.length === 0
-    ? '(no indexed project knowledge matched this task)'
+    ? '(no indexed project knowledge matched this task — say so in Risks rather than assuming)'
     : context.items.map((c, i) => `[${i + 1}] ${c.title} (${c.path})\n${c.excerpt}`).join('\n\n');
 
   return [
-    'You are the review seat in an automated software development loop.',
-    'You are reviewing a task that is about to be executed by an autonomous coding agent in a sandbox.',
+    REVIEW_SEAT_DIRECTIVE,
     '',
+    '---',
     `TASK: ${task.title}`,
+    `TASK KIND: ${task.task_kind}`,
     `INSTRUCTION TO BE EXECUTED:\n${task.instruction}`,
     '',
-    'SCOPED PROJECT CONTEXT (the only project knowledge you have been given):',
+    'SCOPED SYNTHOS CONTEXT (retrieved from this workspace\'s Brain — the only project knowledge you have been given):',
     contextBlock,
     '',
     'Produce a concise review in Markdown with exactly these sections:',
     '1. Assessment — is this instruction clear, bounded and safe to execute?',
-    '2. Risks — what could go wrong, including anything the instruction leaves ambiguous.',
-    '3. Recommended execution plan — the concrete steps the agent should take.',
-    '4. Verdict — one line, either PROCEED or DO NOT PROCEED, with the reason.',
-    '',
-    'Do not invent project facts that are not in the context above. If the context is insufficient, say so explicitly in Risks.',
+    '2. Reuse and duplication — what already exists that this should use instead of rebuilding.',
+    '3. Risks — including contradictions with the context, and Guardian/security implications.',
+    '4. Recommended execution plan — the concrete steps the agent should take.',
+    '5. Verdict — one line, either PROCEED or DO NOT PROCEED, with the reason. If DO NOT PROCEED, state exactly what must change first.',
   ].join('\n');
 }
 
@@ -329,7 +363,7 @@ export async function requestDevelopmentReview(
   const task = getWorkspaceDevelopmentTask(workspaceId, devTaskId);
   if (!task) throw Object.assign(new Error('Development task not found.'), { code: 'NOT_FOUND' });
 
-  const classified = classifyModelRequest(preferredModel || resolveDefaultOpenAiModel());
+  const classified = classifyModelRequest(preferredModel || resolveReviewSeatModel());
   if (classified.provider !== 'OPENAI') {
     return {
       outcome: 'NOT_CONFIGURED', provider: null, model: null, reviewText: null, contextItems: 0,
