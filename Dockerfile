@@ -61,6 +61,10 @@ VOLUME ["/app/data", "/app/vault", "/app/backups"]
 
 EXPOSE 3000
 ENV PORT=3000
+# The server binds loopback unless told otherwise. Inside a container that
+# would make it unreachable from the reverse proxy, so exposure is asked for
+# here, explicitly, rather than being a default every laptop inherits.
+ENV SYNTHOS_BIND_HOST=0.0.0.0
 
 # B1 liveness — no external dependency, no DB touch.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

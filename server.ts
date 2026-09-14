@@ -7822,20 +7822,23 @@ Rules for spokenSummary specifically:
     console.error(`[Startup] REQUIRED environment variables missing/invalid: ${[...envReport.requiredMissing, ...envReport.invalid].join(', ')}`);
   }
 
-  // ALWAYS-ON RUNTIME — the bind address is configurable, and 0.0.0.0 stays
-  // the default only because a container needs it: inside Docker, binding
-  // loopback would make the app unreachable from Caddy in the next container
-  // (docker-compose.prod.yml), so changing the default would break the one
-  // deployment path that is already documented and proven.
+  // SECURITY — bind to loopback by DEFAULT.
   //
-  // A LaunchAgent on a laptop is the opposite case: nothing should reach this
-  // process from the local network, so the service definition sets
-  // HOST=127.0.0.1 and this server then listens on loopback only. That is
-  // enforced here, at the socket, rather than by a firewall rule someone has
-  // to remember.
-  const HOST = process.env.HOST && process.env.HOST.trim() ? process.env.HOST.trim() : "0.0.0.0";
+  // This used to default to 0.0.0.0, which put the Admin on every interface
+  // of a laptop unless something remembered to set HOST. A local-first admin
+  // plane has no reason to be LAN-visible unless a deployment asks for it.
+  //
+  // Two knobs, one precedence: SYNTHOS_BIND_HOST, then HOST (which the
+  // always-on LaunchAgent env file already sets to 127.0.0.1), then loopback.
+  // The container is the one deployment that genuinely needs 0.0.0.0 — Caddy
+  // in the next container (docker-compose.prod.yml) must reach it — and the
+  // Dockerfile now asks for that explicitly instead of inheriting it.
+  const HOST = (process.env.SYNTHOS_BIND_HOST || "").trim() || (process.env.HOST || "").trim() || "127.0.0.1";
   const httpServer = app.listen(PORT, HOST, () => {
     console.log(`Server running on http://${HOST}:${PORT}`);
+    if (HOST !== "127.0.0.1" && HOST !== "localhost" && HOST !== "::1") {
+      console.log(`[Startup] NOTE: bound to ${HOST} — reachable beyond this machine. Set SYNTHOS_BIND_HOST=127.0.0.1 to restrict it.`);
+    }
   });
 
   // STEP 7 — the one real in-process scheduler, started once per server

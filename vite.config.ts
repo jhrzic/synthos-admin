@@ -22,7 +22,11 @@ export default defineConfig(() => {
     },
     server: {
       port: 3000,
-      host: '0.0.0.0',
+      // SECURITY — loopback by default, same rule as the Express listener in
+      // server.ts. This governs the HMR websocket too, which was binding to
+      // every interface independently of the HTTP server. Overridable for a
+      // containerised deployment that genuinely needs 0.0.0.0.
+      host: process.env.SYNTHOS_BIND_HOST || '127.0.0.1',
       allowedHosts: true as const,
       cors: true,
       // ALWAYS-ON RUNTIME — `hmr: false` alone does NOT stop Vite opening a
@@ -69,7 +73,7 @@ export default defineConfig(() => {
     },
     preview: {
       port: 3000,
-      host: '0.0.0.0',
+      host: process.env.SYNTHOS_BIND_HOST || '127.0.0.1',
       allowedHosts: true as const,
       cors: true,
     },
