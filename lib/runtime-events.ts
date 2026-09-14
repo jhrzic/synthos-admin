@@ -25,9 +25,13 @@ export type RuntimeEventType =
   // to the caller and persisted nothing at all — a blocked execution left no
   // trace anywhere, so "prove nothing ran without Guardian's consent" was
   // unanswerable after the fact.
-  | 'CAPABILITY_INVOCATION';
+  | 'CAPABILITY_INVOCATION'
+  // PUSH 2B — development-loop state changes. Additive: every existing
+  // producer still emits only its original types. This is what a live
+  // Development surface observes, so a UI never has to invent progress.
+  | 'DEVELOPMENT_TASK';
 
-export type RuntimeEventTargetType = 'skill' | 'mcp_server' | 'hermes_runtime' | 'provider' | 'external_execution' | 'capability';
+export type RuntimeEventTargetType = 'skill' | 'mcp_server' | 'hermes_runtime' | 'provider' | 'external_execution' | 'capability' | 'development_task';
 
 // ADR-006 — RUNNING/SUBMITTED/CANCELLED added for the external-execution
 // lifecycle (Workstream M). Purely additive: every existing producer of
@@ -38,6 +42,10 @@ export type RuntimeEventStatus =
   | 'NOT_CONFIGURED'
   | 'NOT_IMPLEMENTED'
   | 'TIMEOUT'
+  // PUSH 2B — BLOCKED is added rather than folded into FAILED. A Guardian
+  // refusal is not a failure: nothing was attempted, and a surface that
+  // showed them as the same thing would teach an operator to ignore both.
+  | 'BLOCKED'
   | 'SUBMITTED'
   | 'RUNNING'
   | 'CANCELLED'

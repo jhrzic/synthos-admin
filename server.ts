@@ -171,7 +171,14 @@ import { renderAssistantPage, ASSISTANT_SCRIPT, EMBED_LOADER_SCRIPT, embedSnippe
 import { assistantPageCsp, normalizeOrigin } from "./lib/conversation/origins";
 import { synthesizeFishAudio, getFishAccountState } from "./lib/voice-credentials";
 import { resolveVoiceRuntime, saveVoiceSettings, isVoiceProvider, VOICE_PROVIDERS } from "./lib/voice-settings";
-import { getModelCredentialStatus, saveModelCredential, deleteModelCredential, verifyModelCredential, isModelProvider, SUPPORTED_MODEL_PROVIDERS, type ModelProvider } from "./lib/model-credentials";
+import {
+  getModelCredentialStatus, saveModelCredential, deleteModelCredential, verifyModelCredential,
+  // PUSH 2B — the provider-parameterized surface. Same storage, same
+  // encryption, same environment-wins precedence; one route for every
+  // provider instead of one route per provider.
+  getProviderCredentialStatus, listProviderCredentialStatuses, isModelProvider, SUPPORTED_MODEL_PROVIDERS,
+  type ModelProvider,
+} from "./lib/model-credentials";
 import { resolveProviderState } from "./lib/provider-state";
 import { resolvePublicBaseUrl } from "./lib/public-url";
 import { requireAuth, requireWorkspaceMember, requireWorkspaceAdmin, requirePlatformAdmin, requireSameOrigin, getRequestUser, fromBody, fromQuery, fromBodyOrQuery, authorizedWorkspaceId, AuthedRequest } from "./lib/authorization";
@@ -6101,6 +6108,76 @@ Rules for spokenSummary specifically:
   });
 
   // -------------------------------------------------------------------------
+  // PUSH 2B — PLATFORM MODEL CREDENTIALS, parameterized by provider.
+  //
+  // Replaces the need for a hardcoded route per provider. Adding a provider
+  // means adding it to SUPPORTED_MODEL_PROVIDERS — no endpoint changes.
+  //
+  // AUTHORIZATION vs STORAGE, stated rather than implied: the caller must
+  // prove workspace admin, but model_credentials is keyed by provider alone,
+  // so storage is platform-global. See lib/model-credentials.ts for why
+  // making it per-workspace would regress the Concierge resolution path.
+  //
+  // A secret VALUE is never returned by any branch here, including errors —
+  // a provider error can echo a key back, so nothing raw is forwarded.
+  // -------------------------------------------------------------------------
+
+  app.get("/api/platform/model-credentials", requireWorkspaceAdmin(fromQuery), (_req, res) => {
+    try {
+      return res.json({ success: true, providers: listProviderCredentialStatuses(), supported: SUPPORTED_MODEL_PROVIDERS });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to read credential status" });
+    }
+  });
+
+  app.get("/api/platform/model-credentials/:provider", requireWorkspaceAdmin(fromQuery), (req, res) => {
+    const provider = String(req.params.provider || "");
+    if (!isModelProvider(provider)) {
+      return res.status(400).json({ success: false, error: `Unsupported provider "${provider}". Supported: ${SUPPORTED_MODEL_PROVIDERS.join(", ")}.` });
+    }
+    try {
+      return res.json({ success: true, status: getProviderCredentialStatus(provider) });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to read credential status" });
+    }
+  });
+
+  app.post("/api/platform/model-credentials/:provider", requireWorkspaceAdmin(fromBody), async (req, res) => {
+    const provider = String(req.params.provider || "");
+    if (!isModelProvider(provider)) {
+      return res.status(400).json({ success: false, error: `Unsupported provider "${provider}". Supported: ${SUPPORTED_MODEL_PROVIDERS.join(", ")}.` });
+    }
+    try {
+      const user = getRequestUser(req);
+      const action = String(req.body?.action || "save");
+
+      if (action === "delete") {
+        // Only ever removes the STORED row. An environment variable is
+        // deployment configuration and is not the API's to delete; saying so
+        // is better than a delete that silently changes nothing.
+        deleteModelCredential(provider);
+        return res.json({ success: true, status: getProviderCredentialStatus(provider) });
+      }
+
+      if (action === "verify") {
+        // A real provider call, so "configured" is never mistaken for
+        // "working" — the distinction that decides whether a run fails later.
+        const verification = await verifyModelCredential(provider);
+        return res.json({ success: true, verification, status: getProviderCredentialStatus(provider) });
+      }
+
+      const apiKey = String(req.body?.apiKey || "");
+      if (!apiKey.trim()) return res.status(400).json({ success: false, error: "An API key is required." });
+      saveModelCredential({ provider, apiKey, userId: user?.user_id || "unknown" });
+      const verification = await verifyModelCredential(provider);
+      return res.json({ success: true, status: getProviderCredentialStatus(provider), verification });
+    } catch (err: any) {
+      // Never echo the submitted key back, even inside an error.
+      return res.status(500).json({ success: false, error: String(err?.message || "Failed to save the key").slice(0, 200) });
+    }
+  });
+
+  // -------------------------------------------------------------------------
   // PUSH 2A — DEVELOPMENT LOOP.
   //
   // Authorization posture matches the risk, and matches what the capability
@@ -6199,6 +6276,67 @@ Rules for spokenSummary specifically:
       const code = err?.code === "NOT_FOUND" ? 404 : err?.code === "INVALID_STATE" ? 409 : 500;
       return res.status(code).json({ success: false, error: err?.message || "Failed to dispatch development task" });
     }
+  });
+
+  /**
+   * PUSH 2B — the live Development feed.
+   *
+   * REUSES both existing mechanisms rather than adding a stack: the SSE
+   * framing this server already uses for /api/terminal/stream, and the
+   * workspace-scoped runtime_events ledger that every producer already
+   * writes to. There is no pub/sub, no socket server and no second event
+   * store — this tails a table the work itself populates.
+   *
+   * Consequently every frame is a REAL recorded event. Nothing here can
+   * invent progress: if the ledger is quiet, the stream is quiet, and the
+   * heartbeat says only that the connection is alive.
+   *
+   * Cursor semantics are last-seen-event-id, not a timestamp, so a client
+   * that reconnects cannot miss or replay events that share a millisecond.
+   */
+  app.get("/api/development/events", requireWorkspaceMember(fromQuery), (req, res) => {
+    const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+
+    const seen = new Set<string>();
+    let closed = false;
+
+    // Prime with the recent tail so a freshly-opened UI is immediately
+    // correct, rather than blank until the next thing happens.
+    const initial = listRecentRuntimeEvents({ workspaceId, limit: 50 })
+      .filter((e) => e.target_type === "development_task" || e.target_type === "external_execution")
+      .reverse();
+    for (const e of initial) {
+      seen.add(e.event_id);
+      res.write(`event: runtime\ndata: ${JSON.stringify(e)}\n\n`);
+    }
+    res.write(`event: ready\ndata: ${JSON.stringify({ workspaceId, primed: initial.length })}\n\n`);
+
+    const tick = setInterval(() => {
+      if (closed) return;
+      try {
+        const rows = listRecentRuntimeEvents({ workspaceId, limit: 50 })
+          .filter((e) => (e.target_type === "development_task" || e.target_type === "external_execution") && !seen.has(e.event_id))
+          .reverse();
+        for (const e of rows) {
+          seen.add(e.event_id);
+          res.write(`event: runtime\ndata: ${JSON.stringify(e)}\n\n`);
+        }
+        // Bound memory on a long-lived connection: the id set cannot grow
+        // without limit just because a stream stayed open all day.
+        if (seen.size > 2000) seen.clear();
+        res.write(`event: heartbeat\ndata: ${JSON.stringify({ at: new Date().toISOString() })}\n\n`);
+      } catch {
+        // A read failure must not kill the stream; the next tick retries.
+      }
+    }, 2000);
+    tick.unref?.();
+
+    req.on("close", () => { closed = true; clearInterval(tick); });
   });
 
   app.get("/api/ton/status", requireWorkspaceMember(fromQuery), async (req, res) => {

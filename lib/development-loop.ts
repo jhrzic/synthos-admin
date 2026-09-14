@@ -39,6 +39,7 @@
 
 import crypto from 'node:crypto';
 import { getDatabase, recordActivityEvent } from './persistence';
+import { recordRuntimeEvent, type RuntimeEventStatus } from './runtime-events';
 import { searchWorkspaceMemory, type MemorySearchResult } from './memory-index';
 import { classifyModelRequest, resolveDefaultOpenAiModel, explainUnroutableModel } from './model-router';
 import { resolveModelApiKey } from './model-credentials';
@@ -105,13 +106,64 @@ export function listWorkspaceDevelopmentTasks(workspaceId: string, limit = 50): 
     .all(workspaceId, bounded) as DevelopmentTaskRecord[];
 }
 
+/**
+ * PUSH 2B — the observable event for one state change.
+ *
+ * Emitted into the EXISTING workspace-scoped runtime_events ledger rather
+ * than a new event system, which is what lets a live Development surface
+ * show real progress instead of an animation. The exact loop state travels
+ * in `detail`; `status` is the closest existing runtime word, and BLOCKED is
+ * kept distinct from FAILED on purpose — a Guardian refusal attempted
+ * nothing.
+ *
+ * Non-blocking: telemetry must never change a task's real outcome.
+ */
+const RUNTIME_STATUS_FOR_STATE: Record<DevelopmentTaskState, RuntimeEventStatus> = {
+  WAITING_FOR_REVIEW: 'SUBMITTED',
+  READY_FOR_EXECUTION: 'SUBMITTED',
+  WAITING_FOR_APPROVAL: 'SUBMITTED',
+  RUNNING: 'RUNNING',
+  VERIFIED: 'SUCCESS',
+  FAILED: 'FAILED',
+  BLOCKED: 'BLOCKED',
+};
+
+export function emitDevelopmentTaskEvent(task: DevelopmentTaskRecord): void {
+  try {
+    recordRuntimeEvent({
+      workspaceId: task.workspace_id,
+      eventType: 'DEVELOPMENT_TASK',
+      targetType: 'development_task',
+      targetId: task.dev_task_id,
+      status: RUNTIME_STATUS_FOR_STATE[task.state],
+      detail: {
+        state: task.state,
+        stateReason: task.state_reason,
+        title: task.title,
+        reviewProvider: task.review_provider,
+        reviewModel: task.review_model,
+        approvedBy: task.approved_by_user_id,
+        executionId: task.execution_id,
+        taskId: task.task_id,
+        aegisDecision: task.aegis_decision,
+        receiptId: task.result_receipt_id,
+      },
+    });
+  } catch { /* non-blocking by design */ }
+}
+
 function patch(devTaskId: string, fields: Record<string, unknown>): DevelopmentTaskRecord {
   const keys = Object.keys(fields);
   const sets = keys.map((k) => `${k} = ?`).join(', ');
   getDatabase()
     .prepare(`UPDATE development_tasks SET ${sets}, updated_at = ? WHERE dev_task_id = ?`)
     .run(...keys.map((k) => fields[k] as never), new Date().toISOString(), devTaskId);
-  return row(devTaskId)!;
+  const updated = row(devTaskId)!;
+  // Emit only when the STATE really moved. A field-only update (recording a
+  // review body, linking an artifact) is not a state change, and emitting for
+  // it would fill a live feed with events that say nothing happened.
+  if (Object.prototype.hasOwnProperty.call(fields, 'state')) emitDevelopmentTaskEvent(updated);
+  return updated;
 }
 
 /**
@@ -151,7 +203,9 @@ export function createDevelopmentTask(params: {
     ) VALUES (?, ?, NULL, ?, ?, ?, NULL, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)
   `).run(devTaskId, params.workspaceId, title, instruction, state, requiresReview ? 1 : 0, requiresApproval ? 1 : 0, params.createdByUserId, now, now);
 
-  return row(devTaskId)!;
+  const created = row(devTaskId)!;
+  emitDevelopmentTaskEvent(created);
+  return created;
 }
 
 // ---------------------------------------------------------------------------

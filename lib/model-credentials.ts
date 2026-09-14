@@ -40,6 +40,38 @@ const PROVIDER_ENV_VAR: Record<ModelProvider, string> = {
 
 export type ModelKeySource = 'environment' | 'server_store' | 'none';
 
+/**
+ * PUSH 2B — the safe, provider-parameterized state an operator surface may
+ * see. Deliberately a small closed vocabulary rather than the raw source:
+ * it answers "can this provider run, and where did the key come from" and
+ * nothing else. A secret VALUE is never part of any of these shapes.
+ *
+ *   ENVIRONMENT     — a real deployment environment variable supplies it.
+ *                     It cannot be replaced or deleted through the API,
+ *                     because environment precedence is the canonical rule.
+ *   STORED          — an encrypted server-side row supplies it.
+ *   NOT_CONFIGURED  — neither exists; the provider genuinely cannot run.
+ */
+export type ProviderCredentialState = 'ENVIRONMENT' | 'STORED' | 'NOT_CONFIGURED';
+
+export interface ProviderCredentialStatus {
+  provider: ModelProvider;
+  /** The single word an operator surface should render. */
+  state: ProviderCredentialState;
+  /** True when a key resolves from either source — i.e. the provider can actually be called. */
+  configured: boolean;
+  envVar: string;
+  /** Whether an encrypted row exists at all, independent of whether it is the one in use. */
+  storedRowPresent: boolean;
+  /**
+   * True when an environment variable is winning over a stored row. Surfaced
+   * because an operator who saves a key and sees no change deserves to be
+   * told why, rather than concluding the save failed.
+   */
+  overriddenByEnvironment: boolean;
+  updatedAt: string | null;
+}
+
 export interface ModelCredentialStatus {
   provider: ModelProvider;
   apiKeyPresent: boolean;
@@ -220,4 +252,55 @@ async function verifyOpenAiCredential(
     return { ok: false, error: result.lastProviderError || 'The provider accepted the key but returned nothing.' };
   }
   return { ok: true, model: result.modelUsed || model, sample: result.output.trim().slice(0, 80) };
+}
+
+// ---------------------------------------------------------------------------
+// PUSH 2B — provider-parameterized platform credential surface.
+//
+// WHAT THIS ADDS, AND WHAT IT DELIBERATELY DOES NOT.
+//
+// It adds one safe status shape and one list, so a single HTTP route can
+// serve every provider instead of a hardcoded route per provider. It adds NO
+// new credential storage: the same model_credentials table, the same
+// AES-256-GCM envelope, the same environment-wins precedence.
+//
+// SCOPE, STATED PLAINLY. This storage is PLATFORM-GLOBAL — model_credentials
+// is keyed by provider alone. The HTTP surface in server.ts is workspace-admin
+// AUTHORIZED (a caller must prove workspace admin), but a key saved by one
+// workspace's admin is the key every workspace uses. Making storage truly
+// per-workspace would mean adding workspace_id to the key and threading a
+// workspace through resolveModelApiKey(), which lib/conversation/llm.ts calls
+// with no workspace context at all — a real regression risk to the shipped
+// Concierge path for a multi-tenancy this deployment does not yet have. The
+// honest position is: authorization is workspace-scoped, storage is global,
+// and that is written down rather than implied.
+// ---------------------------------------------------------------------------
+
+/** Safe, secret-free status for one provider. Never returns or derives from the key's value. */
+export function getProviderCredentialStatus(provider: ModelProvider): ProviderCredentialStatus {
+  const envVar = PROVIDER_ENV_VAR[provider];
+  const envPresent = Boolean((process.env[envVar] || '').trim());
+  const row = readRow(provider);
+  const storedRowPresent = Boolean(row?.api_key_encrypted);
+  const resolved = resolveModelApiKey(provider);
+
+  const state: ProviderCredentialState =
+    resolved.source === 'environment' ? 'ENVIRONMENT'
+    : resolved.source === 'server_store' ? 'STORED'
+    : 'NOT_CONFIGURED';
+
+  return {
+    provider,
+    state,
+    configured: Boolean(resolved.apiKey),
+    envVar,
+    storedRowPresent,
+    overriddenByEnvironment: envPresent && storedRowPresent,
+    updatedAt: row?.updated_at ?? null,
+  };
+}
+
+/** Every provider this build can execute, with its real state. The list is the extension point — a new provider needs no new endpoint. */
+export function listProviderCredentialStatuses(): ProviderCredentialStatus[] {
+  return SUPPORTED_MODEL_PROVIDERS.map((p) => getProviderCredentialStatus(p));
 }
