@@ -78,6 +78,26 @@ const RECOGNIZED_UNCONFIGURED_PROVIDERS = new Set([
 
 export const DEFAULT_OPENAI_MODEL = "gpt-5.6-terra";
 
+/**
+ * The model the SynthOS Development Review Seat runs on.
+ *
+ * Deliberately SEPARATE from DEFAULT_OPENAI_MODEL. The review seat reasons
+ * about architecture, duplication and Guardian implications across a whole
+ * codebase, which is the work OpenAI positions the flagship at; ordinary
+ * generation does not need it and should not silently inherit its price.
+ * Two knobs, so raising one never raises the other by accident.
+ *
+ * Configurable for the same reason as the general default: OpenAI retires
+ * snapshots on a published schedule, and a frozen literal is how this file
+ * goes quietly wrong.
+ */
+export const DEFAULT_OPENAI_REVIEW_MODEL = "gpt-5.6-sol";
+
+export function resolveReviewSeatModel(): string {
+  const configured = (process.env.OPENAI_REVIEW_MODEL || "").trim();
+  return configured || DEFAULT_OPENAI_REVIEW_MODEL;
+}
+
 /** Bare provider aliases a caller may type instead of a model id. */
 const OPENAI_PROVIDER_ALIASES = new Set(["openai", "chatgpt", "gpt"]);
 

@@ -8,7 +8,7 @@ process.env.SYNTHOS_DB_PATH = TEST_DB_PATH;
 
 import { createInitialTask, recordArtifact, getDatabase } from '../lib/persistence';
 import { VAULT_ROOT } from '../lib/vault';
-import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory, removeFromMemoryIndex } from '../lib/memory-index';
+import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory, removeFromMemoryIndex, buildMemoryMatchExpression } from '../lib/memory-index';
 
 const WS_A = 'ws-memory-test-alpha';
 const WS_B = 'ws-memory-test-beta';
@@ -55,8 +55,58 @@ describe('Memory index: indexing real, verified Vault content', () => {
     expect(results.some((r) => r.artifact_id === artifactId)).toBe(true);
   });
 
+  // -------------------------------------------------------------------------
+  // PUSH 2D — regression for a defect found by running the real development
+  // loop, not by reading the code.
+  //
+  // FTS5 ANDs space-separated terms, so the old expression required a document
+  // to contain EVERY word of the query. Fine for a two-word lookup; useless
+  // for a sentence. The development loop searches with a whole task title plus
+  // instruction, so it retrieved ZERO Brain context for every task — the index
+  // was correct the whole time, the query was wrong.
+  //
+  // These assertions pin both halves of the fix: a real question now finds the
+  // document, and an unrelated one still finds nothing.
+  // -------------------------------------------------------------------------
+  it('3a. a full natural-language question finds the document — not just a two-word phrase', () => {
+    const phrase = searchWorkspaceMemory(WS_A, 'Calvin cycle');
+    expect(phrase.some((r) => r.artifact_id === artifactId)).toBe(true);
+
+    const question = searchWorkspaceMemory(
+      WS_A,
+      'Review whether the Calvin cycle description should change, and confirm what it currently says',
+    );
+    expect(question.some((r) => r.artifact_id === artifactId)).toBe(true);
+  });
+
+  it('3b. the match expression ORs terms and drops only grammatical filler', () => {
+    const expr = buildMemoryMatchExpression('Review the Calvin cycle and its current interval')!;
+    expect(expr).toContain(' OR ');
+    // Content words survive — "review" and "current" carry meaning.
+    expect(expr).toContain('"Review"');
+    expect(expr).toContain('"Calvin"');
+    expect(expr).toContain('"current"');
+    // True filler is removed so it cannot match every document in the index.
+    expect(expr).not.toContain('"the"');
+    expect(expr).not.toContain('"and"');
+    expect(expr).not.toContain('"its"');
+  });
+
+  it('3c. a query of nothing but filler still searches what it said rather than silently matching all', () => {
+    const expr = buildMemoryMatchExpression('the and of it');
+    expect(expr).toBeTruthy();
+    expect(expr).toContain('"the"');
+  });
+
   it('3. an unrelated term returns zero results', () => {
     const results = searchWorkspaceMemory(WS_A, 'quantum blockchain derivatives trading');
+    expect(results).toHaveLength(0);
+  });
+
+  it('3d. widening to OR did not make everything match — a sentence-length unrelated query still returns nothing', () => {
+    // The risk OR introduces: a document matching only a common word. Filler
+    // removal is what keeps this at zero rather than returning the whole index.
+    const results = searchWorkspaceMemory(WS_A, 'Please review the quarterly invoice reconciliation for the accounts payable ledger');
     expect(results).toHaveLength(0);
   });
 

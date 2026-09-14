@@ -167,13 +167,60 @@ export function listWorkspaceMemoryContent(
   return rows as any;
 }
 
+/**
+ * Function words that would otherwise match nearly every document.
+ *
+ * Deliberately tiny and limited to true grammatical filler. Content words are
+ * NEVER dropped — "review", "change", "current" and the like carry real
+ * meaning and belong in the match.
+ */
+const MATCH_STOPWORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'been', 'but', 'by', 'do', 'does',
+  'for', 'from', 'had', 'has', 'have', 'if', 'in', 'into', 'is', 'it', 'its',
+  'of', 'on', 'or', 'that', 'the', 'their', 'then', 'there', 'these', 'this',
+  'those', 'to', 'was', 'were', 'will', 'with',
+]);
+
+/**
+ * Build the FTS5 MATCH expression for a free-text query.
+ *
+ * THE DEFECT THIS FIXES (found live, 2026-09-14). Terms separated by spaces
+ * are ANDed by FTS5, so the previous expression required a document to
+ * contain EVERY word of the query. That is fine for a two-word lookup and
+ * useless for a sentence: a real question like "Extend the Kepler Retrieval
+ * Marker heartbeat — review whether the interval should change" returned
+ * nothing, even though the indexed document was about exactly that, because
+ * it did not also contain "Extend" and "whether".
+ *
+ * It surfaced as the development loop retrieving zero Brain context for
+ * every task, since that caller searches with a whole title plus instruction.
+ * The index was correct throughout; the query was wrong.
+ *
+ * OR is the right semantics here because relevance is already handled:
+ * results are ordered by bm25, whose IDF term naturally sinks documents that
+ * matched only a common word. Stopwords are still removed so such a document
+ * is not retrieved at all, which keeps an unrelated query returning nothing
+ * rather than everything.
+ */
+export function buildMemoryMatchExpression(query: string): string | null {
+  const tokens = (query || '').match(/[\p{L}\p{N}]+/gu) || [];
+  if (tokens.length === 0) return null;
+
+  const significant = tokens.filter((t) => t.length > 1 && !MATCH_STOPWORDS.has(t.toLowerCase()));
+  // A query made entirely of stopwords still searches for what it actually
+  // said, rather than silently becoming an empty search.
+  const chosen = significant.length > 0 ? significant : tokens;
+
+  const unique = chosen.filter((t, i, a) => a.indexOf(t) === i);
+  return unique.map((t) => `"${t.replace(/"/g, '""')}"`).join(' OR ');
+}
+
 export function searchWorkspaceMemory(workspaceId: string, query: string, limit = 20): MemorySearchResult[] {
   const trimmed = (query || '').trim();
   if (!trimmed) return [];
 
-  const tokens = trimmed.match(/[\p{L}\p{N}]+/gu) || [];
-  if (tokens.length === 0) return [];
-  const matchExpr = tokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(' ');
+  const matchExpr = buildMemoryMatchExpression(trimmed);
+  if (!matchExpr) return [];
 
   const db = getDatabase();
   try {
