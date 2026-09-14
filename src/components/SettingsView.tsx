@@ -87,7 +87,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       customApiKeys: {
         gemini: 'SERVER_MANAGED_KEY',
         // Server-managed, exactly like gemini: this screen must not hold an
-        // OpenAI key in browser state. See persistModelCredential below.
+        // OpenAI key in browser state. See ModelProviderCredentialsCard.
         openai: 'SERVER_MANAGED_KEY',
         anthropic: s.customApiKeys?.anthropic || '',
         deepseek: s.customApiKeys?.deepseek || '',
@@ -177,72 +177,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     await refreshCredentialStatus();
   }, [refreshCredentialStatus]);
 
-  // ---------------------------------------------------------------------
-  // MODEL-PROVIDER CREDENTIALS — server state, presence only.
-  //
-  // This screen used to read these straight out of `settings.customApiKeys`,
-  // i.e. out of browser localStorage. So it could show a key the server had
-  // never received, and report "configured" for a provider that would fail on
-  // the first real call. The server is now the only authority; this is a
-  // presence cache of it, and the key value is never read back.
-  // ---------------------------------------------------------------------
-  const MODEL_CREDENTIAL_PROVIDERS = ['gemini', 'openai'] as const;
-  const [modelCredentials, setModelCredentials] = React.useState<Record<string, { apiKeyPresent: boolean; source: string; envVar: string }> | null>(null);
-  const [modelKeySaving, setModelKeySaving] = React.useState<string | null>(null);
-  /** Transient key drafts. Deliberately NOT part of `settings`, so nothing here can reach localStorage. */
+  // MODEL-PROVIDER CREDENTIALS live in ModelProviderCredentialsCard, the one
+  // server-backed input for them (verify, delete, environment-override
+  // warning). This screen used to carry a second per-row save path for the
+  // same credential; it was removed when the two lines were integrated.
+  /** Transient key drafts for server-stored rows. Deliberately NOT part of `settings`, so nothing here can reach localStorage. */
   const [modelKeyDrafts, setModelKeyDrafts] = React.useState<Record<string, string>>({});
-  const [modelKeyResult, setModelKeyResult] = React.useState<{ provider: string; ok: boolean; message: string } | null>(null);
-
-  const refreshModelCredentials = React.useCallback(async () => {
-    if (!activeWorkspaceId) return;
-    try {
-      const res = await fetch(`/api/business/model-credentials?workspaceId=${encodeURIComponent(activeWorkspaceId)}`);
-      if (!res.ok) return;
-      const data = await res.json();
-      const next: Record<string, { apiKeyPresent: boolean; source: string; envVar: string }> = {};
-      for (const row of data.providers || []) {
-        next[row.provider] = { apiKeyPresent: Boolean(row.apiKeyPresent), source: String(row.source), envVar: String(row.envVar) };
-      }
-      setModelCredentials(next);
-    } catch { /* presence unknown; the UI does not claim configured */ }
-  }, [activeWorkspaceId]);
-
-  React.useEffect(() => { void refreshModelCredentials(); }, [refreshModelCredentials]);
-
-  const persistModelCredential = React.useCallback(async (provider: string, apiKey: string) => {
-    if (!activeWorkspaceId || !apiKey.trim()) return;
-    setModelKeySaving(provider);
-    setModelKeyResult(null);
-    try {
-      const res = await fetch('/api/business/model-credential', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId: activeWorkspaceId, provider, apiKey: apiKey.trim() }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data?.success) {
-        setModelKeyResult({ provider, ok: false, message: String(data?.error || `Save failed (HTTP ${res.status}).`) });
-      } else {
-        // The save and the live verification are reported separately: a saved
-        // key that the provider rejects is stored but not working, and
-        // conflating the two is how a broken key looks configured.
-        const verified = data?.verification?.ok === true;
-        setModelKeyResult({
-          provider,
-          ok: verified,
-          message: verified
-            ? `Saved and verified against the provider (model ${data.verification.model}).`
-            : `Saved server-side, but the provider rejected it: ${String(data?.verification?.error || 'no reason given')}`,
-        });
-      }
-    } catch (err: any) {
-      setModelKeyResult({ provider, ok: false, message: String(err?.message || 'Save failed.') });
-    } finally {
-      setModelKeySaving(null);
-      await refreshModelCredentials();
-    }
-  }, [activeWorkspaceId, refreshModelCredentials]);
-
   const handleTestFishAudio = async () => {
     const targetVoiceId = settings.FISH_AUDIO_DEFAULT_VOICE_ID || settings.fishAudioConfig?.voiceId || DEFAULT_FISH_AUDIO_VOICE_ID;
 
@@ -421,7 +361,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         sectionTitle="Global Swarm & Security Configuration"
         sectionSubtitle="3-Step global configuration for Fish Audio neural voice, OpenRouter API keys, and Obsidian vault security policies."
         statusBadge={{
-          isConnected: Boolean(credentialStatus?.apiKeyPresent || settings.customApiKeys?.openrouter || settings.security?.vault_permissions.write_access),
+          // PUSH 2F — customApiKeys.openrouter was removed from this test. It is
+          // a browser-only value that no server route reads, so it could turn
+          // this badge "connected" while nothing was configured at all. Only
+          // real server-side credential state counts.
+          isConnected: Boolean(credentialStatus?.apiKeyPresent || settings.security?.vault_permissions.write_access),
           connectedLabel: "Swarm Credentials Configured",
           pendingLabel: "Default Config",
         }}
@@ -891,21 +835,39 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <span>Connected API Services & Messaging Bridges</span>
               </h3>
               <p className="text-xs text-[#8E94B8] mt-0.5">
-                Manage OpenAI BYOK keys, iMessage Web Gateway, WhatsApp pairing, and frontier API endpoints.
+                Messaging bridges and endpoints. Provider credentials are configured in Model Providers above — rows here are
+                labelled with what they are really wired to.
               </p>
             </div>
 
+            {/* PUSH 2F — every row now declares what it is REALLY wired to.
+                This grid used to accept a real API key for eight services and
+                store all of them in browser localStorage, where no server
+                route has ever read them. A user who pasted an OpenAI key here
+                was told nothing, and the platform reported NOT_CONFIGURED
+                forever — which is exactly the "button that changes frontend
+                state and implies success" AGENTS.md section 3 forbids. It cost
+                a real debugging session to find.
+
+                `wiring` is the fix, and it is per-row honest:
+                  SERVER           — really persists server-side (Fish Audio).
+                  MODEL_PROVIDERS  — a real encrypted store exists; the card
+                                     above owns it, so this row points there
+                                     rather than becoming a second input.
+                  NOT_WIRED        — no server mapping exists at all. The input
+                                     is disabled instead of quietly collecting
+                                     a credential nothing will ever read. */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {[
-                { key: 'openrouter', name: 'OpenRouter Gateway Key', placeholder: 'sk-or-v1-...', url: 'https://openrouter.ai' },
-                { key: 'openai', name: 'OpenAI BYOK (ChatGPT o3 / Codex)', placeholder: 'sk-proj-...', url: 'https://platform.openai.com' },
-                { key: 'anthropic', name: 'Anthropic (Claude 3.7 / Claude Code)', placeholder: 'sk-ant-...', url: 'https://console.anthropic.com' },
-                { key: 'deepseek', name: 'DeepSeek API Key (R1 Reasoning)', placeholder: 'sk-...', url: 'https://platform.deepseek.com' },
-                { key: 'perplexity', name: 'Perplexity API Key (Sonar Web Crawl)', placeholder: 'pplx-...', url: 'https://perplexity.ai' },
-                { key: 'kimi', name: 'Moonshot / Kimi 3 (2M Context)', placeholder: 'sk-...', url: 'https://platform.moonshot.cn' },
-                { key: 'fish_audio', name: 'Fish Audio (Ultra-Low Latency TTS)', placeholder: 'Enter Fish Audio Key...', url: 'https://fish.audio' },
-                { key: 'cursor', name: 'Cursor Automation Bridge', placeholder: 'cur_...', url: 'https://cursor.com' },
-              ].map((item) => (
+              {([
+                { key: 'openai', name: 'OpenAI (ChatGPT / Codex)', placeholder: 'sk-proj-...', url: 'https://platform.openai.com', wiring: 'MODEL_PROVIDERS' },
+                { key: 'fish_audio', name: 'Fish Audio (Ultra-Low Latency TTS)', placeholder: 'Enter Fish Audio Key...', url: 'https://fish.audio', wiring: 'SERVER' },
+                { key: 'openrouter', name: 'OpenRouter Gateway Key', placeholder: 'sk-or-v1-...', url: 'https://openrouter.ai', wiring: 'NOT_WIRED' },
+                { key: 'anthropic', name: 'Anthropic (Claude)', placeholder: 'sk-ant-...', url: 'https://console.anthropic.com', wiring: 'NOT_WIRED' },
+                { key: 'deepseek', name: 'DeepSeek API Key', placeholder: 'sk-...', url: 'https://platform.deepseek.com', wiring: 'NOT_WIRED' },
+                { key: 'perplexity', name: 'Perplexity API Key', placeholder: 'pplx-...', url: 'https://perplexity.ai', wiring: 'NOT_WIRED' },
+                { key: 'kimi', name: 'Moonshot / Kimi', placeholder: 'sk-...', url: 'https://platform.moonshot.cn', wiring: 'NOT_WIRED' },
+                { key: 'cursor', name: 'Cursor Automation Bridge', placeholder: 'cur_...', url: 'https://cursor.com', wiring: 'NOT_WIRED' },
+              ] as const).map((item) => (
                 <div key={item.key} className="space-y-1.5 bg-[#05060C] border border-[#1A1E36] p-3.5 rounded-xl">
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-mono font-bold text-white">{item.name}</label>
@@ -920,86 +882,53 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     </a>
                   </div>
 
-                  <div className="relative">
-                    <input
-                      type={showKeys[item.key] ? 'text' : 'password'}
-                      value={
-                        // A server-managed provider's field is always an empty
-                        // draft box, never a rendering of stored state: the
-                        // value is not readable back, and showing anything here
-                        // would be showing browser state as if it were the
-                        // server's.
-                        (MODEL_CREDENTIAL_PROVIDERS as readonly string[]).includes(item.key) || item.key === 'fish_audio'
-                          ? (modelKeyDrafts[item.key] ?? '')
-                          : ((settings.customApiKeys as any)[item.key] || '')
-                      }
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        const serverManaged = (MODEL_CREDENTIAL_PROVIDERS as readonly string[]).includes(item.key) || item.key === 'fish_audio';
-                        if (serverManaged) {
-                          // Held only in a transient draft. Never written into
-                          // `settings`, so it can never reach localStorage.
-                          setModelKeyDrafts((d) => ({ ...d, [item.key]: val }));
-                        } else {
-                          setSettings(s => ({
-                            ...s,
-                            customApiKeys: { ...s.customApiKeys, [item.key]: val },
-                          }));
-                        }
-                        if (item.key === 'fish_audio' && val.trim()) {
-                          void persistVoiceCredential(val);
-                        }
-                      }}
-                      placeholder={item.placeholder}
-                      className="w-full bg-[#090A16] border border-[#1E223D] rounded-lg px-3 py-2 text-xs text-white placeholder-[#4C5274] focus:outline-none focus:border-[#615EFF]"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => toggleShowKey(item.key)}
-                      className="absolute right-2.5 top-2.5 text-[#585E82] hover:text-white"
-                    >
-                      {showKeys[item.key] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                    </button>
-                  </div>
+                  {item.wiring === 'MODEL_PROVIDERS' && (
+                    <div className="p-2.5 rounded-lg bg-[#615EFF]/10 border border-[#615EFF]/40 text-[11px] text-[#A8A5FF]">
+                      Configured in <span className="font-bold">Model Providers</span>, at the top of this tab — the server-side
+                      encrypted store the Execution Fabric actually reads. Entering it here would be a second, weaker copy, so this
+                      field is deliberately gone.
+                    </div>
+                  )}
 
-                  {/* Server-managed providers: the authority line and the save
-                      action. Presence comes from the SERVER, never from the
-                      browser, so this can never claim configured for a key the
-                      server does not hold. */}
-                  {(MODEL_CREDENTIAL_PROVIDERS as readonly string[]).includes(item.key) && (
+                  {item.wiring === 'NOT_WIRED' && (
                     <div className="space-y-1.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-[10px] font-mono text-[#7B82A8]">
-                          {modelCredentials === null ? (
-                            <span className="text-[#8E94B8]">SERVER STATE UNKNOWN — could not be read</span>
-                          ) : modelCredentials[item.key]?.apiKeyPresent ? (
-                            <span className="text-[#00D26A] font-bold">
-                              KEY SET (server-side, source: {modelCredentials[item.key].source})
-                            </span>
-                          ) : (
-                            <span className="text-[#8E94B8]">
-                              NOT CONFIGURED — server holds no key ({modelCredentials[item.key]?.envVar || 'env var'} also unset)
-                            </span>
-                          )}
-                        </span>
-                        <button
-                          type="button"
-                          disabled={!activeWorkspaceId || modelKeySaving === item.key || !(modelKeyDrafts[item.key] || '').trim()}
-                          onClick={() => void persistModelCredential(item.key, modelKeyDrafts[item.key] || '')
-                            .then(() => setModelKeyDrafts((d) => ({ ...d, [item.key]: '' })))}
-                          className="text-[10px] font-mono font-bold px-2.5 py-1 rounded-md bg-[#615EFF] hover:bg-[#524EFA] disabled:opacity-40 disabled:cursor-not-allowed text-white shrink-0"
-                        >
-                          {modelKeySaving === item.key ? 'Saving…' : 'Save to server'}
-                        </button>
-                      </div>
-                      {modelKeyResult?.provider === item.key && (
-                        <p className={`text-[10px] font-mono ${modelKeyResult.ok ? 'text-[#00D26A]' : 'text-[#FFB020]'}`}>
-                          {modelKeyResult.message}
-                        </p>
-                      )}
-                      <p className="text-[9px] text-[#585E82]">
-                        Written to the encrypted server-side store. The value is never returned to this screen and never kept in browser storage.
+                      <input
+                        type="password"
+                        disabled
+                        value=""
+                        placeholder="Not wired to any runtime"
+                        className="w-full bg-[#07080F] border border-[#161A2E] rounded-lg px-3 py-2 text-xs text-[#4C5274] cursor-not-allowed"
+                      />
+                      <p className="text-[10px] text-[#6A7097]">
+                        No server-side execution mapping exists for this provider, so a key entered here would be stored in this
+                        browser and never used. Disabled rather than silently collecting a credential.
                       </p>
+                    </div>
+                  )}
+
+                  {item.wiring === 'SERVER' && (
+                    <div className="relative">
+                      <input
+                        type={showKeys[item.key] ? 'text' : 'password'}
+                        // Held only in a transient draft, never in `settings`, so
+                        // it can never reach localStorage. The server is the
+                        // store; the value is not readable back.
+                        value={modelKeyDrafts[item.key] ?? ''}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setModelKeyDrafts((d) => ({ ...d, [item.key]: val }));
+                          if (val.trim()) void persistVoiceCredential(val);
+                        }}
+                        placeholder={item.placeholder}
+                        className="w-full bg-[#090A16] border border-[#1E223D] rounded-lg px-3 py-2 text-xs text-white placeholder-[#4C5274] focus:outline-none focus:border-[#615EFF]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => toggleShowKey(item.key)}
+                        className="absolute right-2.5 top-2.5 text-[#585E82] hover:text-white"
+                      >
+                        {showKeys[item.key] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      </button>
                     </div>
                   )}
                 </div>
