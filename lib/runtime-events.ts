@@ -17,9 +17,13 @@ export type RuntimeEventType =
   | 'MCP_PROBE'
   | 'HERMES_HEALTH_CHECK'
   | 'PROVIDER_CALL'
-  | 'EXTERNAL_EXECUTION';
+  | 'EXTERNAL_EXECUTION'
+  // PUSH 2B — development-loop state changes. Additive: every existing
+  // producer still emits only the original five. This is what a live
+  // Development surface observes, so a UI never has to invent progress.
+  | 'DEVELOPMENT_TASK';
 
-export type RuntimeEventTargetType = 'skill' | 'mcp_server' | 'hermes_runtime' | 'provider' | 'external_execution';
+export type RuntimeEventTargetType = 'skill' | 'mcp_server' | 'hermes_runtime' | 'provider' | 'external_execution' | 'development_task';
 
 // ADR-006 — RUNNING/SUBMITTED/CANCELLED added for the external-execution
 // lifecycle (Workstream M). Purely additive: every existing producer of
@@ -30,6 +34,10 @@ export type RuntimeEventStatus =
   | 'NOT_CONFIGURED'
   | 'NOT_IMPLEMENTED'
   | 'TIMEOUT'
+  // PUSH 2B — BLOCKED is added rather than folded into FAILED. A Guardian
+  // refusal is not a failure: nothing was attempted, and a surface that
+  // showed them as the same thing would teach an operator to ignore both.
+  | 'BLOCKED'
   | 'SUBMITTED'
   | 'RUNNING'
   | 'CANCELLED';
