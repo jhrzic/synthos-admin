@@ -294,3 +294,43 @@ describe('lib/backup: WINDMILL_TOKEN is never present in a backup archive', () =
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// DAY 1 — listBackups survives an archive vanishing mid-listing.
+//
+// Found by a real full-suite run, not by inspection: listBackups() did
+// readdirSync then statSync with no ENOENT handling, so a file deleted between
+// those two calls threw and took down the entire listing. One vanished archive
+// meant the operator's backup screen showed an error instead of the other
+// archives that were still perfectly restorable — and retention pruning or an
+// operator clearing disk space makes that most likely exactly when backups
+// matter most.
+// ---------------------------------------------------------------------------
+describe('DAY 1: listBackups is resilient to a vanished archive', () => {
+  it('skips an entry whose file is gone, and still lists the rest', () => {
+    // Reproduces the real condition — readdir lists a name, stat on it throws
+    // ENOENT — using a DANGLING SYMLINK rather than monkeypatching fs. The
+    // patching approach worked but mutated a global that other test files in
+    // the same worker could observe, which is its own flake source. This is
+    // deterministic and touches nothing outside its own two files.
+    fs.mkdirSync(BACKUP_ROOT, { recursive: true });
+    const survivor = path.join(BACKUP_ROOT, 'backup-daytest-survivor.tar.gz');
+    const dangling = path.join(BACKUP_ROOT, 'backup-daytest-dangling.tar.gz');
+    fs.writeFileSync(survivor, 'not-a-real-archive');
+    try { fs.unlinkSync(dangling); } catch { /* not there */ }
+    fs.symlinkSync(path.join(BACKUP_ROOT, 'target-that-does-not-exist.tar.gz'), dangling);
+
+    try {
+      const listed = listBackups();
+      const ids = listed.map((b) => b.backup_id);
+      expect(ids).toContain('backup-daytest-survivor');
+      expect(
+        ids,
+        'an archive whose file is gone must be omitted, not throw and take down the whole listing',
+      ).not.toContain('backup-daytest-dangling');
+    } finally {
+      try { fs.unlinkSync(survivor); } catch { /* ignore */ }
+      try { fs.unlinkSync(dangling); } catch { /* ignore */ }
+    }
+  });
+});

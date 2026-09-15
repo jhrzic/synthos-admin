@@ -124,6 +124,43 @@ export function getDatabasePath(): string {
 
 let dbInstance: any = null;
 
+/**
+ * Close the process's SQLite handle cleanly, checkpointing the WAL first.
+ *
+ * Added for the production graceful-shutdown path (server.ts). Without it, a
+ * container SIGTERM kills the process mid-WAL: the database stays correct
+ * (that is what WAL is for) but the `-wal` sidecar is left holding committed
+ * pages that have never been folded back into the main file. That is not
+ * hypothetical here — this repo's own working copy carries a 4MB
+ * `synthos-admin.db-wal` against a 1.3MB `synthos-admin.db`, which is exactly
+ * the shape a series of abrupt kills produces.
+ *
+ * `wal_checkpoint(TRUNCATE)` folds the WAL back and resets it to zero length.
+ * It is attempted, never required: a checkpoint that cannot complete (a reader
+ * still open, a read-only mount) must not stop the process from exiting, so
+ * the failure is reported and shutdown continues. Returns true only if the
+ * handle was really open and really closed.
+ */
+export function closeDatabase(): boolean {
+  if (!dbInstance) return false;
+  const handle = dbInstance;
+  // Clear the module handle first, so anything racing us on the way down
+  // opens a fresh connection rather than using one we are about to close.
+  dbInstance = null;
+  try {
+    handle.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+  } catch (err) {
+    console.error(`[Shutdown] WAL checkpoint failed (continuing): ${(err as Error).message}`);
+  }
+  try {
+    handle.close();
+    return true;
+  } catch (err) {
+    console.error(`[Shutdown] Database close failed: ${(err as Error).message}`);
+    return false;
+  }
+}
+
 export function getDatabase(): any {
   if (!dbInstance) {
     const dbPath = getDatabasePath();
@@ -683,6 +720,19 @@ export function getDatabase(): any {
     // never plaintext, never returned by any route (see F2's own
     // SECURITY_LIMITATION note in docs/adr-005 for what this does and does
     // not protect against).
+    // Restart reconciliation for external executions. Added as a migration as
+    // well as in the CREATE TABLE above because databases exist in both
+    // states: the developer's live database already had these columns (added
+    // out-of-band), while a fresh install created from the CREATE TABLE did
+    // not have them at all. Both paths converge here.
+    const externalExecCols = dbInstance.prepare("PRAGMA table_info(external_executions)").all() as Array<{ name: string }>;
+    if (externalExecCols.length > 0 && !externalExecCols.some((c) => c.name === 'next_poll_at')) {
+      dbInstance.exec("ALTER TABLE external_executions ADD COLUMN next_poll_at TEXT");
+    }
+    if (externalExecCols.length > 0 && !externalExecCols.some((c) => c.name === 'poll_attempts')) {
+      dbInstance.exec("ALTER TABLE external_executions ADD COLUMN poll_attempts INTEGER NOT NULL DEFAULT 0");
+    }
+
     const skillCols = dbInstance.prepare("PRAGMA table_info(skills)").all() as Array<{ name: string }>;
     if (!skillCols.some((c) => c.name === 'execution_target_type')) {
       dbInstance.exec("ALTER TABLE skills ADD COLUMN execution_target_type TEXT");
@@ -819,9 +869,17 @@ export function getDatabase(): any {
         result_ingested_at TEXT,
         created_by_user_id TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        -- Restart reconciliation. These existed on the developer's live
+        -- database but were MISSING from this CREATE TABLE, so a fresh
+        -- install had no reconciliation columns at all and the sweep's own
+        -- query failed on the first tick. Declared here and migrated below.
+        next_poll_at TEXT,
+        poll_attempts INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS idx_external_executions_workspace ON external_executions(workspace_id);
+      -- Ordering index for the reconciliation sweep's selection query.
+      CREATE INDEX IF NOT EXISTS idx_external_executions_next_poll ON external_executions(status, next_poll_at);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_external_executions_correlation ON external_executions(correlation_id);
       CREATE INDEX IF NOT EXISTS idx_external_executions_remote_job ON external_executions(remote_job_id);
 

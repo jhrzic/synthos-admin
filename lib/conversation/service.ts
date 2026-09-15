@@ -18,6 +18,8 @@
 // ---------------------------------------------------------------------------
 
 import crypto from 'node:crypto';
+import { writeKnowledgeNote, deriveConversationSubject, type KnowledgeWriteResult } from '../knowledge-vault';
+import { getVaultStatus } from '../vault-config';
 import {
   createInitialTask, recordActivityEvent, updateTaskStatus, getDatabase,
   recordQualityReview, recordReceipt, runDeterministicAegisVerification,
@@ -358,7 +360,27 @@ export async function handleTurn(params: {
     // Timing needs an actual time reference, not merely a turn that followed
     // the timing question.
     else if (/hoping to have it sorted/.test(q) && !lead.timing && mentionsTime(text)) lead.timing = text.slice(0, 120);
-    else if (profile.qualification_goals.includes(q)) lead.questions = [...(lead.questions || []), q];
+    else {
+      // DAYS 4-5 fix. This compared the WHOLE last assistant message against the
+      // configured goals with `.includes(q)` — an exact-equality membership test.
+      // But a qualification question is appended AFTER the grounded answer, so
+      // the message is "<answer>\n\n<question>" and never equals a goal. The
+      // result: a configured question was never marked as asked, so the
+      // assistant re-asked it on every turn and intake could never complete.
+      //
+      // It went unnoticed because the DEFAULT_SLOTS branches above match with
+      // regex `.test(q)` against the same full message and therefore worked —
+      // so only businesses that configure their OWN qualification goals were
+      // affected, which is every real vertical and no default install.
+      //
+      // Matching on the question the message actually ENDS with is both correct
+      // and specific: it identifies which goal was just asked rather than any
+      // goal merely mentioned somewhere in the text.
+      const askedGoal = profile.qualification_goals.find((g) => q.trimEnd().endsWith(g.trim()));
+      if (askedGoal && !(lead.questions || []).includes(askedGoal)) {
+        lead.questions = [...(lead.questions || []), askedGoal];
+      }
+    }
   }
 
   const alreadyHandedOff = conv.status === 'HANDOFF_REQUESTED';
@@ -519,7 +541,12 @@ export function addBusinessKnowledge(params: {
  * not have.
  */
 export function summarizeConversation(workspaceId: string, conversationId: string):
-  | { artifactId: string; path: string; taskId: string; receiptId: string | null; aegisDecision: string; markdown: string }
+  | {
+      artifactId: string; path: string; taskId: string; receiptId: string | null;
+      aegisDecision: string; markdown: string;
+      /** Where this conversation landed in the user's real vault, or why it did not. */
+      knowledge: KnowledgeWriteResult | null;
+    }
   | { error: string } {
   const conv = getConversation(workspaceId, conversationId);
   if (!conv) return { error: 'Conversation not found in this workspace.' };
@@ -654,8 +681,68 @@ export function summarizeConversation(workspaceId: string, conversationId: strin
     .prepare('UPDATE business_conversations SET summary_artifact_id = ?, updated_at = ? WHERE conversation_id = ? AND workspace_id = ?')
     .run(artifact.artifact_id, nowIso, conversationId, workspaceId);
 
+  // -------------------------------------------------------------------------
+  // DAYS 2-3 — the same conversation, as KNOWLEDGE in the user's real vault.
+  //
+  // This is deliberately a SECOND, different write, not a replacement for the
+  // artifact above:
+  //
+  //   * the artifact (above) is SynthOS's internal, hashed, receipt-bearing
+  //     record — machine-named by design, joined to a task row;
+  //   * the knowledge note (here) is a human's Markdown file, named by SUBJECT,
+  //     living in their own vault where they will actually find it.
+  //
+  // It runs LAST and cannot fail the summary. A vault that is misconfigured,
+  // read-only or absent must never break a live customer conversation — the
+  // result records `written: false` with a real reason instead. Silently
+  // reporting success would be the worse failure, so the reason is returned to
+  // the caller rather than swallowed.
+  const customerTexts = messages.filter((m) => m.role === 'customer').map((m) => m.content);
+  const subject = deriveConversationSubject(profile?.business_name || 'Business', customerTexts);
+  let knowledge: KnowledgeWriteResult | null = null;
+  try {
+    knowledge = writeKnowledgeNote(
+      {
+        title: subject.title,
+        kind: 'Conversations',
+        workspaceId,
+        source: 'business-conversation',
+        sessionId: conversationId,
+        runtime: 'synthos-conversation-ai',
+        model: llm > 0 ? 'approved-model' : 'deterministic',
+        topics: subject.topics,
+        tags: ['synthos', 'conversation', conv.channel.toLowerCase()],
+        summary: `${messages.filter((m) => m.role === 'customer').length} customer turns. `
+          + `${grounded} answered from published material, ${llm} phrased by an approved model, `
+          + `${noKnowledge} declined for lack of verified evidence.`,
+        // Only genuinely-known facts become "decisions" — never invented ones.
+        decisions: conv.status === 'HANDOFF_REQUESTED'
+          ? ['Customer asked for a person. A human handoff task was created.']
+          : [],
+        // Each unanswered question is a real requirement on the business's
+        // published material, which is exactly what makes it worth keeping.
+        requirements: unanswered.map((q) => `Publish an answer for: "${q}"`),
+        actionItems: unanswered.length > 0
+          ? ['Answer the unpublished questions above so the assistant can use them.']
+          : [],
+        artifacts: [artifact.artifact_id],
+        // Present only when a receipt genuinely exists — this is the link that
+        // makes the knowledge note traceable back to verified work.
+        receipts: receiptId ? [receiptId] : [],
+        createdAt: nowIso,
+      },
+      markdown,
+    );
+  } catch (err: any) {
+    knowledge = {
+      written: false, absolutePath: null, vaultRelativePath: null, fileName: null,
+      status: getVaultStatus(), reason: `Knowledge write threw: ${err?.message || err}`,
+    };
+  }
+
   return {
     artifactId: artifact.artifact_id, path: artifact.relative_path, taskId,
     receiptId, aegisDecision: aegisResult.decision, markdown,
+    knowledge,
   };
 }

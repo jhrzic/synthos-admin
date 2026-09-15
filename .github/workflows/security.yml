@@ -1,0 +1,153 @@
+# ---------------------------------------------------------------------------
+# SynthOS Admin — verification and supply-chain controls.
+#
+# This repository had NO CI at all before this file. Everything here is
+# native npm or a plain shell step: no paid service, no third-party action
+# beyond GitHub's own checkout/setup-node/upload-artifact, and nothing that
+# sends this repository's contents anywhere.
+#
+# What it deliberately does NOT do:
+#   * It does not fail on the `qs` moderate advisory that exists today
+#     (transitive, via express). Landing a red pipeline on day one teaches
+#     people to ignore it. Moderate findings are printed; HIGH and CRITICAL
+#     fail the build.
+#   * It does not claim to be a secret scanner in the GitHub Advanced
+#     Security sense. It runs this repo's own secret-guard tests plus a
+#     shape-based scan of tracked files. Push protection is a repository
+#     setting, not something a workflow can provide.
+# ---------------------------------------------------------------------------
+name: security
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: typecheck, tests, production build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # `npm ci` is the canonical install for this repo: package-lock.json is
+      # the committed lockfile and the Dockerfile uses the same command.
+      - name: Install (locked)
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run lint
+
+      # The suite includes the authorization, execution-evidence, redaction
+      # and client-bundle guards, so a security regression fails here rather
+      # than in a later review.
+      - name: Test suite
+        run: npx vitest run
+
+      # Production build verification: the build must succeed AND emit the
+      # two artifacts the runtime actually serves. A build that "passes"
+      # without producing dist/server.cjs is not a passing build.
+      - name: Production build
+        run: npm run build
+
+      - name: Verify build output exists
+        run: |
+          set -euo pipefail
+          for f in dist/server.cjs dist/index.html; do
+            test -s "$f" || { echo "::error::missing or empty build output: $f"; exit 1; }
+          done
+          echo "build outputs present:"
+          ls -l dist/server.cjs dist/index.html
+
+      # The bundle guard is only meaningful against a real build, so it runs
+      # again here now that dist/ exists.
+      - name: Client bundle secret guard (post-build)
+        run: npx vitest run test/client-bundle-secrets.test.ts
+
+  dependencies:
+    name: dependency advisories + SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install (locked)
+        run: npm ci
+
+      # Two passes, on purpose. Production dependencies are what ship, so
+      # they are the gate; the dev-tree result is informational because a
+      # build-tool advisory is not a runtime exposure.
+      - name: Advisories — production dependencies (gate on high/critical)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Advisories — full tree (informational)
+        run: npm audit || true
+
+      # Native npm, no extra dependency. CycloneDX is the format most
+      # downstream tooling reads.
+      - name: Generate SBOM
+        run: |
+          set -euo pipefail
+          mkdir -p sbom
+          npm sbom --sbom-format cyclonedx --omit=dev > sbom/sbom-production.cdx.json
+          npm sbom --sbom-format cyclonedx > sbom/sbom-full.cdx.json
+          node -e "const s=require('./sbom/sbom-production.cdx.json');console.log('production components:',(s.components||[]).length)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom/
+          retention-days: 90
+
+  secrets:
+    name: secret shape scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install (locked)
+        run: npm ci
+
+      - name: Repo secret-guard tests
+        run: npx vitest run test/client-bundle-secrets.test.ts test/redaction.test.ts test/model-credential-authority.test.ts
+
+      # Shape-based scan over TRACKED files only, so it cannot be tripped by
+      # a developer's local .env (which is gitignored and never committed).
+      - name: Scan tracked files for credential shapes
+        run: |
+          set -uo pipefail
+          # Patterns are real key shapes, not the word "key" — the codebase
+          # legitimately contains identifiers such as `apiKey`.
+          PATTERNS='sk-[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{30,}|xox[baprs]-[A-Za-z0-9-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+          # Excludes: this workflow (it names the patterns), the redaction
+          # module and its tests (same reason).
+          HITS=$(git ls-files -z \
+            | grep -zv -e '^\.github/workflows/security\.yml$' \
+                       -e '^lib/redact\.ts$' \
+                       -e '^test/redaction\.test\.ts$' \
+                       -e '^test/client-bundle-secrets\.test\.ts$' \
+            | xargs -0 grep -nEI "$PATTERNS" 2>/dev/null || true)
+          if [ -n "$HITS" ]; then
+            echo "::error::credential-shaped strings found in tracked files:"
+            echo "$HITS"
+            exit 1
+          fi
+          echo "no credential-shaped strings in tracked files"

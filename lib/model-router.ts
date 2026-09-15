@@ -1,11 +1,14 @@
 // ---------------------------------------------------------------------------
 // Provider identity classification.
 //
-// A caller may name any model string. This decides, once, whether that
-// string is a Gemini identifier this server can actually execute — or
-// something else. A non-Gemini identifier must NEVER be silently substituted
-// with a Gemini model; every real generateContent() call site gates on this
+// A caller may name any model string. This decides, once, which provider
+// that string belongs to and whether this server can actually execute it.
+// A model belonging to one provider must NEVER be silently substituted with
+// another provider's model; every real generation call site gates on this
 // classification first and fails explicitly instead.
+//
+// PUSH 1: two providers are now executable — GEMINI and OPENAI. That is a
+// wider answer from the same single function, not a second router.
 //
 // Pure, side-effect-free by design (no imports from server.ts) so it can be
 // imported directly in tests without triggering server.ts's self-executing
@@ -33,7 +36,17 @@ export function normalizeGeminiModel(model?: string): string {
 
 export type ModelRouteClassification =
   | { provider: "GEMINI"; resolvedModel: string; requestedModel: string }
+  | { provider: "OPENAI"; resolvedModel: string; requestedModel: string }
   | { provider: "UNSUPPORTED"; requestedModel: string; reason: "MODEL_MAPPING_NOT_FOUND" | "UNSUPPORTED_PROVIDER"; message: string };
+
+/** Providers this build can actually execute, in the router's own vocabulary. */
+export type ExecutableProvider = "GEMINI" | "OPENAI";
+
+/** The environment variable each executable provider's credential is read from. */
+export const PROVIDER_ENV_VAR: Record<ExecutableProvider, string> = {
+  GEMINI: "GEMINI_API_KEY",
+  OPENAI: "OPENAI_API_KEY",
+};
 
 // Non-Gemini provider names this system recognizes by identity but has no
 // configured, evidenced execution mapping for today (no credential and/or no
@@ -44,14 +57,68 @@ const RECOGNIZED_UNCONFIGURED_PROVIDERS = new Set([
   "deepseek",
   "hermes",
   "perplexity", "sonar",
-  "chatgpt", "openai", "gpt", "gpt-4", "gpt-4o", "gpt-5", "o3",
 ]);
+
+// ---------------------------------------------------------------------------
+// OpenAI identity. PUSH 1 — OpenAI moved OUT of
+// RECOGNIZED_UNCONFIGURED_PROVIDERS above because it now has a real,
+// configured execution mapping in this build (lib/fabric/model-openai.ts,
+// the Responses API). Nothing else about this module changed: a model
+// string is still classified exactly once, a non-Gemini identifier is
+// still never substituted with a Gemini model, and a provider with no
+// credential still fails explicitly at the call site rather than here —
+// classification answers "whose model is this", never "can we afford to
+// call it".
+//
+// The default model is deliberately configurable (OPENAI_MODEL) rather
+// than a frozen literal: OpenAI retires snapshots on a published schedule,
+// and a hardcoded id is how this file becomes wrong without anyone
+// noticing. The literal below is only the fallback when nothing is set.
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_OPENAI_MODEL = "gpt-5.6-terra";
+
+/** Bare provider aliases a caller may type instead of a model id. */
+const OPENAI_PROVIDER_ALIASES = new Set(["openai", "chatgpt", "gpt"]);
+
+export function resolveDefaultOpenAiModel(): string {
+  const configured = (process.env.OPENAI_MODEL || "").trim();
+  return configured || DEFAULT_OPENAI_MODEL;
+}
+
+export function normalizeOpenAiModel(model?: string): string {
+  const m = String(model || "").trim();
+  if (!m) return resolveDefaultOpenAiModel();
+  if (OPENAI_PROVIDER_ALIASES.has(m.toLowerCase())) return resolveDefaultOpenAiModel();
+  return m;
+}
+
+/**
+ * True for a string this build should route to OpenAI. Deliberately
+ * prefix-based rather than an allowlist of snapshots: OpenAI ships and
+ * retires model ids faster than this file can be edited, and an allowlist
+ * would refuse a model the account genuinely has. A wrong id inside the
+ * prefix is answered by OpenAI itself, truthfully, at call time.
+ */
+export function isOpenAiModelIdentifier(stripped: string): boolean {
+  if (OPENAI_PROVIDER_ALIASES.has(stripped)) return true;
+  if (stripped.startsWith("gpt-") || stripped.startsWith("gpt.")) return true;
+  if (/^o[1-9](-|$)/.test(stripped)) return true;
+  return false;
+}
 
 export function classifyModelRequest(model?: string): ModelRouteClassification {
   const requestedModel = (model && String(model).trim().length > 0) ? String(model).trim() : "gemini-3.1-flash-lite";
   const stripped = requestedModel.toLowerCase().startsWith("models/")
     ? requestedModel.toLowerCase().slice("models/".length)
     : requestedModel.toLowerCase();
+
+  // OpenAI is decided BEFORE normalizeGeminiModel() is consulted, because
+  // that function's contract is "return the input unchanged if it isn't a
+  // Gemini alias" — running it first would be harmless but misleading.
+  if (isOpenAiModelIdentifier(stripped)) {
+    return { provider: "OPENAI", resolvedModel: normalizeOpenAiModel(requestedModel), requestedModel };
+  }
 
   const resolved = normalizeGeminiModel(requestedModel);
 
@@ -76,25 +143,57 @@ export function classifyModelRequest(model?: string): ModelRouteClassification {
   };
 }
 
+/**
+ * A truthful sentence for a call site that has classified a model and found
+ * a provider it cannot itself execute.
+ *
+ * PUSH 1 introduced a second executable provider (OPENAI), which split one
+ * case into two: a model that no provider here can run, and a model that
+ * SynthOS can run but this particular call site is not wired for. Before
+ * the split, `classification.message` covered every non-Gemini case and
+ * several call sites read it unconditionally. It no longer exists on the
+ * executable branches, and answering "unsupported provider" for a provider
+ * this platform demonstrably supports would be a lie told by a stale
+ * string. This function makes each call site say which of the two it means.
+ *
+ * `capableSurface` names where the model CAN be executed, so the message is
+ * actionable rather than merely a refusal.
+ */
+export function explainUnroutableModel(
+  classification: ModelRouteClassification,
+  callSite: string,
+  capableSurface = "POST /api/execute-agent-task"
+): string {
+  if (classification.provider === "UNSUPPORTED") return classification.message;
+  return `Model "${classification.requestedModel}" routes to ${classification.provider}, which this platform can execute, but ${callSite} is wired to Gemini only. Run it through ${capableSurface} instead. It was not routed to any provider here, and no substitute was used.`;
+}
+
 // ---------------------------------------------------------------------------
 // Failover — Pass X follow-up (Jarvis routing stabilization).
 //
-// Both real generateContent() call sites in this app (/api/generate and
-// /api/jarvis/command) hit exactly one real provider today: Gemini.
-// classifyModelRequest() above already refuses to silently substitute a
-// different provider, and RECOGNIZED_UNCONFIGURED_PROVIDERS documents that
-// Claude/DeepSeek/Hermes/OpenAI have no configured execution mapping in this
-// deployment — so "fallback" here can only ever mean a different Gemini
-// *model*, never a different Gemini *provider*. This module does not invent
-// a cross-provider fallback chain; it retries and falls back only across
+// Both generateWithFailover() call sites in this app (/api/generate and
+// /api/jarvis/command) hit exactly one real provider today: Gemini, via the
+// candidate list they pass in. classifyModelRequest() above already refuses
+// to silently substitute a different provider, and
+// RECOGNIZED_UNCONFIGURED_PROVIDERS documents that Claude/DeepSeek/Hermes
+// have no configured execution mapping in this deployment — so "fallback"
+// here can only ever mean a different model from the SAME caller-supplied
+// list, never a different provider. This module does not invent a
+// cross-provider fallback chain; it retries and falls back only across
 // models the caller explicitly supplies (normally [requested model, ...
 // DEFAULT_CANDIDATE_MODELS]).
+//
+// PUSH 1 note: OpenAI is now executable (lib/fabric/model-openai.ts), and
+// that deliberately did NOT add a Gemini->OpenAI failover chain here.
+// Silently answering an OpenAI request with Gemini (or the reverse) is
+// exactly the substitution this file exists to prevent, and a customer who
+// asked for a named provider must get that provider or a truthful failure.
 //
 // Kept side-effect-free and SDK-free by design (same reason as the rest of
 // this file — importable in tests without triggering server.ts's
 // self-executing startServer()): the actual GoogleGenAI call is injected as
 // `callModel`, so every code path here is testable with a fake that throws
-// specific errors on command, no real network and no real Gemini uptime
+// specific errors on command, no real network and no real provider uptime
 // required.
 // ---------------------------------------------------------------------------
 

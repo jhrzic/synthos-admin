@@ -25,10 +25,13 @@ describe('C1: trust proxy is never blindly enabled', () => {
 });
 
 describe('C5: real, minimal security headers on every response', () => {
-  const headerBlock = serverContent.slice(
-    serverContent.indexOf('res.setHeader("X-Content-Type-Options"'),
-    serverContent.indexOf('const INTERNAL_SERVICE_TOKEN'),
-  );
+  // The old end anchor was `const INTERNAL_SERVICE_TOKEN`, which no longer
+  // exists (the bypass was deleted). indexOf would return -1 and slice(a, -1)
+  // silently widens the block instead of failing, so the anchor is moved to a
+  // stable marker that really follows the header middleware.
+  const headerStart = serverContent.indexOf('res.setHeader("X-Content-Type-Options"');
+  const headerEnd = serverContent.indexOf('app.use(express.json(');
+  const headerBlock = serverContent.slice(headerStart, headerEnd);
 
   it('sets X-Content-Type-Options: nosniff', () => {
     expect(headerBlock).toContain('"X-Content-Type-Options", "nosniff"');

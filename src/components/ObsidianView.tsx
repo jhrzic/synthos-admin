@@ -81,10 +81,140 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
   const [detailError, setDetailError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
 
-  /** Real total of [[wikilinks]] across the loaded notes. */
+  // -------------------------------------------------------------------
+  // THE BRAIN'S REAL KNOWLEDGE, from the configured vault.
+  //
+  // This surface used to render the `notes` prop, which App.tsx seeds from
+  // INITIAL_NOTES in src/data/mockData.ts and persists per-browser in
+  // localStorage. So the knowledge graph on screen was a graph of invented
+  // notes, while the real vault the Brain actually writes to was not visible
+  // anywhere in the Admin.
+  //
+  // The visual design is unchanged — ObsidianGraphMind and
+  // VaultActivitySparkline are the same restored components. Only the data
+  // behind them is now real. Keep the surface, fix the data.
+  // -------------------------------------------------------------------
+  interface BrainVault {
+    root: string | null;
+    mode: string;
+    source: string;
+    writable: boolean;
+    detail?: string;
+    isObsidianIntegration: boolean;
+    writeSubdirectory: string;
+  }
+  interface BrainNote {
+    fileName: string;
+    vaultRelativePath: string;
+    kind: string;
+    sizeBytes: number;
+    modifiedAt: string;
+    title: string;
+    type: string | null;
+    createdAt: string | null;
+    workspaceId: string | null;
+    source: string | null;
+    sessionId: string | null;
+    project: string | null;
+    runtime: string | null;
+    model: string | null;
+    topics: string[];
+    tags: string[];
+    artifacts: string[];
+    receipts: string[];
+    generatedBy: string | null;
+    wikilinks: string[];
+    body: string;
+    truncated: boolean;
+  }
+
+  const [brainVault, setBrainVault] = useState<BrainVault | null>(null);
+  const [brainNotesRaw, setBrainNotesRaw] = useState<BrainNote[]>([]);
+  const [brainLoading, setBrainLoading] = useState(true);
+  const [brainError, setBrainError] = useState<string | null>(null);
+  const [selectedBrainPath, setSelectedBrainPath] = useState<string | null>(null);
+  const [brainQuery, setBrainQuery] = useState('');
+
+  const fetchBrain = useCallback(async () => {
+    setBrainLoading(true);
+    setBrainError(null);
+    try {
+      const res = await fetch(`/api/knowledge/mesh?workspaceId=${encodeURIComponent(workspaceId)}`);
+      const data = await res.json();
+      if (!res.ok || data.success === false) {
+        setBrainError(data.error || `HTTP ${res.status}`);
+        setBrainNotesRaw([]);
+        setBrainVault(null);
+      } else {
+        setBrainNotesRaw(data.notes || []);
+        setBrainVault(data.vault || null);
+      }
+    } catch (err: any) {
+      setBrainError(err?.message || 'Network error contacting the knowledge API.');
+      setBrainNotesRaw([]);
+      setBrainVault(null);
+    } finally {
+      setBrainLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => { fetchBrain(); }, [fetchBrain]);
+
+  /** Real vault notes mapped onto the shape the graph already speaks. No field is invented. */
+  const brainNotes = React.useMemo<ObsidianNote[]>(
+    () => brainNotesRaw.map((n) => ({
+      id: n.vaultRelativePath,
+      title: n.title,
+      path: n.vaultRelativePath,
+      folder: n.kind,
+      content: n.body,
+      tags: [...n.tags, ...n.topics],
+      wikilinks: n.wikilinks,
+      createdAt: n.createdAt || n.modifiedAt,
+      updatedAt: n.modifiedAt,
+      workspace: n.workspaceId || undefined,
+      agent: n.source || undefined,
+      model: n.model || undefined,
+    })) as ObsidianNote[],
+    [brainNotesRaw]
+  );
+
+  /** One vault entry describing the REAL configured vault, for the graph's vault ring. */
+  const brainVaults = React.useMemo<ObsidianVault[]>(
+    () => brainVault?.root
+      ? [{
+          id: 'vault-configured',
+          name: brainVault.isObsidianIntegration ? 'Obsidian vault' : 'Local fallback vault',
+          path: brainVault.root,
+          notesCount: brainNotesRaw.length,
+          lastSynced: brainNotesRaw[0]?.modifiedAt || 'never',
+          status: brainVault.writable ? 'synced' : 'offline',
+          size: `${(brainNotesRaw.reduce((a, n) => a + n.sizeBytes, 0) / 1024).toFixed(1)} KB`,
+        }]
+      : [],
+    [brainVault, brainNotesRaw]
+  );
+
+  const filteredBrainNotes = React.useMemo(() => {
+    const q = brainQuery.trim().toLowerCase();
+    if (!q) return brainNotesRaw;
+    return brainNotesRaw.filter((n) =>
+      n.title.toLowerCase().includes(q) ||
+      n.body.toLowerCase().includes(q) ||
+      n.tags.some((t) => t.toLowerCase().includes(q)) ||
+      n.topics.some((t) => t.toLowerCase().includes(q))
+    );
+  }, [brainNotesRaw, brainQuery]);
+
+  const selectedBrainNote = React.useMemo(
+    () => brainNotesRaw.find((n) => n.vaultRelativePath === selectedBrainPath) || null,
+    [brainNotesRaw, selectedBrainPath]
+  );
+
+  /** Real total of [[wikilinks]] across the REAL vault notes. */
   const meshSynapseCount = React.useMemo(
-    () => notes.reduce((acc, n) => acc + (n.wikilinks?.length || 0), 0),
-    [notes]
+    () => brainNotesRaw.reduce((acc, n) => acc + n.wikilinks.length, 0),
+    [brainNotesRaw]
   );
 
   const fetchEntries = useCallback(async () => {
@@ -220,51 +350,113 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
 
       {activeSection === 'mesh' && (
         <div className="space-y-6">
-          {/* Mesh metrics — every figure below is counted from the notes
-              actually loaded, never seeded. */}
+          {/* THE VAULT THE BRAIN IS ACTUALLY USING. Stated rather than
+              implied: EXTERNAL is an Obsidian integration, LOCAL_FALLBACK is
+              a development directory, and the difference decides whether any
+              of this is the user's real knowledge. */}
+          <div className={`p-4 rounded-2xl border ${
+            brainVault?.isObsidianIntegration
+              ? 'bg-[#00D26A]/5 border-[#00D26A]/30'
+              : 'bg-[#090A14] border-[#1E223D]'
+          }`}>
+            {brainLoading ? (
+              <span className="text-xs font-mono text-[#8E94B8]">Reading the configured vault…</span>
+            ) : brainError ? (
+              <div>
+                <span className="text-[10px] font-mono text-[#FFB020] uppercase tracking-wider block">Vault Authority — UNKNOWN</span>
+                <span className="text-xs font-mono text-[#FFB020] mt-1 block">{brainError}</span>
+              </div>
+            ) : brainVault ? (
+              <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2">
+                <div>
+                  <span className="text-[10px] font-mono text-[#6A7097] uppercase tracking-wider block">Brain Knowledge Vault</span>
+                  <span className={`text-sm font-extrabold font-mono mt-1 block ${brainVault.isObsidianIntegration ? 'text-[#00D26A]' : 'text-[#8E94B8]'}`}>
+                    {brainVault.isObsidianIntegration ? 'OBSIDIAN (EXTERNAL)' : `${brainVault.mode} — not an Obsidian integration`}
+                  </span>
+                </div>
+                <div className="min-w-0">
+                  <span className="text-[10px] font-mono text-[#6A7097] uppercase tracking-wider block">Path</span>
+                  <span className="text-xs font-mono text-white mt-1 block truncate">{brainVault.root || 'UNKNOWN'}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] font-mono text-[#6A7097] uppercase tracking-wider block">SynthOS writes only under</span>
+                  <span className="text-xs font-mono text-white mt-1 block">{brainVault.writeSubdirectory}/</span>
+                </div>
+                <div>
+                  <span className="text-[10px] font-mono text-[#6A7097] uppercase tracking-wider block">Writable</span>
+                  <span className={`text-xs font-mono mt-1 block ${brainVault.writable ? 'text-[#00D26A]' : 'text-[#FF6B6B]'}`}>
+                    {brainVault.writable ? 'yes' : 'NO — writeback will fail'}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <span className="text-xs font-mono text-[#8E94B8]">NOT_CONFIGURED — no vault resolved</span>
+            )}
+          </div>
+
+          {/* Mesh metrics — every figure is counted from the REAL vault notes
+              loaded above, never seeded and never estimated. */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             <div className="p-4 bg-[#090A14] border border-[#1E223D] rounded-2xl">
-              <span className="text-[10px] font-mono text-[#6A7097] uppercase tracking-wider block">Notes In Mesh</span>
-              <span className="text-2xl font-extrabold text-white font-mono mt-1 block">{notes.length}</span>
-              <span className="text-[10px] text-[#7B82A8] font-mono mt-0.5 block">Quick Notes (session-local)</span>
+              <span className="text-[10px] font-mono text-[#6A7097] uppercase tracking-wider block">Knowledge Notes</span>
+              <span className="text-2xl font-extrabold text-white font-mono mt-1 block">
+                {brainLoading ? '…' : brainError ? 'UNKNOWN' : brainNotesRaw.length}
+              </span>
+              <span className="text-[10px] text-[#7B82A8] font-mono mt-0.5 block">Real files in the configured vault</span>
             </div>
             <div className="p-4 bg-[#090A14] border border-[#1E223D] rounded-2xl">
               <span className="text-[10px] font-mono text-[#6A7097] uppercase tracking-wider block">Wikilink Synapses</span>
-              <span className="text-2xl font-extrabold text-[#00D26A] font-mono mt-1 block">{meshSynapseCount}</span>
-              <span className="text-[10px] text-[#7B82A8] font-mono mt-0.5 block">Summed from note wikilinks</span>
+              <span className="text-2xl font-extrabold text-[#00D26A] font-mono mt-1 block">
+                {brainLoading ? '…' : brainError ? 'UNKNOWN' : meshSynapseCount}
+              </span>
+              <span className="text-[10px] text-[#7B82A8] font-mono mt-0.5 block">Counted from note bodies</span>
             </div>
             <div className="p-4 bg-[#090A14] border border-[#1E223D] rounded-2xl">
-              <span className="text-[10px] font-mono text-[#6A7097] uppercase tracking-wider block">Vault Artifacts</span>
+              <span className="text-[10px] font-mono text-[#6A7097] uppercase tracking-wider block">Receipt-Backed Notes</span>
+              <span className="text-2xl font-extrabold text-[#A78BFA] font-mono mt-1 block">
+                {brainLoading ? '…' : brainError ? 'UNKNOWN' : brainNotesRaw.filter((n) => n.receipts.length > 0).length}
+              </span>
+              <span className="text-[10px] text-[#7B82A8] font-mono mt-0.5 block">Notes citing a signed receipt</span>
+            </div>
+            <div className="p-4 bg-[#090A14] border border-[#1E223D] rounded-2xl">
+              <span className="text-[10px] font-mono text-[#6A7097] uppercase tracking-wider block">Workspace Artifacts</span>
               <span className="text-2xl font-extrabold text-[#38BDF8] font-mono mt-1 block">
                 {entriesLoading ? '…' : entriesError ? 'UNKNOWN' : entries.length}
               </span>
-              <span className="text-[10px] text-[#7B82A8] font-mono mt-0.5 block">Real files via /api/vault</span>
-            </div>
-            <div className="p-4 bg-[#090A14] border border-[#1E223D] rounded-2xl">
-              <span className="text-[10px] font-mono text-[#6A7097] uppercase tracking-wider block">Local Vault Auto-Sync</span>
-              <span className="text-base font-extrabold text-[#8E94B8] font-mono mt-1 block inline-flex items-center gap-1.5">
-                <XCircle className="w-4 h-4" /> NOT_CONNECTED
-              </span>
-              <span className="text-[10px] text-[#7B82A8] font-mono mt-0.5 block">No Obsidian file watcher is wired up</span>
+              <span className="text-[10px] text-[#7B82A8] font-mono mt-0.5 block">A different store — see the Vault tab</span>
             </div>
           </div>
 
-          {/* Vault Activity & Ingestion sparkline — real, from note timestamps */}
-          <VaultActivitySparkline notes={notes} vaults={vaults} />
+          {/* Vault Activity & Ingestion sparkline — real vault note timestamps */}
+          <VaultActivitySparkline notes={brainNotes} vaults={brainVaults} />
 
-          {/* Animated interactive wikilink graph */}
+          {/* An empty vault is shown as empty. A graph of nothing is not drawn
+              as a graph of something. */}
+          {!brainLoading && !brainError && brainNotes.length === 0 ? (
+            <div className="p-8 bg-[#090A14] border border-dashed border-[#1E223D] rounded-2xl text-center">
+              <span className="text-sm font-mono font-bold text-white block">No SynthOS knowledge notes yet</span>
+              <span className="text-xs font-mono text-[#7B82A8] mt-2 block">
+                {brainVault?.root
+                  ? `Nothing has been written under ${brainVault.root}/${brainVault.writeSubdirectory}/ yet. The mesh renders real notes only — no sample graph is drawn.`
+                  : 'No vault is configured, so there is nothing to render.'}
+              </span>
+            </div>
+          ) : (
+          /* Animated interactive wikilink graph — the restored design, real data */
           <ObsidianGraphMind
-            notes={notes}
-            vaults={vaults}
+            notes={brainNotes}
+            vaults={brainVaults}
             models={models}
             selectedNoteId={selectedMeshNoteId || undefined}
             onSelectNote={(noteId) => setSelectedMeshNoteId(noteId)}
             onOpenNote={(noteId) => {
               setSelectedMeshNoteId(noteId);
+              setSelectedBrainPath(noteId);
               setActiveSection('notes');
             }}
             height={560}
           />
+          )}
         </div>
       )}
 
@@ -361,7 +553,7 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div className="md:col-span-1 bg-[#0B0D1B] border border-[#1D2139] rounded-2xl p-4 space-y-3">
             <div className="flex items-center justify-between">
-              <span className="text-[10px] text-[#8E94B8] uppercase font-bold">Session-local, not backend Vault storage</span>
+              <span className="text-[10px] text-[#8E94B8] uppercase font-bold">Knowledge notes — real vault files</span>
               <button
                 onClick={() => setIsCreatingNote(true)}
                 className="p-1.5 rounded-lg bg-[#EC4899]/20 border border-[#EC4899]/40 text-[#EC4899] hover:bg-[#EC4899] hover:text-white transition cursor-pointer"
@@ -402,27 +594,50 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
               </div>
             )}
 
-            {notes.length === 0 ? (
-              <p className="text-xs text-[#8E94B8] text-center py-6">No quick notes yet.</p>
+            {/* REAL knowledge notes from the configured vault. The list used
+                to render the session-local `notes` prop (seeded from
+                mockData), which is why the Brain's actual knowledge was
+                invisible here. */}
+            <div className="pt-1">
+              <input
+                value={brainQuery}
+                onChange={(e) => setBrainQuery(e.target.value)}
+                placeholder="Search knowledge notes…"
+                className="w-full px-2 py-1.5 bg-[#070811] border border-[#1F2442] rounded-lg text-xs text-white placeholder-[#5A6083]"
+              />
+            </div>
+
+            {brainLoading ? (
+              <p className="text-xs text-[#8E94B8] text-center py-6">Reading the vault…</p>
+            ) : brainError ? (
+              <p className="text-xs text-[#FFB020] text-center py-6">UNKNOWN — {brainError}</p>
+            ) : filteredBrainNotes.length === 0 ? (
+              <p className="text-xs text-[#8E94B8] text-center py-6">
+                {brainNotesRaw.length === 0 ? 'No SynthOS knowledge notes in the vault yet.' : 'No note matches that search.'}
+              </p>
             ) : (
               <div className="space-y-1.5 max-h-[440px] overflow-y-auto">
-                {notes.map((note) => (
+                {filteredBrainNotes.map((note) => (
                   <button
-                    key={note.id}
-                    onClick={() => setSelectedNoteId(note.id)}
+                    key={note.vaultRelativePath}
+                    onClick={() => setSelectedBrainPath(note.vaultRelativePath)}
                     className={`w-full text-left p-2.5 rounded-xl border transition cursor-pointer ${
-                      selectedNoteId === note.id ? 'bg-[#EC4899]/15 border-[#EC4899]/40' : 'bg-[#070811] border-[#151728] hover:border-[#EC4899]/30'
+                      selectedBrainPath === note.vaultRelativePath ? 'bg-[#EC4899]/15 border-[#EC4899]/40' : 'bg-[#070811] border-[#151728] hover:border-[#EC4899]/30'
                     }`}
                   >
                     <div className="text-xs text-white font-semibold truncate">{note.title}</div>
-                    {note.tags && note.tags.length > 0 && (
+                    <div className="text-[9px] font-mono text-[#6A7097] mt-0.5 truncate">{note.kind} · {note.modifiedAt.slice(0, 10)}</div>
+                    {(note.tags.length > 0 || note.topics.length > 0) && (
                       <div className="flex gap-1 mt-1 flex-wrap">
-                        {note.tags.slice(0, 3).map((t) => (
+                        {[...note.tags, ...note.topics].slice(0, 3).map((t) => (
                           <span key={t} className="text-[9px] px-1.5 py-0.5 bg-[#EC4899]/10 text-[#EC4899] rounded flex items-center gap-0.5">
                             <Hash className="w-2 h-2" />{t}
                           </span>
                         ))}
                       </div>
+                    )}
+                    {note.receipts.length > 0 && (
+                      <div className="text-[9px] font-mono text-[#A78BFA] mt-1">{note.receipts.length} signed receipt(s)</div>
                     )}
                   </button>
                 ))}
@@ -431,23 +646,80 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
           </div>
 
           <div className="md:col-span-2 bg-[#0B0D1B] border border-[#1D2139] rounded-2xl p-5">
-            {!selectedNote ? (
+            {!selectedBrainNote ? (
               <div className="h-full flex items-center justify-center text-xs text-[#8E94B8] py-16 text-center">
-                Select or create a quick note.
+                Select a knowledge note to see its provenance and content.
               </div>
             ) : (
               <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-base font-bold text-white">{selectedNote.title}</h2>
-                  <button
-                    onClick={() => { onDeleteNote(selectedNote.id); setSelectedNoteId(null); }}
-                    className="p-1.5 rounded-lg bg-[#FF5E8E]/10 border border-[#FF5E8E]/30 text-[#FF5E8E] hover:bg-[#FF5E8E]/20 transition cursor-pointer"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+                <div>
+                  <h2 className="text-base font-bold text-white">{selectedBrainNote.title}</h2>
+                  <p className="text-[10px] font-mono text-[#6A7097] mt-1 break-all">{selectedBrainNote.vaultRelativePath}</p>
                 </div>
+
+                {/* PROVENANCE. Every field is read from the note's own
+                    frontmatter; an absent field reads UNKNOWN rather than
+                    being filled in with something plausible. */}
+                <div className="grid grid-cols-2 lg:grid-cols-3 gap-2">
+                  {([
+                    ['Source', selectedBrainNote.source],
+                    ['Workspace', selectedBrainNote.workspaceId],
+                    ['Runtime', selectedBrainNote.runtime],
+                    ['Model', selectedBrainNote.model],
+                    ['Session', selectedBrainNote.sessionId],
+                    ['Written by', selectedBrainNote.generatedBy],
+                  ] as Array<[string, string | null]>).map(([label, value]) => (
+                    <div key={label} className="p-2 bg-[#070811] border border-[#151728] rounded-lg">
+                      <span className="text-[9px] font-mono text-[#6A7097] uppercase tracking-wider block">{label}</span>
+                      <span className={`text-[11px] font-mono mt-0.5 block truncate ${value ? 'text-white' : 'text-[#585E82]'}`}>
+                        {value || 'UNKNOWN'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Relationships back to the evidence spine — only what the
+                    note actually cites. */}
+                {(selectedBrainNote.artifacts.length > 0 || selectedBrainNote.receipts.length > 0 || selectedBrainNote.wikilinks.length > 0) && (
+                  <div className="p-3 bg-[#070811] border border-[#151728] rounded-xl space-y-2">
+                    {selectedBrainNote.artifacts.length > 0 && (
+                      <div>
+                        <span className="text-[9px] font-mono text-[#6A7097] uppercase tracking-wider">Derived from artifacts</span>
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {selectedBrainNote.artifacts.map((a) => (
+                            <span key={a} className="text-[9px] font-mono px-1.5 py-0.5 bg-[#38BDF8]/10 text-[#38BDF8] rounded break-all">{a}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {selectedBrainNote.receipts.length > 0 && (
+                      <div>
+                        <span className="text-[9px] font-mono text-[#6A7097] uppercase tracking-wider">Attested by receipts</span>
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {selectedBrainNote.receipts.map((r) => (
+                            <span key={r} className="text-[9px] font-mono px-1.5 py-0.5 bg-[#A78BFA]/10 text-[#A78BFA] rounded break-all">{r}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {selectedBrainNote.wikilinks.length > 0 && (
+                      <div>
+                        <span className="text-[9px] font-mono text-[#6A7097] uppercase tracking-wider">Wikilinks</span>
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {selectedBrainNote.wikilinks.map((w) => (
+                            <span key={w} className="text-[9px] font-mono px-1.5 py-0.5 bg-[#00D26A]/10 text-[#00D26A] rounded">[[{w}]]</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div className="p-4 bg-[#070811] border border-[#151728] rounded-xl max-h-96 overflow-y-auto">
-                  <pre className="text-xs text-[#D8DCF0] whitespace-pre-wrap font-sans leading-relaxed">{selectedNote.content}</pre>
+                  <pre className="text-xs text-[#D8DCF0] whitespace-pre-wrap font-sans leading-relaxed">{selectedBrainNote.body}</pre>
+                  {selectedBrainNote.truncated && (
+                    <p className="text-[10px] font-mono text-[#FFB020] mt-2">Truncated at the read ceiling — this is not the whole note.</p>
+                  )}
                 </div>
               </div>
             )}

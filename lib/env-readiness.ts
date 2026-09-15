@@ -11,6 +11,8 @@
 // the shape looks well-formed (INVALID).
 // ---------------------------------------------------------------------------
 
+import { getVaultStatus } from './vault-config';
+
 export type EnvRequirement = 'REQUIRED' | 'OPTIONAL';
 export type EnvClassification = 'REQUIRED_MISSING' | 'OPTIONAL_MISSING' | 'CONFIGURED' | 'INVALID';
 export type EnvSecrecy = 'SECRET' | 'NON_SECRET';
@@ -41,10 +43,27 @@ export const ENV_VAR_SPECS: EnvVarSpec[] = [
   { variable: 'HERMES_ADAPTER_BASE_URL', subsystem: 'Hermes Runtime Adapter', requiredFor: 'hermesAdapter.health()/execute() real network calls', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
   { variable: 'HERMES_ADAPTER_TOKEN', subsystem: 'Hermes Runtime Adapter', requiredFor: 'Authenticated calls to the Hermes adapter base URL', requirement: 'OPTIONAL', secrecy: 'SECRET' },
 
+  // --- Hermes LOCAL runtime (the CLI actually installed on the host) ---
+  // A different mechanism from the two adapter vars above, not a duplicate:
+  // those describe an HTTP contract nothing here implements, these describe
+  // the `hermes` CLI that really exists. See lib/hermes-local-runtime.ts.
+  { variable: 'HERMES_LOCAL_ENABLED', subsystem: 'Hermes Local Runtime (CLI)', requiredFor: 'Must be exactly "true" for ANY dispatch to the local Hermes CLI (capability hermes.execute). Unset or anything else refuses execution even when the CLI is installed and answering — a run spends real ChatGPT/Codex subscription quota.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  { variable: 'HERMES_CLI_PATH', subsystem: 'Hermes Local Runtime (CLI)', requiredFor: 'Overrides the path to the hermes executable. Unset resolves ~/.local/bin/hermes.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+
   // --- Windmill (ADR-006) ---
   { variable: 'WINDMILL_BASE_URL', subsystem: 'Windmill External Execution', requiredFor: 'Any real Windmill API call', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
   { variable: 'WINDMILL_TOKEN', subsystem: 'Windmill External Execution', requiredFor: 'Authenticated Windmill calls (GET /api/users/whoami, job submit/status/result/cancel)', requirement: 'OPTIONAL', secrecy: 'SECRET' },
   { variable: 'WINDMILL_WORKSPACE', subsystem: 'Windmill External Execution', requiredFor: 'Every /api/w/{workspace}/... Windmill endpoint', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+
+  // --- Antigravity execution runtime (PUSH 1) ---
+  // ANTIGRAVITY_ENABLED is a real kill switch, not documentation: the
+  // client and the ledger both refuse to dispatch unless it is literally
+  // "true", so a deployment that holds a Gemini credential does not
+  // silently acquire the ability to run autonomous remote agents.
+  { variable: 'ANTIGRAVITY_ENABLED', subsystem: 'Antigravity Runtime', requiredFor: 'Must be exactly "true" for ANY outward Antigravity execution. Unset or anything else disables submission entirely, even when a credential is present.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  { variable: 'ANTIGRAVITY_API_KEY', subsystem: 'Antigravity Runtime', requiredFor: 'Optional dedicated credential for the managed Antigravity agent API. Unset falls back to the resolved Gemini credential — same Google endpoint, same key type. Set it only to bill or scope agent execution separately.', requirement: 'OPTIONAL', secrecy: 'SECRET' },
+  { variable: 'ANTIGRAVITY_AGENT', subsystem: 'Antigravity Runtime', requiredFor: 'Overrides the managed agent id. Unset uses lib/antigravity-client.ts ANTIGRAVITY_DEFAULT_AGENT.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  { variable: 'ANTIGRAVITY_BASE_URL', subsystem: 'Antigravity Runtime', requiredFor: 'Overrides the managed agent API base URL (an enterprise gateway, or a test double). Unset uses https://generativelanguage.googleapis.com/v1beta.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
 
   // --- MCP (ADR-005) ---
   { variable: 'MCP_ALLOW_LOCAL_ENDPOINTS', subsystem: 'MCP Connectivity', requiredFor: 'Local-development escape hatch for the SSRF guard — must stay unset in production', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
@@ -61,8 +80,62 @@ export const ENV_VAR_SPECS: EnvVarSpec[] = [
   { variable: 'TON_CONNECT_MANIFEST_URL', subsystem: 'TON Readiness', requiredFor: 'TON Connect wallet manifest', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
   { variable: 'TON_ESCROW_ADDRESS', subsystem: 'TON Readiness', requiredFor: 'Escrow settlement address', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
 
+  // --- Knowledge vault (DAYS 2-3) ---
+  { variable: 'SYNTHOS_VAULT_PATH', subsystem: 'Knowledge Vault', requiredFor: "The user's real Markdown/Obsidian vault. SynthOS writes knowledge notes only under its bounded SynthOS/ subdirectory and never modifies existing notes. Unset means the repo-local ./vault development fallback, which is NOT an Obsidian integration.", requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+
+  // --- Additional model / voice providers (DAY 1: previously undeclared) ---
+  // All of these are really read by server.ts or lib/. Leaving them out of this
+  // list meant the readiness report, the startup summary and GET /api/ready all
+  // under-reported the deployment's real configuration surface — including five
+  // SECRET credentials. test/env-spec-completeness.test.ts now fails the build
+  // if a server-side read is added without a declaration here.
+  // PUSH 1 — this variable's scope genuinely widened. It used to be voice
+  // only, and said so. It now also authorizes real, billable TEXT
+  // generation through the Execution Fabric, which is a materially
+  // different cost and blast radius for an operator to be told about.
+  { variable: 'OPENAI_API_KEY', subsystem: 'Provider Router (OpenAI) + Voice (TTS provider: OpenAI)', requiredFor: 'Text generation via POST /api/execute-agent-task when the requested model routes to OpenAI (lib/fabric/model-openai.ts, the Responses API), AND POST /api/voice/speak when provider=openai. Both are real, billable api.openai.com calls.', requirement: 'OPTIONAL', secrecy: 'SECRET' },
+  { variable: 'OPENAI_MODEL', subsystem: 'Provider Router (OpenAI)', requiredFor: 'Overrides the default OpenAI model id used when a caller names the provider without a specific model. Unset uses lib/model-router.ts DEFAULT_OPENAI_MODEL.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  { variable: 'OPENAI_BASE_URL', subsystem: 'Provider Router (OpenAI)', requiredFor: 'Overrides the OpenAI API base URL (an Azure/proxy/enterprise gateway, or a test double). Unset uses https://api.openai.com/v1.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
+  { variable: 'ELEVENLABS_API_KEY', subsystem: 'Voice (TTS provider: ElevenLabs)', requiredFor: 'POST /api/voice/speak when provider=elevenlabs — a real, billable call. Not wired for text generation.', requirement: 'OPTIONAL', secrecy: 'SECRET' },
+  { variable: 'FISH_AUDIO_MODEL', subsystem: 'Apollo Voice (TTS)', requiredFor: 'Fish Audio TTS model selection', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  { variable: 'FISH_AUDIO_VOICE_ID', subsystem: 'Apollo Voice (TTS)', requiredFor: 'Fallback Fish Audio reference/voice id when none is stored per-workspace', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  { variable: 'FISH_AUDIO_AUDIO_FORMAT', subsystem: 'Apollo Voice (TTS)', requiredFor: 'Fish Audio output container (e.g. opus, mp3)', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  { variable: 'FISH_AUDIO_LATENCY_MODE', subsystem: 'Apollo Voice (TTS)', requiredFor: 'Fish Audio latency profile', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  { variable: 'ANTHROPIC_API_KEY', subsystem: 'Provider Status Reporting', requiredFor: 'Presence is REPORTED in provider status only — no execution mapping is wired in this build. Setting it does not enable Claude.', requirement: 'OPTIONAL', secrecy: 'SECRET' },
+  { variable: 'NOUS_API_KEY', subsystem: 'Provider Status Reporting', requiredFor: 'Presence is REPORTED in Hermes/Nous provider status only — no execution mapping is wired.', requirement: 'OPTIONAL', secrecy: 'SECRET' },
+  { variable: 'OLLAMA_BASE_URL', subsystem: 'Provider Status Reporting', requiredFor: 'Presence is REPORTED in local-model status only — no execution mapping is wired.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
+  { variable: 'TELEGRAM_BOT_TOKEN', subsystem: 'Telegram Notifications', requiredFor: 'Reported as CONFIGURED/NOT_CONFIGURED in status surfaces', requirement: 'OPTIONAL', secrecy: 'SECRET' },
+
+  // --- AEO / SEO data providers (lib/aeo/service.ts) ---
+  { variable: 'OPENSEO_API_KEY', subsystem: 'AEO Audit (OpenSEO)', requiredFor: 'Live AEO/GEO audit data — a real, billable provider call', requirement: 'OPTIONAL', secrecy: 'SECRET' },
+  { variable: 'SERPAPI_KEY', subsystem: 'AEO Audit (SerpAPI)', requiredFor: 'Live SERP data — a real, billable provider call', requirement: 'OPTIONAL', secrecy: 'SECRET' },
+  { variable: 'DATAFORSEO_LOGIN', subsystem: 'AEO Audit (DataForSEO)', requiredFor: 'Live DataForSEO data — a real, billable provider call', requirement: 'OPTIONAL', secrecy: 'SECRET' },
+  { variable: 'BRIGHTDATA_API_KEY', subsystem: 'AEO Audit (BrightData)', requiredFor: 'Live BrightData retrieval — a real, billable provider call', requirement: 'OPTIONAL', secrecy: 'SECRET' },
+
+  // --- Research (lib/fabric/research.ts) ---
+  { variable: 'GITHUB_TOKEN', subsystem: 'Repository Research', requiredFor: 'Raises the GitHub Search API rate limit. Unset still works at the anonymous limit.', requirement: 'OPTIONAL', secrecy: 'SECRET' },
+  { variable: 'GITHUB_API_BASE_URL', subsystem: 'Repository Research', requiredFor: 'Override for GitHub Enterprise or a test double', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
+
+  // --- TON supplementary (lib/ton-readiness.ts, lib/ton-probe.ts) ---
+  { variable: 'TON_CENTER_API_URL', subsystem: 'TON Readiness', requiredFor: 'TON Center RPC endpoint override', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
+  { variable: 'TONAPI_STATUS', subsystem: 'TON Readiness', requiredFor: 'Operator-declared TONAPI approval state', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  { variable: 'TON_ALLOW_CUSTOM_RPC', subsystem: 'TON Readiness', requiredFor: 'Permits a non-default RPC endpoint', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  { variable: 'TON_TELEGRAM_APPS_CENTER_STATUS', subsystem: 'TON Readiness', requiredFor: 'Operator-declared Telegram Apps Center approval state', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  { variable: 'TON_FOUNDATION_STATUS', subsystem: 'TON Readiness', requiredFor: 'Operator-declared TON Foundation approval state', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  { variable: 'TON_SECURITY_AUDIT_STATUS', subsystem: 'TON Readiness', requiredFor: 'Operator-declared security-audit state', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+
+  // --- Public address (Business Conversation AI) ---
+  // DAY 1 correction. This was read by lib/public-url.ts but declared
+  // nowhere, so the startup summary, GET /api/ready and the readiness panel
+  // all stayed silent about the single variable that decides whether the
+  // embed snippet a customer pastes into their own website actually works.
+  // An operator could deploy correctly in every other respect and still ship
+  // a widget that browsers block as mixed content, with nothing reporting it.
+  { variable: 'PUBLIC_BASE_URL', subsystem: 'Public Assistant Address', requiredFor: 'The https origin used to build the public assistant link and the embed snippet. Unset means the address is inferred per-request from Host/X-Forwarded-Proto, which is correct only when TRUST_PROXY_HOPS matches the real proxy depth.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
+
   // --- Platform / hosting ---
   { variable: 'PORT', subsystem: 'Server Host', requiredFor: 'HTTP listen port (defaults to 3000)', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: (v) => Number.isInteger(Number(v)) && Number(v) > 0 && Number(v) < 65536 },
+  { variable: 'HOST', subsystem: 'Server Host', requiredFor: 'HTTP listen interface. Defaults to 0.0.0.0 because a container must be reachable from the reverse proxy beside it. Set to 127.0.0.1 for a local always-on service (LaunchAgent) so nothing on the local network can reach the admin.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
   { variable: 'TRUST_PROXY_HOPS', subsystem: 'Server Host', requiredFor: 'Correct client IP resolution (rate limiting) behind exactly N reverse proxies — unset means trust none, Express default', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: (v) => Number.isInteger(Number(v)) && Number(v) >= 0 },
   { variable: 'SYNTHOS_DB_PATH', subsystem: 'Database', requiredFor: 'SQLite file location (defaults to ./data/synthos-admin.db)', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
   { variable: 'SYNTHOS_SIGNING_KEY_DIR', subsystem: 'Receipt Signing', requiredFor: 'Ed25519 keypair storage location (defaults to ./data/keys, self-generates on first use)', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
@@ -167,5 +240,51 @@ export function buildStartupSummary(env: NodeJS.ProcessEnv = process.env): Subsy
     { subsystem: 'WINDMILL', status: (configured('WINDMILL_BASE_URL') && configured('WINDMILL_TOKEN') && configured('WINDMILL_WORKSPACE')) ? 'DEGRADED' : 'NOT_CONFIGURED', detail: (configured('WINDMILL_BASE_URL') && configured('WINDMILL_TOKEN') && configured('WINDMILL_WORKSPACE')) ? 'Configured — see /api/master-admin/windmill/status for live CONNECTED/FAILED.' : 'WINDMILL_BASE_URL/TOKEN/WORKSPACE not all set.' },
     { subsystem: 'MCP_CREDENTIAL_STORAGE', status: configured('MCP_CREDENTIAL_ENCRYPTION_KEY') ? 'READY' : 'NOT_CONFIGURED', detail: configured('MCP_CREDENTIAL_ENCRYPTION_KEY') ? 'Encryption key present — credential storage enabled.' : 'MCP_CREDENTIAL_ENCRYPTION_KEY not set — credential storage refused, never falls back to plaintext.' },
     { subsystem: 'BACKUP', status: 'READY', detail: 'Local filesystem archive (backups/), no external dependency.' },
+    // DAYS 2-3. The knowledge vault, reported from real filesystem evidence.
+    // Never says "Obsidian connected" — a vault is a directory, and whether the
+    // Obsidian desktop app happens to be running is irrelevant to it.
+    (() => {
+      const status = getVaultStatus(env);
+      if (status.mode === 'UNAVAILABLE') {
+        return { subsystem: 'KNOWLEDGE_VAULT', status: 'FAILED' as const, detail: status.detail };
+      }
+      if (status.mode === 'LOCAL_FALLBACK') {
+        return { subsystem: 'KNOWLEDGE_VAULT', status: 'NOT_CONFIGURED' as const, detail: status.detail };
+      }
+      return {
+        subsystem: 'KNOWLEDGE_VAULT',
+        status: status.writable ? ('READY' as const) : ('DEGRADED' as const),
+        detail: status.detail,
+      };
+    })(),
+    // DAY 1. The public address decides the origin in the <script> tag a
+    // customer pastes into their own website. Unset behind a TLS-terminating
+    // proxy, the app infers the origin per-request and — unless TRUST_PROXY_HOPS
+    // matches the real proxy depth — infers http, producing a snippet every
+    // browser blocks as mixed content on an https page. That failure is silent
+    // at the customer's end, so it is reported here at startup instead.
+    (() => {
+      const raw = (env.PUBLIC_BASE_URL || '').trim();
+      if (!raw) {
+        const hops = (env.TRUST_PROXY_HOPS || '').trim();
+        return {
+          subsystem: 'PUBLIC_ADDRESS',
+          status: hops ? ('DEGRADED' as const) : ('NOT_CONFIGURED' as const),
+          detail: hops
+            ? `PUBLIC_BASE_URL not set — the public link and embed snippet are inferred per request, trusting ${hops} proxy hop(s). Set PUBLIC_BASE_URL to your real https origin to remove the guess.`
+            : 'PUBLIC_BASE_URL not set and no proxy hops trusted — the embed snippet will be built from the request and will read http:// behind a TLS proxy, which browsers block on an https site.',
+        };
+      }
+      let parsed: URL | null = null;
+      try { parsed = new URL(raw); } catch { parsed = null; }
+      if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:')) {
+        return { subsystem: 'PUBLIC_ADDRESS', status: 'FAILED' as const, detail: 'PUBLIC_BASE_URL is set but is not a valid http(s) address, so no usable public link can be produced.' };
+      }
+      const localHost = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || parsed.hostname === '::1' || parsed.hostname.endsWith('.localhost');
+      if (parsed.protocol !== 'https:' && !localHost) {
+        return { subsystem: 'PUBLIC_ADDRESS', status: 'FAILED' as const, detail: 'PUBLIC_BASE_URL is a plain http address. The embed snippet will be blocked as mixed content on any https website.' };
+      }
+      return { subsystem: 'PUBLIC_ADDRESS', status: 'READY' as const, detail: `Public link and embed snippet will use ${parsed.origin}.` };
+    })(),
   ];
 }

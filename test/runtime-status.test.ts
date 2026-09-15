@@ -89,11 +89,19 @@ describe('G1/G2/G3: runtime status aggregator uses the real vocabulary and never
     }
   });
 
-  it('MCP connectivity is NOT_IMPLEMENTED when no probe has ever run, never a fabricated HEALTHY', async () => {
+  // ALWAYS-ON RUNTIME — this assertion used to require NOT_IMPLEMENTED, and
+  // it was asserting a falsehood about this repo: lib/mcp-client.ts's
+  // probeMcpServer() exists and POST /api/skills/:id/mcp/probe calls it.
+  // What is absent is a probe RESULT. NOT_IMPLEMENTED means "there is no
+  // implementation", so using it for "implemented, never configured" teaches
+  // an operator to read a missing credential as a missing feature.
+  it('MCP connectivity with no probe ever run is NOT_CONFIGURED — never NOT_IMPLEMENTED (the probe is implemented) and never a fabricated HEALTHY', async () => {
     const report = await getRuntimeStatus();
     const mcp = report.systems.find((s) => s.system === 'MCP Connectivity');
-    expect(mcp?.status).toBe('NOT_IMPLEMENTED');
-    expect(mcp?.evidenceSource).toBe('not_implemented');
+    expect(mcp?.status).toBe('NOT_CONFIGURED');
+    expect(mcp?.status).not.toBe('NOT_IMPLEMENTED');
+    expect(mcp?.status).not.toBe('HEALTHY');
+    expect(mcp?.evidenceSource).toBe('configuration_only');
   });
 
   it('reports a real generatedAt timestamp', async () => {

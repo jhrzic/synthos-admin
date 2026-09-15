@@ -20,7 +20,7 @@
 
 import { GoogleGenAI } from '@google/genai';
 import { getWorkspaceSkill, classifySkillExecutability, getRawCredentialCiphertext, DeterministicAction } from './skills';
-import { classifyModelRequest } from './model-router';
+import { classifyModelRequest, explainUnroutableModel } from './model-router';
 import { decryptCredential, probeMcpServer, readBoundedText } from './mcp-client';
 import { searchWorkspaceMemory } from './memory-index';
 import { listWorkspaceVaultEntries } from './vault';
@@ -178,7 +178,10 @@ async function runModelAction(
 
   const classification = classifyModelRequest(modelRef || undefined);
   if (classification.provider !== 'GEMINI') {
-    throw new Error(classification.message);
+    // PUSH 1 — skills remain Gemini-only. Widening them was not part of this
+    // push, and a skill silently changing provider would change its output
+    // with no record of why.
+    throw new Error(explainUnroutableModel(classification, 'model-backed skill execution'));
   }
   const model = classification.resolvedModel;
 
@@ -328,7 +331,9 @@ async function runWindmillAction(
     };
     recordRuntimeEvent({
       workspaceId, eventType: 'SKILL_EXECUTION', targetType: 'skill', targetId: skillId,
-      status: 'FAILED', latencyMs: result.latencyMs, detail: { targetType: 'windmill', executionId: execution.id, remoteStatus: execution.status },
+      // correlationId is the join key into external_executions and into the
+      // envelope's attempt ledger — see lib/fabric/envelope.ts recordAttempt.
+      status: 'FAILED', latencyMs: result.latencyMs, detail: { targetType: 'windmill', executionId: execution.id, correlationId: execution.correlation_id, remoteStatus: execution.status },
     });
     return result;
   }
@@ -342,7 +347,7 @@ async function runWindmillAction(
   };
   recordRuntimeEvent({
     workspaceId, eventType: 'SKILL_EXECUTION', targetType: 'skill', targetId: skillId,
-    status: verified ? 'SUCCESS' : 'FAILED', latencyMs: result.latencyMs, detail: { targetType: 'windmill', executionId: execution.id, verified },
+    status: verified ? 'SUCCESS' : 'FAILED', latencyMs: result.latencyMs, detail: { targetType: 'windmill', executionId: execution.id, correlationId: execution.correlation_id, verified },
   });
   return result;
 }

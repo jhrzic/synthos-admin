@@ -201,10 +201,24 @@ export function listBackups(): Array<{ backup_id: string; file_name: string; siz
   ensureDir(BACKUP_ROOT);
   const files = fs.readdirSync(BACKUP_ROOT).filter((f) => f.endsWith('.tar.gz'));
   return files
+    // A directory listing is a snapshot, not a lock. Between the readdir above
+    // and the stat below, an archive can genuinely disappear — retention
+    // pruning, an operator clearing disk space, a concurrent delete. Before
+    // this, statSync would throw ENOENT and take down the WHOLE listing: one
+    // vanished file and the operator's backup screen shows an error instead of
+    // the other archives that are still perfectly restorable. That is the
+    // opposite of what a backup surface should do under pressure, and it is
+    // exactly when it would happen. A file that is gone is simply not listed.
     .map((fileName) => {
       const backupId = fileName.replace(/\.tar\.gz$/, '');
       const filePath = path.join(BACKUP_ROOT, fileName);
-      const stat = fs.statSync(filePath);
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(filePath);
+      } catch (err: any) {
+        if (err?.code === 'ENOENT') return null;
+        throw err; // A permission or I/O error is real and must not be swallowed.
+      }
       let createdAt: string | null = null;
       try {
         const manifest = readManifestFromArchive(backupId);
@@ -214,6 +228,7 @@ export function listBackups(): Array<{ backup_id: string; file_name: string; siz
       }
       return { backup_id: backupId, file_name: fileName, size_bytes: stat.size, created_at: createdAt };
     })
+    .filter((b): b is { backup_id: string; file_name: string; size_bytes: number; created_at: string | null } => b !== null)
     .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
 }
 

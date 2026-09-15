@@ -105,6 +105,68 @@ export function listWorkspaceMemory(workspaceId: string, limit = 50): MemorySear
   }));
 }
 
+/**
+ * Full indexed content for a workspace's documents, for corpus-level
+ * statistics rather than display.
+ *
+ * listWorkspaceMemory returns a 240-character prefix, which is right for a
+ * browse list and wrong for counting document frequency — a term appearing only
+ * later in a document would be missed, and the count would be systematically
+ * biased toward whatever each document opens with. Bounded the same way, and
+ * deliberately separate so no display path accidentally pulls whole documents.
+ */
+/**
+ * A cheap fingerprint of a workspace's corpus: how many documents, and when the
+ * newest was updated.
+ *
+ * Exists because computing it from listWorkspaceMemoryContent() meant loading
+ * every document's full text out of SQLite on every call — including the calls
+ * that were about to hit a warm cache and throw the content away. Under ten
+ * concurrent conversation turns that was enough to time out a 20s test. Two
+ * aggregates answer "has anything changed?" without reading a single document.
+ */
+export function workspaceCorpusFingerprint(workspaceId: string, pathPrefix?: string): string {
+  const db = getDatabase();
+  const row = (pathPrefix
+    ? db.prepare(`
+        SELECT COUNT(*) AS n, COALESCE(MAX(updated_at), '') AS newest
+        FROM memory_index WHERE workspace_id = ? AND source_path LIKE ?
+      `).get(workspaceId, `%${pathPrefix}%`)
+    : db.prepare(`
+        SELECT COUNT(*) AS n, COALESCE(MAX(updated_at), '') AS newest
+        FROM memory_index WHERE workspace_id = ?
+      `).get(workspaceId)) as { n: number; newest: string };
+  return `${row.n}:${row.newest}`;
+}
+
+export function listWorkspaceMemoryContent(
+  workspaceId: string,
+  pathPrefix?: string,
+  limit = 200,
+): Array<{ artifact_id: string; title: string; content: string; source_path: string; updated_at: string }> {
+  const db = getDatabase();
+  const bounded = Math.min(Math.max(limit, 1), 200);
+  const rows = pathPrefix
+    ? db.prepare(`
+        SELECT artifact_id, title, content, source_path, updated_at
+        FROM memory_index
+        WHERE workspace_id = ? AND source_path LIKE ?
+        ORDER BY updated_at DESC LIMIT ?
+      `)
+        // Contains-match, identical to searchWorkspaceMemoryScoped. A real path
+        // is `workspaces/<id>/Business-Knowledge/<file>.md`, so an anchored
+        // prefix match finds nothing — which is exactly the bug this comment
+        // exists to stop someone reintroducing while "tidying up" the LIKE.
+        .all(workspaceId, `%${pathPrefix}%`, bounded)
+    : db.prepare(`
+        SELECT artifact_id, title, content, source_path, updated_at
+        FROM memory_index
+        WHERE workspace_id = ?
+        ORDER BY updated_at DESC LIMIT ?
+      `).all(workspaceId, bounded);
+  return rows as any;
+}
+
 export function searchWorkspaceMemory(workspaceId: string, query: string, limit = 20): MemorySearchResult[] {
   const trimmed = (query || '').trim();
   if (!trimmed) return [];

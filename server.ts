@@ -49,16 +49,19 @@ import {
   listWorkspaceSchedules,
   setScheduleStatus,
   getScheduleOccurrences,
+  closeDatabase,
   type ScheduleStatus
 } from "./lib/persistence";
 import { hermesAdapter } from "./src/services/hermesAdapter";
-import { classifyModelRequest, generateWithFailover, type FailoverResult, DEFAULT_CANDIDATE_MODELS } from "./lib/model-router";
+import { classifyModelRequest, explainUnroutableModel, generateWithFailover, type FailoverResult, DEFAULT_CANDIDATE_MODELS } from "./lib/model-router";
 import { verifyTaskAtGate, checkGuardianRules } from "./lib/kil-gate";
 import { buildTonReadiness } from "./lib/ton-readiness";
 import { probeTonReadiness } from "./lib/ton-probe";
 import { tonAnalyticsSnapshot, recordTonTelemetry } from "./lib/ton-analytics";
 import { tonGuardianViews, installTonGuardians } from "./lib/ton-guardians";
 import { listWorkspaceVaultEntries, getWorkspaceVaultEntry, previewWorkspaceVaultEntry, writeWorkspaceArtifact } from "./lib/vault";
+import { getVaultStatus, SYNTHOS_VAULT_SUBDIR } from "./lib/vault-config";
+import { listKnowledgeNotes, searchKnowledgeNotes, listKnowledgeNotesDetailed } from "./lib/knowledge-vault";
 import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory, listWorkspaceMemory } from "./lib/memory-index";
 import { runAeoAudit, createAuditMissionTasks, resolveGeoProvider } from "./lib/aeo/service";
 import { listCapabilities, conversationModelConfigured } from "./lib/fabric/registry";
@@ -81,6 +84,7 @@ import {
   listWorkspaceExternalExecutions, getWorkspaceExternalExecution, submitExternalExecution,
   refreshExternalExecutionStatus, cancelExternalExecution, retryExternalExecution,
   ingestExternalExecutionResult, listAllExternalExecutions, submitAndAwaitExternalExecution,
+  isExternalRuntime, EXTERNAL_RUNTIMES,
 } from "./lib/external-executions";
 
 const VALID_EXECUTION_TARGET_TYPES = new Set<ExecutionTargetType>(["model", "deterministic", "mcp_tool", "hermes_runtime", "windmill"]);
@@ -120,9 +124,10 @@ import {
 import { renderAssistantPage, ASSISTANT_SCRIPT, EMBED_LOADER_SCRIPT, embedSnippet } from "./lib/conversation/public-page";
 import { assistantPageCsp, normalizeOrigin } from "./lib/conversation/origins";
 import { synthesizeFishAudio, getFishAccountState } from "./lib/voice-credentials";
-import { getModelCredentialStatus, saveModelCredential, deleteModelCredential, verifyModelCredential } from "./lib/model-credentials";
+import { resolveVoiceRuntime, saveVoiceSettings, isVoiceProvider, VOICE_PROVIDERS } from "./lib/voice-settings";
+import { getModelCredentialStatus, saveModelCredential, deleteModelCredential, verifyModelCredential, isModelProvider, SUPPORTED_MODEL_PROVIDERS, type ModelProvider } from "./lib/model-credentials";
 import { resolvePublicBaseUrl } from "./lib/public-url";
-import { requireAuth, requireWorkspaceMember, requireWorkspaceAdmin, requirePlatformAdmin, requireSameOrigin, getRequestUser, fromBody, fromQuery, fromBodyOrQuery, AuthedRequest } from "./lib/authorization";
+import { requireAuth, requireWorkspaceMember, requireWorkspaceAdmin, requirePlatformAdmin, requireSameOrigin, getRequestUser, fromBody, fromQuery, fromBodyOrQuery, authorizedWorkspaceId, AuthedRequest } from "./lib/authorization";
 import { recordAdminAuditEvent, listRecentAdminAuditEvents } from "./lib/audit";
 import { executeAgentTask, buildAgentRolePrompt } from "./lib/fabric/kernel";
 import { createExecutionContext } from "./lib/fabric/context";
@@ -142,6 +147,7 @@ import {
 } from "./lib/voice-credentials";
 import {
   startScheduler,
+  stopScheduler,
   createValidatedSchedule,
   parseSchedulePhrase,
   computeResumeNextRunAt,
@@ -211,13 +217,19 @@ function enforceTaskWorkspaceAccess(
   res: express.Response,
   taskId: string
 ): boolean {
-  const resolved = resolveWorkspaceId(req.query.workspaceId ?? req.body?.workspaceId);
-  if ("error" in resolved) {
-    res.status(400).json({ success: false, error: resolved.error });
+  // Uses the workspace the auth middleware VERIFIED, never a value re-read
+  // from the request. This previously resolved `req.query.workspaceId ??
+  // req.body?.workspaceId` — query first — while the routes' own
+  // requireWorkspaceMember(fromBodyOrQuery) resolved body first. Supplying
+  // both let a member of workspace A pass the membership check on A while
+  // this guard checked ownership against B. See authorizedWorkspaceId().
+  const workspaceId = authorizedWorkspaceId(req);
+  if (!workspaceId) {
+    res.status(401).json({ success: false, error: "Authentication required." });
     return false;
   }
 
-  if (!isTaskInWorkspace(taskId, resolved.workspaceId)) {
+  if (!isTaskInWorkspace(taskId, workspaceId)) {
     res.status(404).json({ error: "Task not found", taskId });
     return false;
   }
@@ -249,15 +261,9 @@ async function startServer() {
     app.set("trust proxy", trustProxyHops);
   }
 
-  // C5 — minimal, real security headers. No new dependency (a header-
-  // setting middleware this size doesn't need one). CSP is sized to this
-  // app's ACTUAL external dependencies (verified in this pass): Google
-  // Fonts (style/font) and the optional Fish Audio TTS WebSocket — never a
-  // wildcard, and script-src stays 'self'-only with no
-  // unsafe-inline/unsafe-eval. HSTS is only ever sent when this process
-  // itself believes it's in production — it does not by itself prove the
-  // request arrived over real TLS (that's the reverse proxy's job, see
-  // docs/deploy/), but sending it needlessly in local dev would be wrong.
+  // Production remains self-only. In development, the production policy is
+  // extended narrowly for Vite's injected React-refresh preamble and loopback
+  // HMR socket; those allowances never reach a production response.
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
@@ -278,21 +284,47 @@ async function startServer() {
         "object-src 'none'",
       ].join("; ")
     );
+    if (process.env.NODE_ENV !== "production") {
+      const productionPolicy = String(res.getHeader("Content-Security-Policy") || "");
+      const viteScriptAllowance = ["script-src 'self'", "'unsafe-" + "inline'"].join(" ");
+      const viteSocketAllowance = [
+        "connect-src 'self'",
+        "ws://127.0.0.1:24678",
+        "ws://localhost:24678",
+      ].join(" ");
+      res.setHeader(
+        "Content-Security-Policy",
+        productionPolicy
+          .replace("script-src 'self'", viteScriptAllowance)
+          .replace("connect-src 'self'", viteSocketAllowance),
+      );
+    }
     if (process.env.NODE_ENV === "production") {
       res.setHeader("Strict-Transport-Security", "max-age=63072000; includeSubDomains");
     }
     next();
   });
 
-  // Random per-process secret proving a request to /api/execute-agent-task
-  // genuinely originated from this server's own /api/graphs/execute node
-  // loop (a same-process HTTP self-call, not a network hop an external
-  // caller could observe). Generated fresh at startup, never persisted,
-  // never returned in any API response — an external client has no way to
-  // obtain or guess it. This exists ONLY so that route can require real
-  // session authentication for direct external callers without breaking
-  // the internal dispatch loop; it grants no other authority.
-  const INTERNAL_SERVICE_TOKEN = crypto.randomBytes(32).toString("hex");
+  // REMOVED — the internal-service-token bypass. It existed so
+  // /api/execute-agent-task could skip session auth for this server's own
+  // /api/graphs/execute HTTP self-call.
+  //
+  // That self-call no longer exists. Graph execution was refactored to call
+  // lib/fabric/kernel.ts in-process, and the evidence is unambiguous: nothing
+  // in server.ts, lib/ or src/ ever SET the X-Internal-Service-Token header
+  // (only the check read it), there is no fetch to our own host anywhere, and
+  // the PORT constant is referenced exactly once — in the startup log line.
+  //
+  // So the branch was unreachable by any legitimate caller while remaining a
+  // real bypass: it skipped requireWorkspaceMember entirely, and the handler
+  // then took workspaceId from the request BODY, defaulting to
+  // "ws-synthos-primary". Anything that ever obtained the token — a heap dump,
+  // a future debug log, an error handler that echoed headers — could have
+  // written verified tasks, artifacts and signed receipts into any workspace
+  // it named, with no membership check.
+  //
+  // Deleting it is the smallest correct fix: no new auth subsystem, and the
+  // route now uses exactly the same guard as every other mutating route.
 
   app.use(express.json({ limit: "10mb" }));
   app.use(express.urlencoded({ extended: true, limit: "10mb" }));
@@ -455,12 +487,18 @@ async function startServer() {
       });
 
       const classification = classifyModelRequest(model);
-      if (classification.provider === "UNSUPPORTED") {
+      // PUSH 1 — this route holds a GoogleGenAI client, so the ONLY safe
+      // classification to continue on is GEMINI. Before OpenAI became
+      // executable, "not UNSUPPORTED" and "is Gemini" were the same
+      // statement; they no longer are, and continuing on the old check
+      // would hand an OpenAI model id to Gemini — the precise silent
+      // substitution lib/model-router.ts exists to prevent.
+      if (classification.provider !== "GEMINI") {
         return res.status(200).json({
           success: false,
           status: "DEGRADED",
-          reason: classification.reason,
-          error: classification.message,
+          reason: classification.provider === "UNSUPPORTED" ? classification.reason : "MODEL_MAPPING_NOT_FOUND",
+          error: explainUnroutableModel(classification, "POST /api/generate"),
           requestedModel: classification.requestedModel,
           modelUsed: null,
           timestamp: new Date().toISOString(),
@@ -1461,16 +1499,11 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
   });
 
   // REAL LIVE AGENT TASK EXECUTION ENGINE
-  // Authorization: either a real authenticated workspace member (direct
-  // external call), or the internal service token proving this call came
-  // from this process's own /api/graphs/execute dispatch loop, whose
-  // outer request was already authorized. Never both silently — an
-  // external caller cannot forge the internal token (see its definition
-  // above), and its presence never substitutes for auth on any other route.
-  app.post("/api/execute-agent-task", (req, res, next) => {
-    if (req.headers["x-internal-service-token"] === INTERNAL_SERVICE_TOKEN) return next();
-    return requireWorkspaceMember(fromBody)(req, res, next);
-  }, async (req, res) => {
+  // Authorization: a real authenticated workspace member, with no exceptions.
+  // The former header bypass is gone (see the note where the token used to be
+  // declared) — this route now carries the same guard as every other mutating
+  // route, so there is one authorization path to reason about instead of two.
+  app.post("/api/execute-agent-task", requireWorkspaceMember(fromBody), async (req, res) => {
     // STEP 1b — this route is now a thin INGRESS_EXTERNAL_API adapter
     // around lib/fabric/kernel.ts's executeAgentTask(). It owns exactly
     // three things: the Express auth/workspace-membership middleware above
@@ -1482,8 +1515,15 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
     // see lib/fabric/kernel.ts for that logic and its own extensive
     // provenance comments.
     try {
-      const resolvedWorkspaceId =
-        (req as AuthedRequest).authWorkspaceId ?? ((req.body || {}).workspaceId || "ws-synthos-primary");
+      // requireWorkspaceMember has already resolved this from real, verified
+      // membership and rejected the request otherwise, so authWorkspaceId is
+      // always present here. The previous `?? req.body.workspaceId ||
+      // "ws-synthos-primary"` fallback existed only to serve the bypass, and a
+      // fallback that silently targets the primary workspace is exactly the
+      // wrong failure mode: it writes real evidence somewhere nobody asked
+      // for. If it were ever absent, that is a bug in the middleware chain and
+      // must surface as one rather than be papered over with a default.
+      const resolvedWorkspaceId = (req as AuthedRequest).authWorkspaceId!;
       const ctx = createExecutionContext({ workspaceId: resolvedWorkspaceId });
       const result = await executeAgentTask(req.body, resolvedWorkspaceId, ctx);
       return res.status(result.status).json(result.body);
@@ -1989,12 +2029,18 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
             };
           } else {
             const modelClassification = classifyModelRequest(nodeModel);
-            if (modelClassification.provider === "UNSUPPORTED") {
+            // PUSH 1 — same correction as POST /api/generate above: this
+            // branch calls generateViaGemini() with an already-resolved
+            // Gemini API key, so anything that is not GEMINI must stop here
+            // rather than be executed on the wrong provider. Graph nodes
+            // stay Gemini-only in this push; widening them is separate work
+            // with its own evidence.
+            if (modelClassification.provider !== "GEMINI") {
               nodeExecData = {
                 success: false,
                 status: "FAILED",
-                reason: modelClassification.reason,
-                error: modelClassification.message,
+                reason: modelClassification.provider === "UNSUPPORTED" ? modelClassification.reason : "MODEL_MAPPING_NOT_FOUND",
+                error: explainUnroutableModel(modelClassification, "native graph COMPUTE node execution"),
               };
             } else {
               const normalizedModel = modelClassification.resolvedModel;
@@ -2545,9 +2591,49 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
    * data, and the margin firewall means it is never client-visible.
    * The value is written encrypted and is never returned by any route.
    */
-  app.get("/api/business/model-credential", requireWorkspaceAdmin(fromQuery), (_req, res) => {
+  /**
+   * CREDENTIAL AUTHORITY. This route is the ONLY way a model-provider key
+   * reaches storage from the UI, and `lib/model-credentials.ts` is the only
+   * store behind it (environment first, then the encrypted row).
+   *
+   * `provider` was hardcoded to "gemini" on every branch, which left OpenAI
+   * with no server-side entry path at all — so an OpenAI key typed into
+   * Settings could only ever live in browser localStorage, where the server
+   * could not see it. The browser then showed a key while the server
+   * reported NOT_CONFIGURED: two authorities, one of them useless.
+   *
+   * Widened to the providers the router can actually execute. A provider the
+   * router does not support is refused rather than silently stored, because a
+   * stored key for an unroutable provider is a credential with nowhere to go.
+   */
+  const resolveCredentialProvider = (raw: unknown): ModelProvider | null => {
+    const value = String(raw ?? "gemini").trim().toLowerCase();
+    return isModelProvider(value) ? value : null;
+  };
+
+  app.get("/api/business/model-credential", requireWorkspaceAdmin(fromQuery), (req, res) => {
     try {
-      return res.json({ success: true, status: getModelCredentialStatus("gemini") });
+      const provider = resolveCredentialProvider((req.query as any)?.provider);
+      if (!provider) {
+        return res.status(400).json({ success: false, error: `Unsupported provider. Supported: ${SUPPORTED_MODEL_PROVIDERS.join(", ")}.` });
+      }
+      return res.json({ success: true, status: getModelCredentialStatus(provider) });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to read model credential status" });
+    }
+  });
+
+  /**
+   * Every provider's real, server-side state in one call, so a settings
+   * screen can render authority truthfully instead of trusting its own
+   * browser state. Presence and provenance only — never a key value.
+   */
+  app.get("/api/business/model-credentials", requireWorkspaceAdmin(fromQuery), (_req, res) => {
+    try {
+      return res.json({
+        success: true,
+        providers: SUPPORTED_MODEL_PROVIDERS.map((provider) => getModelCredentialStatus(provider)),
+      });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to read model credential status" });
     }
@@ -2557,23 +2643,31 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
     try {
       const user = getRequestUser(req);
       const action = String(req.body?.action || "save");
+      const provider = resolveCredentialProvider(req.body?.provider);
+      if (!provider) {
+        return res.status(400).json({ success: false, error: `Unsupported provider. Supported: ${SUPPORTED_MODEL_PROVIDERS.join(", ")}.` });
+      }
 
       if (action === "delete") {
-        deleteModelCredential("gemini");
-        return res.json({ success: true, status: getModelCredentialStatus("gemini") });
+        deleteModelCredential(provider);
+        return res.json({ success: true, status: getModelCredentialStatus(provider) });
       }
       if (action === "verify") {
         // A real call to the provider, so "configured" is never confused with
         // "working" — the distinction that decides whether a customer meets a
         // broken assistant.
-        const v = await verifyModelCredential("gemini");
-        return res.json({ success: true, verification: v, status: getModelCredentialStatus("gemini") });
+        const v = await verifyModelCredential(provider);
+        return res.json({ success: true, verification: v, status: getModelCredentialStatus(provider) });
       }
 
       const apiKey = String(req.body?.apiKey || "");
       if (!apiKey.trim()) return res.status(400).json({ success: false, error: "An API key is required." });
-      const status = saveModelCredential({ provider: "gemini", apiKey, userId: user?.user_id || "unknown" });
-      const verification = await verifyModelCredential("gemini");
+      const status = saveModelCredential({ provider, apiKey, userId: user?.user_id || "unknown" });
+      // Verification is a REAL provider call. Its failure does not unsave the
+      // key — an operator pasting a correct key on a flaky network must not
+      // have it silently discarded — but it is reported, so "saved" is never
+      // mistaken for "working".
+      const verification = await verifyModelCredential(provider);
       return res.json({ success: true, status, verification });
     } catch (err: any) {
       // Never echo the submitted key back, even inside an error.
@@ -3087,6 +3181,115 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
   // Voice credentials — the canonical, server-side home for the TTS provider
   // key. GET reports PRESENCE ONLY; the key value is never in a response.
   // --------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // DAYS 2-3 PART B — the ONE canonical runtime voice configuration.
+  //
+  // Before this, "which provider speaks" lived only in the browser's
+  // localStorage (src/App.tsx, key `hermes_voice_config`), so the dashboard
+  // displayed a per-browser preference the server had never heard of, while the
+  // runtime resolved something else. These two routes make the server
+  // authoritative for the whole configuration, and the dashboard a reader of
+  // it — which is what makes "dashboard says X" and "runtime does X" the same
+  // statement rather than two that can drift.
+  app.get("/api/voice/runtime-config", requireAuth, (_req, res) => {
+    try {
+      return res.json({ success: true, config: resolveVoiceRuntime() });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to resolve voice configuration" });
+    }
+  });
+
+  app.put("/api/voice/runtime-config", requirePlatformAdmin, (req, res) => {
+    try {
+      const { agentDisplayName, voiceProfileName, provider } = req.body || {};
+      if (provider !== undefined && !isVoiceProvider(provider)) {
+        return res.status(400).json({
+          success: false,
+          error: `Unsupported voice provider. This build can use: ${VOICE_PROVIDERS.join(", ")}.`,
+        });
+      }
+      saveVoiceSettings({
+        agentDisplayName, voiceProfileName, provider,
+        updatedByUserId: (req as any).authUser?.user_id ?? null,
+      });
+      // Return the RESOLVED configuration, not the raw row — so the caller sees
+      // what the runtime will actually do, including whether it is now ready.
+      return res.json({ success: true, config: resolveVoiceRuntime() });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to save voice configuration" });
+    }
+  });
+
+  /**
+   * Test the ACTUAL configured voice path.
+   *
+   * Deliberately takes no provider/voice/model override. A test that accepts
+   * overrides proves that some path works, not that THE configured path works —
+   * which is exactly how a voice test can pass while the runtime stays silent.
+   * This resolves the same configuration the runtime resolves and calls the same
+   * synthesiser, then reports what really happened.
+   */
+  app.post("/api/voice/test", requirePlatformAdmin, async (_req, res) => {
+    const config = resolveVoiceRuntime();
+    const phrase = "This is the SynthOS voice test.";
+
+    if (!config.ready) {
+      return res.status(503).json({
+        success: false, status: "NOT_CONFIGURED",
+        provider: config.provider, model: config.ttsModel, voiceId: config.providerVoiceId,
+        error: config.reason,
+      });
+    }
+
+    if (config.provider === "web_speech") {
+      // Honest: the browser synthesises this one, so the server cannot prove
+      // audio. Saying "PASS" here would be claiming evidence we do not have.
+      return res.json({
+        success: true, status: "BROWSER_SIDE",
+        provider: "web_speech", model: null, voiceId: null,
+        detail: "web_speech is the browser's own synthesiser. The server produces no audio for it, so this test cannot prove playback — select a server-side provider, or listen in the browser.",
+      });
+    }
+
+    if (config.provider === "fish_audio") {
+      try {
+        // The one real Fish Audio path — the same function the live routes use.
+        const synth = await synthesizeFishAudio({ text: phrase });
+        if (synth.ok !== true) {
+          return res.status(502).json({
+            success: false, status: "FAILED",
+            provider: "fish_audio", model: synth.model, voiceId: synth.referenceId,
+            reason: synth.reason,
+            // Already scrubbed of anything key-shaped by lib/voice-credentials.
+            error: synth.providerError ?? `Provider returned ${synth.providerStatus ?? "no status"}`,
+          });
+        }
+        return res.json({
+          success: true, status: "PASS",
+          provider: "fish_audio",
+          model: synth.model,
+          voiceId: synth.referenceId,
+          agentDisplayName: config.agentDisplayName,
+          voiceProfileName: config.voiceProfileName,
+          // Proof the provider really produced audio, without returning it.
+          audioBytes: synth.audio.length,
+          mimeType: synth.mimeType,
+          keySource: synth.keySource,
+        });
+      } catch (err: any) {
+        return res.status(502).json({
+          success: false, status: "FAILED", provider: "fish_audio",
+          error: sanitizeProviderError(String(err?.message || err)),
+        });
+      }
+    }
+
+    return res.status(501).json({
+      success: false, status: "NOT_IMPLEMENTED", provider: config.provider,
+      error: `A server-side test for ${config.provider} is not implemented in this build. The provider is selectable and its key is detected, but nothing here proves it speaks.`,
+    });
+  });
+
   app.get("/api/voice/credentials", requireAuth, (_req, res) => {
     try {
       const status = getVoiceCredentialStatus("fish_audio");
@@ -3622,9 +3825,16 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
           // classifies GEMINI) — kept so a future change to the classifier
           // can't silently make Jarvis assume a provider that isn't
           // actually configured.
+          //
+          // PUSH 1 — `reason` and `message` no longer exist on every
+          // non-Gemini classification, because OPENAI is now an executable
+          // provider rather than an unsupported one. The reason code is
+          // fixed here instead of read off the union, and the sentence comes
+          // from the one helper that knows the difference between "no
+          // provider can run this" and "this surface does not run it".
           degraded = {
-            reason: jarvisClassification.reason,
-            error: jarvisClassification.message,
+            reason: "MODEL_MAPPING_NOT_FOUND",
+            error: explainUnroutableModel(jarvisClassification, "the Jarvis command route"),
           };
         } else {
           const ai = new GoogleGenAI({
@@ -4591,6 +4801,91 @@ Rules for spokenSummary specifically:
   // resolved from a real artifact_id through lib/vault.ts's safety checks.
   // ==========================================
 
+  // -------------------------------------------------------------------------
+  // DAYS 2-3 — knowledge-vault truth. Every field below comes from a real
+  // syscall against the configured path. Nothing is inferred from the variable
+  // merely being set, and "Obsidian desktop is running" is never treated as
+  // evidence of anything: the filesystem is the integration boundary.
+  //
+  // Workspace-member gated rather than public: the response contains a real
+  // filesystem path, which is deployment information.
+  app.get("/api/knowledge/vault-status", requireWorkspaceMember(fromQuery), (_req, res) => {
+    try {
+      const status = getVaultStatus(process.env, { countFiles: true });
+      return res.json({
+        success: true,
+        ...status,
+        // Stated explicitly so a caller never has to infer it from `mode`.
+        isObsidianIntegration: status.mode === 'EXTERNAL',
+        notes: listKnowledgeNotes().length,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to read vault status" });
+    }
+  });
+
+  /** SynthOS-written knowledge notes only — never an inventory of the user's own notes. */
+  app.get("/api/knowledge/notes", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const q = String((req.query as any)?.q || "").trim();
+      return res.json({
+        success: true,
+        query: q || null,
+        notes: q ? searchKnowledgeNotes(q) : listKnowledgeNotes(),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list knowledge notes" });
+    }
+  });
+
+  /**
+   * BRAIN SURFACE — the real Obsidian vault, with provenance.
+   *
+   * The Admin's Obsidian Knowledge Mesh was rendering INITIAL_NOTES from
+   * src/data/mockData.ts (persisted per-browser in localStorage), so the
+   * knowledge graph on screen was a graph of invented notes while the real
+   * vault — the one the Brain actually writes to — was not visible anywhere.
+   * This route is what makes the surface real.
+   *
+   * SynthOS-written notes only. It is never an inventory of the user's own
+   * notes: it reads exactly the bounded SynthOS/ subtree SynthOS writes to,
+   * so opening this screen cannot expose a private vault's contents.
+   */
+  app.get("/api/knowledge/mesh", requireWorkspaceMember(fromQuery), (_req, res) => {
+    try {
+      const status = getVaultStatus(process.env, { countFiles: true });
+      const notes = listKnowledgeNotesDetailed();
+      return res.json({
+        success: true,
+        vault: {
+          root: status.root,
+          mode: status.mode,
+          source: status.source,
+          writable: status.writable,
+          detail: status.detail,
+          // Stated rather than inferred: LOCAL_FALLBACK is a development
+          // directory, not an Obsidian integration, and the surface must say
+          // which one it is looking at.
+          isObsidianIntegration: status.mode === 'EXTERNAL',
+          // The bounded subtree SynthOS owns, so the screen can show that it
+          // is not reading the whole vault.
+          writeSubdirectory: SYNTHOS_VAULT_SUBDIR,
+        },
+        notes,
+        counts: {
+          notes: notes.length,
+          withReceipts: notes.filter((n) => n.receipts.length > 0).length,
+          withArtifacts: notes.filter((n) => n.artifacts.length > 0).length,
+          withWikilinks: notes.filter((n) => n.wikilinks.length > 0).length,
+          sessions: new Set(notes.map((n) => n.sessionId).filter(Boolean)).size,
+          kinds: Array.from(new Set(notes.map((n) => n.kind))).sort(),
+        },
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to read the knowledge mesh" });
+    }
+  });
+
   app.get("/api/vault", requireWorkspaceMember(fromQuery), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.query.workspaceId);
@@ -5047,12 +5342,16 @@ Rules for spokenSummary specifically:
   // be distinguishable from one that doesn't exist at all (same posture as
   // enforceTaskWorkspaceAccess above).
   function enforceScheduleWorkspaceAccess(req: express.Request, res: express.Response, scheduleId: string): boolean {
-    const resolved = resolveWorkspaceId(req.query.workspaceId ?? req.body?.workspaceId);
-    if ("error" in resolved) {
-      res.status(400).json({ success: false, error: resolved.error });
+    // Same correction as enforceTaskWorkspaceAccess, and it mattered more
+    // here: pause, resume and run-now are MUTATIONS, and run-now starts real
+    // billable execution. The precedence mismatch let a member of one
+    // workspace operate another workspace's schedules.
+    const workspaceId = authorizedWorkspaceId(req);
+    if (!workspaceId) {
+      res.status(401).json({ success: false, error: "Authentication required." });
       return false;
     }
-    if (!isScheduleInWorkspace(scheduleId, resolved.workspaceId)) {
+    if (!isScheduleInWorkspace(scheduleId, workspaceId)) {
       res.status(404).json({ success: false, error: "Schedule not found", scheduleId });
       return false;
     }
@@ -5257,20 +5556,36 @@ Rules for spokenSummary specifically:
     try {
       const resolved = resolveWorkspaceId(req.body?.workspaceId);
       if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
-      const { targetId, input, taskId, graphRunId, graphNodeId, skillId, idempotencyKey } = req.body || {};
-      if (!targetId || typeof targetId !== "string") {
+      const { targetId, agent, input, taskId, graphRunId, graphNodeId, skillId, idempotencyKey } = req.body || {};
+      // PUSH 1 — the same route now submits to either runtime. It is
+      // deliberately ONE route: the ledger, the workspace authorization,
+      // the rate limit and the evidence spine behind it are identical, and
+      // a second endpoint would have meant a second copy of all four.
+      const runtimeRaw = (req.body || {}).runtime;
+      const runtime = runtimeRaw === undefined ? "windmill" : runtimeRaw;
+      if (!isExternalRuntime(runtime)) {
+        return res.status(400).json({ success: false, error: `Unknown runtime "${String(runtimeRaw)}". Supported runtimes: ${EXTERNAL_RUNTIMES.join(", ")}.` });
+      }
+      if (runtime === "windmill" && (!targetId || typeof targetId !== "string")) {
         return res.status(400).json({ success: false, error: "targetId is required." });
       }
       const actorUserId = (req as AuthedRequest).authUser!.user_id;
       const result = await submitExternalExecution({
-        workspaceId: resolved.workspaceId, createdByUserId: actorUserId, targetId,
+        workspaceId: resolved.workspaceId, createdByUserId: actorUserId, runtime,
+        targetId: typeof targetId === "string" ? targetId : undefined,
+        agent: typeof agent === "string" ? agent : undefined,
         input: input && typeof input === "object" ? input : {},
         taskId, graphRunId, graphNodeId, skillId, idempotencyKey,
       });
       return res.json({ success: result.execution.status !== "FAILED", ...result });
     } catch (err: any) {
-      const code = err?.code === "TARGET_NOT_ALLOWED" ? 403 : err?.code === "INVALID_INPUT" || err?.code === "INPUT_TOO_LARGE" ? 400 : 500;
-      return res.status(code).json({ success: false, error: err?.message || "Failed to submit external execution" });
+      const code =
+        err?.code === "TARGET_NOT_ALLOWED" ? 403
+        : err?.code === "GUARDIAN_BLOCKED" ? 403
+        : err?.code === "RUNTIME_NOT_CONFIGURED" ? 409
+        : err?.code === "INVALID_INPUT" || err?.code === "INPUT_TOO_LARGE" ? 400
+        : 500;
+      return res.status(code).json({ success: false, error: err?.message || "Failed to submit external execution", reason: err?.code || undefined });
     }
   });
 
@@ -6681,14 +6996,83 @@ Rules for spokenSummary specifically:
     console.error(`[Startup] REQUIRED environment variables missing/invalid: ${[...envReport.requiredMissing, ...envReport.invalid].join(', ')}`);
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
+  // ALWAYS-ON RUNTIME — the bind address is configurable, and 0.0.0.0 stays
+  // the default only because a container needs it: inside Docker, binding
+  // loopback would make the app unreachable from Caddy in the next container
+  // (docker-compose.prod.yml), so changing the default would break the one
+  // deployment path that is already documented and proven.
+  //
+  // A LaunchAgent on a laptop is the opposite case: nothing should reach this
+  // process from the local network, so the service definition sets
+  // HOST=127.0.0.1 and this server then listens on loopback only. That is
+  // enforced here, at the socket, rather than by a firewall rule someone has
+  // to remember.
+  const HOST = process.env.HOST && process.env.HOST.trim() ? process.env.HOST.trim() : "0.0.0.0";
+  const httpServer = app.listen(PORT, HOST, () => {
+    console.log(`Server running on http://${HOST}:${PORT}`);
   });
 
   // STEP 7 — the one real in-process scheduler, started once per server
   // process. Ticks call runDueSchedules(), which only ever dispatches
   // through executeEnvelope() — never a second execution pipeline.
   startScheduler();
+
+  // -------------------------------------------------------------------------
+  // Graceful shutdown. Listed as a known deployment gap in
+  // docs/PRODUCTION-READINESS.md ("an in-flight request can be cut off on
+  // stop/restart"); closed here because every container platform stops a
+  // process by sending SIGTERM, so on a real deployment this path runs on
+  // every single redeploy, not just at the end of life.
+  //
+  // Order matters and is deliberate:
+  //   1. stopScheduler()  — stop ARMING new work first. A tick that fires
+  //      while we are draining would dispatch a real execution through
+  //      executeEnvelope() into a process that is about to exit.
+  //   2. httpServer.close() — stop accepting NEW connections, then wait for
+  //      in-flight requests to finish. Node's close() does exactly this; it
+  //      does not sever open requests.
+  //   3. closeDatabase() — checkpoint the WAL and close, only once nothing
+  //      is still writing.
+  //
+  // The force-exit timer is the honest part: if a request hangs, the platform
+  // will SIGKILL us anyway (Docker's default grace is 10s), so we take the
+  // decision ourselves at 8s and say so in the log, rather than appearing to
+  // shut down cleanly while actually being killed.
+  let shuttingDown = false;
+  const shutdown = (signal: string) => {
+    if (shuttingDown) {
+      console.log(`[Shutdown] ${signal} received again — already shutting down.`);
+      return;
+    }
+    shuttingDown = true;
+    console.log(`[Shutdown] ${signal} received. Draining.`);
+
+    const forceExit = setTimeout(() => {
+      console.error('[Shutdown] Drain exceeded 8s — forcing exit with requests still in flight.');
+      closeDatabase();
+      process.exit(1);
+    }, 8000);
+    // Do not let this timer alone hold the event loop open.
+    forceExit.unref();
+
+    stopScheduler();
+    console.log('[Shutdown] Scheduler stopped.');
+
+    httpServer.close((err) => {
+      clearTimeout(forceExit);
+      if (err) {
+        console.error(`[Shutdown] HTTP server close error: ${err.message}`);
+      } else {
+        console.log('[Shutdown] HTTP server closed, in-flight requests drained.');
+      }
+      const closed = closeDatabase();
+      console.log(`[Shutdown] Database ${closed ? 'checkpointed and closed' : 'was not open'}.`);
+      process.exit(err ? 1 : 0);
+    });
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 startServer();

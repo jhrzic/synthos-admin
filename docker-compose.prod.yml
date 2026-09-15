@@ -1,0 +1,99 @@
+# SynthOS Admin — production deployment: the app behind Caddy, with real TLS.
+#
+# WHY THIS FILE EXISTS, SEPARATELY FROM docker-compose.yml
+#
+# docker-compose.yml publishes the app on :3000 over plain HTTP. That is correct
+# for local use and useless for a customer: the Business Conversation AI is
+# installed by pasting a <script> tag into the customer's own https website, and
+# every browser blocks an http widget on an https page as mixed content. So an
+# http deployment is not "production without a certificate" — it is a product
+# that cannot be installed at all. This file is the smallest configuration that
+# produces a real, publicly reachable https origin.
+#
+# WHY A VOLUME-BACKED HOST, AND NOT NETLIFY / VERCEL / CLOUD RUN
+#
+# This app keeps durable state on a filesystem: the SQLite database in WAL mode,
+# the Vault artifacts, the Ed25519 receipt-signing keypair, and backups. A
+# serverless platform gives each invocation an ephemeral filesystem, so on those
+# platforms the database, the signed receipts and the customer's knowledge would
+# not survive. That is a storage-model constraint, not a preference — it rules
+# out Netlify and Vercel regardless of account or plan. Any host that gives you a
+# persistent disk works: a $6–12/mo VPS, a GCE/EC2 VM, Fly.io with a volume,
+# Render with a disk.
+#
+# USAGE
+#   1. Point an A record at this host:   admin.your-domain.com -> <this host's IP>
+#   2. cp .env.example .env   and fill in what you use
+#   3. Add to .env:
+#        SYNTHOS_DOMAIN=admin.your-domain.com
+#        [email protected]
+#        PUBLIC_BASE_URL=https://admin.your-domain.com
+#        TRUST_PROXY_HOPS=1
+#   4. docker compose -f docker-compose.prod.yml up -d --build
+#   5. curl https://admin.your-domain.com/health
+#
+# Caddy obtains and renews a real Let's Encrypt certificate on first start. It
+# needs ports 80 and 443 reachable from the internet to do so — if the ACME
+# challenge cannot reach this host, TLS will not be issued and the site will not
+# serve. That is the single most common cause of a failed first deploy.
+
+services:
+  synthos-admin:
+    build: .
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      # Exactly one proxy hop (Caddy) sits in front, so the app trusts exactly
+      # one. Trusting more would let a client forge its own X-Forwarded-For and
+      # defeat per-IP rate limiting; trusting none makes every request look like
+      # it came from Caddy and makes the app believe it is serving plain http.
+      TRUST_PROXY_HOPS: "1"
+    # Deliberately NOT published to the host. The app is reachable only through
+    # Caddy on the internal compose network, so there is no way to bypass TLS by
+    # hitting :3000 directly.
+    expose:
+      - "3000"
+    volumes:
+      - synthos-data:/app/data
+      - synthos-vault:/app/vault
+      - synthos-backups:/app/backups
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
+    # Give the app time to drain in-flight requests on redeploy. The server
+    # handles SIGTERM (stop scheduler -> close HTTP -> checkpoint WAL -> exit)
+    # and force-exits itself at 8s, so 20s is comfortably more than it needs and
+    # means Docker never has to SIGKILL it mid-write.
+    stop_grace_period: 20s
+
+  caddy:
+    image: caddy:2-alpine
+    depends_on:
+      - synthos-admin
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      # Read by Caddyfile.prod via {$SYNTHOS_DOMAIN}. No domain is hardcoded.
+      SYNTHOS_DOMAIN: "${SYNTHOS_DOMAIN:?set SYNTHOS_DOMAIN in .env, e.g. admin.your-domain.com}"
+      SYNTHOS_ACME_EMAIL: "${SYNTHOS_ACME_EMAIL:?set SYNTHOS_ACME_EMAIL in .env — Let's Encrypt requires a contact address}"
+    volumes:
+      - ./docs/deploy/Caddyfile.prod:/etc/caddy/Caddyfile:ro
+      # Certificates and ACME account keys. Without this volume every restart
+      # re-requests a certificate and will hit Let's Encrypt's rate limit.
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+volumes:
+  synthos-data:
+  synthos-vault:
+  synthos-backups:
+  caddy-data:
+  caddy-config:

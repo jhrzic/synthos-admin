@@ -50,6 +50,39 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
 }
 
 /** Extracts a caller-requested workspace id from the usual places — never itself proof of access. */
+/**
+ * The workspace this request is ACTUALLY authorized for.
+ *
+ * Why this exists, because it closed two real holes:
+ *
+ * server.ts had two ownership guards — enforceTaskWorkspaceAccess and
+ * enforceScheduleWorkspaceAccess — that each re-derived the workspace from
+ * caller input as `req.query.workspaceId ?? req.body?.workspaceId`, i.e.
+ * QUERY first. The middleware that had just verified membership used
+ * `fromBodyOrQuery` / `fromBody`, i.e. BODY first.
+ *
+ * Opposite precedence over two attacker-controlled inputs is a bypass. A
+ * caller who is a member of workspace A and knows a resource id in workspace
+ * B could send `body.workspaceId = A` (membership verified, request allowed)
+ * together with `?workspaceId=B` (ownership checked against B, resource
+ * found) and the guard would pass for a resource it should have refused.
+ *
+ * On five task routes that leaked another workspace's tasks, activity,
+ * artifacts, quality reviews and receipts. On three schedule routes it was a
+ * MUTATION — pause, resume and run-now, the last of which triggers real
+ * billable execution in a workspace the caller has no membership in.
+ *
+ * The fix is to stop re-deriving it. requireWorkspaceMember/Admin already
+ * resolved and VERIFIED a workspace and recorded it on the request; that
+ * value is the only one an ownership check may use. Returns null only when no
+ * auth middleware ran, which a guarded route must treat as a failure rather
+ * than falling back to anything the caller sent.
+ */
+export function authorizedWorkspaceId(req: Request): string | null {
+  const authed = (req as AuthedRequest).authWorkspaceId;
+  return typeof authed === 'string' && authed.trim().length > 0 ? authed : null;
+}
+
 export const fromBody = (req: Request) => (req.body as any)?.workspaceId;
 export const fromQuery = (req: Request) => req.query?.workspaceId;
 export const fromBodyOrQuery = (req: Request) => (req.body as any)?.workspaceId ?? req.query?.workspaceId;

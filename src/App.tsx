@@ -109,6 +109,12 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
       const saved = localStorage.getItem(LAST_WORKSPACE_STORAGE_KEY);
       if (saved && authorizedWorkspaces.some((w) => w.workspace_id === saved)) return saved;
     } catch { /* localStorage unavailable — fall through */ }
+    // Prefer the primary workspace over "whichever came back first".
+    // authorizedWorkspaces[0] was the Isolation Test Workspace on this
+    // install, so a first-time load landed on an empty test workspace and
+    // every counter read 0 — correct for that workspace, and indistinguishable
+    // from a broken dashboard.
+    if (authorizedWorkspaces.some((w) => w.workspace_id === 'ws-synthos-primary')) return 'ws-synthos-primary';
     return authorizedWorkspaces[0]?.workspace_id || 'ws-synthos-primary';
   });
 
@@ -196,8 +202,21 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
         fishAudioConfig: safeSettings.fishAudioConfig
           ? { ...safeSettings.fishAudioConfig, apiKey: undefined }
           : safeSettings.fishAudioConfig,
+        // Only fish_audio was stripped here, so every OTHER provider key typed
+        // into Settings was still written to browser storage in plaintext —
+        // including openai, which the server never received. The browser then
+        // displayed a configured key while the server reported NOT_CONFIGURED.
+        //
+        // Stripped by an allowlist of NON-secret fields rather than a blocklist
+        // of secret ones: a blocklist silently leaks the next provider anyone
+        // adds, which is exactly how openai slipped through.
         customApiKeys: safeSettings.customApiKeys
-          ? { ...safeSettings.customApiKeys, fish_audio: undefined }
+          ? Object.fromEntries(
+              Object.entries(safeSettings.customApiKeys).map(([provider, value]) => [
+                provider,
+                value === 'SERVER_MANAGED_KEY' ? value : undefined,
+              ]),
+            )
           : safeSettings.customApiKeys,
       };
       localStorage.setItem('hermes_jarvis_settings', JSON.stringify(redacted));
@@ -261,24 +280,156 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
       .catch(() => { /* retried on next load */ });
   }, []);
 
-  const [voiceConfig, setVoiceConfig] = useState<any>(() => {
-    try {
-      const saved = localStorage.getItem('hermes_voice_config');
-      if (saved) return JSON.parse(saved);
-    } catch (e) {}
-    return {
-      provider: 'web_speech',
-      apiKey: '',
-      voiceId: '',
-      speed: 1.0,
+  // ---------------------------------------------------------------------
+  // One-time migration of a MODEL-PROVIDER key that an earlier build saved
+  // into browser storage. Same shape as the Fish Audio migration above, and
+  // for the same reason: the browser must never be an authority on a
+  // credential the server is the one that has to use.
+  //
+  // Only providers the router can execute are migrated. A key for a provider
+  // with no execution mapping is scrubbed rather than stored, because keeping
+  // it would preserve the ambiguity this migration exists to remove — and
+  // storing it would imply a capability that does not exist.
+  //
+  // The scrub happens only after the server confirms the save, so a failed
+  // request leaves the value in place to retry on the next load rather than
+  // destroying the only copy.
+  // ---------------------------------------------------------------------
+  useEffect(() => {
+    const MIGRATION_FLAG = 'synthos_model_credential_migrated';
+    if (localStorage.getItem(MIGRATION_FLAG) === 'done') return;
+
+    const MIGRATABLE = ['openai', 'gemini'];
+    const STORE_KEY = 'hermes_jarvis_settings';
+
+    const scrubModelKeys = () => {
+      try {
+        const raw = localStorage.getItem(STORE_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed?.customApiKeys) {
+            for (const provider of Object.keys(parsed.customApiKeys)) {
+              if (parsed.customApiKeys[provider] !== 'SERVER_MANAGED_KEY') {
+                delete parsed.customApiKeys[provider];
+              }
+            }
+          }
+          localStorage.setItem(STORE_KEY, JSON.stringify(parsed));
+        }
+      } catch { /* best effort */ }
+      localStorage.setItem(MIGRATION_FLAG, 'done');
     };
+
+    let found: Array<{ provider: string; apiKey: string }> = [];
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      const keys = parsed?.customApiKeys || {};
+      found = MIGRATABLE
+        .map((provider) => ({ provider, apiKey: String(keys[provider] || '').trim() }))
+        .filter((e) => e.apiKey && e.apiKey !== 'SERVER_MANAGED_KEY');
+    } catch { /* ignore */ }
+
+    if (found.length === 0) {
+      // Nothing to migrate. Still scrub, so a non-migratable provider's key
+      // does not sit in browser storage forever.
+      scrubModelKeys();
+      return;
+    }
+
+    Promise.all(
+      found.map((entry) =>
+        fetch('/api/business/model-credential', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            workspaceId: activeWorkspaceId,
+            provider: entry.provider,
+            apiKey: entry.apiKey,
+          }),
+        }).then((res) => res.ok),
+      ),
+    )
+      .then((results) => { if (results.every(Boolean)) scrubModelKeys(); })
+      .catch(() => { /* retried on next load */ });
+  }, [activeWorkspaceId]);
+
+  // DAYS 2-3 PART B — voice configuration is SERVER state, not browser state.
+  //
+  // This used to initialise from localStorage['hermes_voice_config'] and write
+  // back to it, which is precisely what produced the CLI-vs-dashboard mismatch:
+  // the dashboard showed a per-browser preference the server had never heard
+  // of, defaulting to 'web_speech', while the runtime resolved its provider,
+  // voice and model from the server-side store. Two browsers disagreed with
+  // each other and both disagreed with the runtime.
+  //
+  // The server is now authoritative (GET/PUT /api/voice/runtime-config). This
+  // state is a CACHE of that, hydrated on load — never the source. `speed` is
+  // the one genuinely client-side value (it is a playback preference, not
+  // runtime configuration) and remains local.
+  const [voiceConfig, setVoiceConfig] = useState<any>({
+    provider: 'web_speech',
+    voiceId: '',
+    model: '',
+    speed: 1.0,
+    loaded: false,
   });
 
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/voice/runtime-config', { credentials: 'same-origin' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled || !d?.success) return;
+        const c = d.config;
+        setVoiceConfig((prev: any) => ({
+          ...prev,
+          provider: c.provider,
+          voiceId: c.providerVoiceId || '',
+          model: c.ttsModel || '',
+          agentDisplayName: c.agentDisplayName,
+          voiceProfileName: c.voiceProfileName,
+          ready: c.ready,
+          reason: c.reason,
+          loaded: true,
+        }));
+      })
+      .catch(() => { /* the UI keeps the honest web_speech default */ });
+    return () => { cancelled = true; };
+  }, []);
+
   const handleUpdateVoiceConfig = (newConfig: any) => {
-    setVoiceConfig(newConfig);
-    try {
-      localStorage.setItem('hermes_voice_config', JSON.stringify(newConfig));
-    } catch (e) {}
+    // Optimistic locally, authoritative on the server: the response replaces
+    // local state, so what is displayed is always what the server resolved —
+    // including a provider that was rejected or is not ready.
+    setVoiceConfig((prev: any) => ({ ...prev, ...newConfig }));
+    fetch('/api/voice/runtime-config', {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: newConfig.provider,
+        agentDisplayName: newConfig.agentDisplayName,
+        voiceProfileName: newConfig.voiceProfileName,
+      }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d?.success) return;
+        const c = d.config;
+        setVoiceConfig((prev: any) => ({
+          ...prev,
+          provider: c.provider,
+          voiceId: c.providerVoiceId || '',
+          model: c.ttsModel || '',
+          agentDisplayName: c.agentDisplayName,
+          voiceProfileName: c.voiceProfileName,
+          ready: c.ready,
+          reason: c.reason,
+          loaded: true,
+        }));
+      })
+      .catch(() => { /* leave the optimistic value; the next load re-reads truth */ });
   };
   
   // Mission Control Specialized State with local persistence
@@ -1364,11 +1515,12 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
   const activeWorkspaceType = getWorkspaceFromTab(activeTab);
 
   return (
-    <div className="min-h-screen bg-[#05060A] text-[#F3F4F9] flex flex-col selection:bg-[#615EFF] selection:text-white font-['Plus_Jakarta_Sans',sans-serif]">
+    <div className="min-h-screen bg-[#08090b] text-[#f7f8f8] flex flex-col selection:bg-[#7170ff]/50 selection:text-white font-sans">
       {/* Airbyte / Hermes Mission Control Header */}
       <AirbyteHeader
         activeTab={activeTab}
         setActiveTab={setActiveTab}
+        activeWorkspaceName={authorizedWorkspaces.find((w) => w.workspace_id === activeWorkspaceId)?.workspace_name}
         obsidianSyncStatus="ONLINE (4 VAULTS)"
         botModeActive={botTasks.some(t => t.status === 'running')}
         onOpenQuickPrompt={() => setIsCommandPaletteOpen(true)}
@@ -1410,7 +1562,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
             />
           )}
 
-          <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 overflow-y-auto overflow-x-hidden">
+          <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 overflow-y-auto overflow-x-hidden bg-radial-vignette">
           {/* Pass VIII / Workstream W — one Suspense boundary around the
               whole tab-content area. Only ever one {activeTab === 'x' &&
               <X/>} block renders at a time, so this is a standard, safe
@@ -1730,6 +1882,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
             <ClaudeArtifactsView
               models={models}
               onSendQuery={handleSendQuery}
+              activeWorkspaceId={activeWorkspaceId}
             />
           )}
 
@@ -1875,6 +2028,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
             <ClaudeArtifactsView
               models={models}
               onSendQuery={handleSendQuery}
+              activeWorkspaceId={activeWorkspaceId}
             />
           )}
 
@@ -2115,6 +2269,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
             <SettingsView
               settings={jarvisSettings}
               onUpdateSettings={handleUpdateJarvisSettings}
+              activeWorkspaceId={activeWorkspaceId}
             />
           )}
           </Suspense>

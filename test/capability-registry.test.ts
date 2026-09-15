@@ -66,22 +66,69 @@ describe('windmill.job: status derived from real WINDMILL_* env presence', () =>
   });
 });
 
-describe('hermes.execute: the stub never reports AVAILABLE, regardless of connectivity config', () => {
-  it('UNSUPPORTED even with HERMES_ADAPTER_BASE_URL unset', async () => {
-    await withEnv({ HERMES_ADAPTER_BASE_URL: undefined }, async () => {
-      const cap = await resolveCapability('hermes.execute');
-      expect(cap?.status).not.toBe('AVAILABLE');
-      expect(['NOT_CONFIGURED', 'UNSUPPORTED']).toContain(cap?.status);
-    });
-  });
+// UPDATED 2026-09-15. This block used to assert UNSUPPORTED on the grounds
+// that "execute() itself has no real contract". That premise was about
+// src/services/hermesAdapter.ts's REST contract and is still true of THAT
+// adapter — but Hermes on this host is a CLI, and lib/hermes-local-runtime.ts
+// now dispatches through it for real, so a blanket UNSUPPORTED would now be
+// the false statement.
+//
+// The block's real intent is preserved and sharpened: availability must come
+// from the CLI actually answering plus an explicit opt-in — NEVER from the
+// REST adapter's connectivity variables, and never from merely finding a
+// binary on disk.
+describe('hermes.execute: availability comes from the real CLI and an explicit opt-in, never from adapter config', () => {
+  /** A stand-in for `hermes` so these assertions do not depend on the host. */
+  function fakeCli(body: string): string {
+    const p = path.join(os.tmpdir(), `fake-hermes-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    fs.writeFileSync(p, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    return p;
+  }
 
-  it('still UNSUPPORTED (never AVAILABLE) even if HERMES_ADAPTER_BASE_URL were configured, because execute() itself has no real contract', async () => {
-    await withEnv({ HERMES_ADAPTER_BASE_URL: 'http://127.0.0.1:1' }, async () => {
+  it('is never AVAILABLE when no Hermes CLI can be found', async () => {
+    await withEnv({
+      HERMES_CLI_PATH: path.join(os.tmpdir(), 'definitely-absent-hermes'),
+      HERMES_LOCAL_ENABLED: 'true',
+      HERMES_ADAPTER_BASE_URL: undefined,
+    }, async () => {
       const cap = await resolveCapability('hermes.execute');
       expect(cap?.status).not.toBe('AVAILABLE');
-      expect(cap?.status).toBe('UNSUPPORTED');
+      expect(cap?.status).toBe('NOT_CONFIGURED');
     });
-  }, 10000);
+  }, 30000);
+
+  // Setting the REST adapter variables must not make execution look available:
+  // that URL is a different mechanism, and nothing on this host implements it.
+  it('is never AVAILABLE on the strength of HERMES_ADAPTER_BASE_URL alone', async () => {
+    await withEnv({
+      HERMES_ADAPTER_BASE_URL: 'http://127.0.0.1:1',
+      HERMES_CLI_PATH: path.join(os.tmpdir(), 'definitely-absent-hermes'),
+      HERMES_LOCAL_ENABLED: undefined,
+    }, async () => {
+      const cap = await resolveCapability('hermes.execute');
+      expect(cap?.status).not.toBe('AVAILABLE');
+    });
+  }, 30000);
+
+  // A working binary is not consent: a run spends real subscription quota.
+  it('is NOT_CONFIGURED when the CLI answers but the opt-in is absent', async () => {
+    await withEnv({ HERMES_CLI_PATH: fakeCli('echo "hermes 1.2.3"'), HERMES_LOCAL_ENABLED: undefined }, async () => {
+      const cap = await resolveCapability('hermes.execute');
+      expect(cap?.status).toBe('NOT_CONFIGURED');
+    });
+  }, 30000);
+
+  it('is AVAILABLE only when the CLI answers AND the opt-in is exactly "true"', async () => {
+    await withEnv({ HERMES_CLI_PATH: fakeCli('echo "hermes 1.2.3"'), HERMES_LOCAL_ENABLED: 'true' }, async () => {
+      const cap = await resolveCapability('hermes.execute');
+      expect(cap?.status).toBe('AVAILABLE');
+      // The envelope refuses any EXTERNAL_ACTION that is not genuinely
+      // Guardian-enforced, so this label has to be backed by the real gate.
+      expect(cap?.approvalPolicy).toBe('GUARDIAN_ENFORCED');
+      expect(cap?.effectClass).toBe('EXTERNAL_ACTION');
+      expect(cap?.reference).toContain('hermes-local-runtime');
+    });
+  }, 30000);
 });
 
 describe('vault.read / vault.write: AVAILABLE when the canonical Vault store/writer is reachable', () => {

@@ -45,26 +45,26 @@ export const FISH_AUDIO_VOICE_PRESETS = [
  * readable here.
  */
 export function getPersistentFishAudioVoiceId(options?: FishAudioOptions): string {
-  let storedVoiceId = '';
-  try {
-    for (const storeKey of ['hermes_jarvis_settings', 'hermes_voice_config']) {
-      const raw = localStorage.getItem(storeKey);
-      if (!raw) continue;
-      const parsed = JSON.parse(raw);
-      storedVoiceId =
-        parsed.FISH_AUDIO_DEFAULT_VOICE_ID || parsed.fishAudioConfig?.voiceId || parsed.voiceId || '';
-      if (storedVoiceId) break;
-    }
-  } catch {
-    // ignore
-  }
-
-  return (
-    options?.FISH_AUDIO_DEFAULT_VOICE_ID ||
-    options?.voiceId ||
-    storedVoiceId ||
-    DEFAULT_FISH_AUDIO_VOICE_ID
-  ).trim();
+  // DAYS 2-3 PART B — the localStorage reads and the hardcoded fallback are
+  // GONE, and their absence is the fix.
+  //
+  // The comment above describes the half of this bug that was already fixed
+  // (the API key). The other half survived: the VOICE ID was still read from
+  // two different localStorage stores, then sent to the server in the request
+  // body — and lib/voice-credentials.ts::resolveFishConfig gives a request-
+  // supplied reference_id precedence over the server store. So a stale value in
+  // one browser silently overrode the voice the deployment was configured to
+  // use, while the configuration screen went on displaying the server's value.
+  // That is the CLI-vs-dashboard mismatch, in its remaining form: not two
+  // screens disagreeing, but the browser quietly winning.
+  //
+  // Falling back to a hardcoded id made it worse by guaranteeing SOME voice
+  // came out, so the misconfiguration never surfaced as a failure.
+  //
+  // Returning '' when the caller supplies nothing is deliberate: an empty
+  // reference_id means the server resolves its own stored voice, which is the
+  // one the dashboard shows. The server remains the single source of truth.
+  return (options?.FISH_AUDIO_DEFAULT_VOICE_ID || options?.voiceId || '').trim();
 }
 
 /**

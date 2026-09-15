@@ -62,6 +62,13 @@ verified.
       passthrough, no hardcoded domain. This app deliberately implements no HTTP→HTTPS redirect of
       its own — the proxy's job, and doing it app-side risks a redirect loop behind a proxy that
       already terminated TLS.
+> **Day 1 (2026-09-12) — the deployment configuration now exists.** `docker-compose.prod.yml` +
+> `docs/deploy/Caddyfile.prod` stand the app up behind Caddy with real Let's Encrypt TLS, with the
+> app deliberately unpublished to the host so TLS cannot be bypassed. Full procedure, the verified
+> evidence, and the exact remaining user actions are in
+> **`docs/deploy/PRODUCTION-DEPLOYMENT.md`**. The blocker below still stands and is still the
+> owner's to close: a host and a domain cannot be provisioned from a coding environment.
+
 - BLOCKED: actual TLS/HTTPS termination and a real domain — this application does not terminate TLS
   itself; a production deployment needs the reverse proxy above (or equivalent) genuinely running in
   front of it. Out of this repo's scope to provision.
@@ -338,12 +345,19 @@ rewrite" instruction allowed.
 
 ## Known deployment gaps (worth fixing before GA, not blocking beta)
 
-- `PORT` is now configurable (Pass VII); no `engines` field pins a minimum Node version yet.
+- `PORT` is now configurable (Pass VII). ~~No `engines` field pins a minimum Node version yet.~~ **CLOSED 2026-09-12 (Day 1):** `engines.node >= 22.5.0` — this app's only database is the built-in `node:sqlite` `DatabaseSync`, so an older Node fails at first query rather than at install.
 - Build tooling (`vite`, `esbuild`, `typescript`, `tsx`, `@vitejs/plugin-react`, `tailwindcss`,
   `autoprefixer`, `@tailwindcss/vite`) lives in `dependencies`, not `devDependencies` — harmless
   functionally, but means a production install can't trim them via `--omit=dev`.
-- No graceful-shutdown handler (`server.close()` on `SIGTERM`) — an in-flight request can be cut off
-  on stop/restart.
+- ~~No graceful-shutdown handler (`server.close()` on `SIGTERM`) — an in-flight request can be cut
+  off on stop/restart.~~ **CLOSED 2026-09-12 (Day 1).** `server.ts` now handles SIGTERM/SIGINT in a
+  deliberate order — stop the scheduler (so no tick dispatches real work into a dying process), close
+  the HTTP server (draining in-flight requests), then `closeDatabase()`, which runs
+  `PRAGMA wal_checkpoint(TRUNCATE)` before closing. A self-imposed 8s force-exit means the process
+  decides its own deadline rather than appearing clean while being SIGKILLed. Proven by four real
+  process tests (`test/graceful-shutdown.test.ts`: real spawn, real signal, real files) and live
+  against a production build holding real conversation data — a 1,137,152-byte `-wal` folded into the
+  main database and both sidecars removed, exit 0, all rows intact.
 - `Dockerfile`/`docker-compose.yml` (Pass VII, hardened Pass VIII — now runs as non-root `node`
   user) but **UNVERIFIED at runtime** — Docker is not installed in this session's environment, so
   `docker build` was never actually run. Verify before relying on it.

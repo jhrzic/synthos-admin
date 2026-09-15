@@ -384,10 +384,27 @@ describe('7: nothing internal reaches a customer, including in a failure', () =>
     expect(statusFn).not.toContain('apiKey:');
   });
 
+  // UPDATED: this used to assert the literals 'REDACTED' and 'AIza' appeared
+  // inside verifyModelCredential, i.e. that it carried its own inline
+  // scrubber. That scrubber was consolidated into lib/redact.ts (Pass 2
+  // found two divergent copies whose generic floors differed by eight
+  // characters, so a ~39-char Google key slipped through one of them).
+  //
+  // Asserting the BEHAVIOUR rather than the implementation: the function must
+  // delegate to the shared scrubber, and that scrubber must actually redact
+  // the shapes in question.
   it('a provider verification error is scrubbed of key-shaped tokens', async () => {
     const cred = fs.readFileSync(path.resolve(process.cwd(), 'lib/model-credentials.ts'), 'utf-8');
     const verify = cred.slice(cred.indexOf('export async function verifyModelCredential'));
-    expect(verify).toContain('REDACTED');
-    expect(verify).toContain('AIza');
+    expect(verify).toContain('scrubSecrets(');
+
+    const { scrubSecrets } = await import('../lib/redact');
+    const googleKey = 'AIzaSyA1234567890abcdefghijklmnopqrstu';
+    const openAiKey = 'sk-proj-1234567890abcdefghijklmnopqrstuvwx';
+    for (const key of [googleKey, openAiKey]) {
+      const out = scrubSecrets(`provider rejected ${key}`);
+      expect(out).not.toContain(key);
+      expect(out).toContain('REDACTED');
+    }
   });
 });

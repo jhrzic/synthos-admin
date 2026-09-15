@@ -34,6 +34,7 @@ import {
 import { resolveCapability } from './registry';
 import { classifyIntent } from './intent';
 import { executeEnvelope, type ExecutionEnvelopeResult, type EnvelopeOutcome, EXTERNAL_ACTION_EXEMPT_FROM_GUARDIAN_RULE } from './envelope';
+import { reconcileExternalExecutions } from '../external-executions';
 
 // ---------------------------------------------------------------------------
 // Time-phrase parsing. Deterministic, regex-based — no model call, so
@@ -380,18 +381,149 @@ export async function runDueSchedules(nowIso: string = new Date().toISOString())
   return { processed: due.length };
 }
 
+/**
+ * The second thing the one timer does: reconcile external executions whose
+ * remote job may have finished while SynthOS was not watching.
+ *
+ * This is a reconciliation sweep, NOT a second scheduler. It dispatches
+ * nothing new and creates no work — it reads rows the ledger already owns and
+ * asks the provider what happened, through the same refresh/ingest pair the
+ * UI's refresh button uses.
+ *
+ * Kept as its own exported function, and deliberately isolated from
+ * runDueSchedules in the tick below, because a provider outage must not stop
+ * scheduled work from dispatching. They share a timer, not a fate.
+ */
+export async function runExternalExecutionReconciliation(nowIso: string = new Date().toISOString()): Promise<{ considered: number; ingested: number }> {
+  const sweep = await reconcileExternalExecutions(nowIso);
+  if (sweep.ingested > 0 || sweep.errors > 0) {
+    // eslint-disable-next-line no-console
+    console.log(`[reconcile] considered=${sweep.considered} reconciled=${sweep.reconciled} ingested=${sweep.ingested} stillPending=${sweep.stillPending} errors=${sweep.errors}`);
+  }
+  return { considered: sweep.considered, ingested: sweep.ingested };
+}
+
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
+
+// ---------------------------------------------------------------------------
+// ALWAYS-ON RUNTIME — the scheduler's own liveness, recorded rather than
+// claimed.
+//
+// Before this, "the scheduler is running" was unobservable from outside the
+// module: `schedulerTimer` is a private, unref'd handle, so nothing — not the
+// status aggregator, not an operator, not a test — could distinguish a
+// process whose poll loop is genuinely ticking from one whose timer was
+// never armed or has been throwing on every tick since startup.
+//
+// That matters specifically because the loop is unref'd and every tick
+// swallows its own error: a permanently failing scheduler keeps the process
+// alive and healthy-looking while dispatching nothing at all.
+//
+// Everything here is a record of something that actually happened. No field
+// is derived from configuration, and `lastTickAt` is only ever set by a tick
+// that really ran, so a stale timestamp is real evidence of a stalled loop
+// instead of being indistinguishable from a fresh one.
+// ---------------------------------------------------------------------------
+
+export interface SchedulerHealth {
+  /** True only while a real interval timer is armed in THIS process. */
+  running: boolean;
+  /** Poll interval of the armed timer, or null when not running. */
+  intervalMs: number | null;
+  /** When startScheduler() actually armed the timer. */
+  startedAt: string | null;
+  /** Ticks that have begun since this process started. */
+  ticks: number;
+  /** When the most recent tick began — null until one has. */
+  lastTickAt: string | null;
+  /** Schedules dispatched by the most recent successfully completed tick. */
+  lastTickProcessed: number | null;
+  /** Ticks that threw. A ticking-but-always-failing loop is not healthy. */
+  tickErrors: number;
+  /** The most recent tick error, or null if no tick has ever failed. */
+  lastTickError: { at: string; message: string } | null;
+  /** When the external-execution reconciliation sweep last completed. */
+  lastReconcileAt: string | null;
+  /** Rows the most recent sweep considered. */
+  lastReconcileConsidered: number | null;
+  /** Sweeps that threw. Tracked apart from tickErrors: a provider outage is not a scheduler fault. */
+  reconcileErrors: number;
+  lastReconcileError: { at: string; message: string } | null;
+}
+
+const schedulerHealth: SchedulerHealth = {
+  running: false,
+  intervalMs: null,
+  startedAt: null,
+  ticks: 0,
+  lastTickAt: null,
+  lastTickProcessed: null,
+  tickErrors: 0,
+  lastTickError: null,
+  lastReconcileAt: null,
+  lastReconcileConsidered: null,
+  reconcileErrors: 0,
+  lastReconcileError: null,
+};
+
+/** The scheduler's real, recorded liveness in this process. Never a configuration read. */
+export function getSchedulerHealth(): SchedulerHealth {
+  return { ...schedulerHealth, lastTickError: schedulerHealth.lastTickError ? { ...schedulerHealth.lastTickError } : null };
+}
+
+/** Test-only reset so one file's counters can't leak into another's assertions. */
+export function resetSchedulerHealthForTests(): void {
+  schedulerHealth.running = false;
+  schedulerHealth.intervalMs = null;
+  schedulerHealth.startedAt = null;
+  schedulerHealth.ticks = 0;
+  schedulerHealth.lastTickAt = null;
+  schedulerHealth.lastTickProcessed = null;
+  schedulerHealth.tickErrors = 0;
+  schedulerHealth.lastTickError = null;
+  schedulerHealth.lastReconcileAt = null;
+  schedulerHealth.lastReconcileConsidered = null;
+  schedulerHealth.reconcileErrors = 0;
+  schedulerHealth.lastReconcileError = null;
+}
 
 /** Registers the ONE real in-process poll loop for schedules. Idempotent — calling twice does not start a second timer. */
 export function startScheduler(intervalMs = 10000): void {
   if (schedulerTimer) return;
   schedulerTimer = setInterval(() => {
-    runDueSchedules().catch((err) => {
-      // eslint-disable-next-line no-console
-      console.error('[scheduler] tick failed:', err);
-    });
+    schedulerHealth.ticks += 1;
+    schedulerHealth.lastTickAt = new Date().toISOString();
+    runDueSchedules()
+      .then((result) => {
+        schedulerHealth.lastTickProcessed = result.processed;
+      })
+      .catch((err) => {
+        schedulerHealth.tickErrors += 1;
+        schedulerHealth.lastTickError = { at: new Date().toISOString(), message: err?.message || String(err) };
+        // eslint-disable-next-line no-console
+        console.error('[scheduler] tick failed:', err);
+      });
+
+    // Separate promise chain on purpose. A provider outage during
+    // reconciliation must not be recorded as a SCHEDULER failure, and must
+    // not stop scheduled work from dispatching — the two share this timer
+    // and nothing else.
+    runExternalExecutionReconciliation()
+      .then((result) => {
+        schedulerHealth.lastReconcileAt = new Date().toISOString();
+        schedulerHealth.lastReconcileConsidered = result.considered;
+      })
+      .catch((err) => {
+        schedulerHealth.reconcileErrors += 1;
+        schedulerHealth.lastReconcileError = { at: new Date().toISOString(), message: err?.message || String(err) };
+        // eslint-disable-next-line no-console
+        console.error('[reconcile] sweep failed:', err);
+      });
   }, intervalMs);
   schedulerTimer.unref?.();
+  schedulerHealth.running = true;
+  schedulerHealth.intervalMs = intervalMs;
+  schedulerHealth.startedAt = new Date().toISOString();
 }
 
 export function stopScheduler(): void {
@@ -399,6 +531,10 @@ export function stopScheduler(): void {
     clearInterval(schedulerTimer);
     schedulerTimer = null;
   }
+  // Counters are deliberately NOT cleared: after a graceful stop the last
+  // observed tick is still the truthful record of what this process did.
+  schedulerHealth.running = false;
+  schedulerHealth.intervalMs = null;
 }
 
 /** Resume policy: identical to restart catch-up (one policy, not two — see module header). Recomputes next_run_at from "now" rather than trusting a possibly-stale value computed before the pause. */

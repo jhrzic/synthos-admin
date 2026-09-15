@@ -17,9 +17,17 @@ export type RuntimeEventType =
   | 'MCP_PROBE'
   | 'HERMES_HEALTH_CHECK'
   | 'PROVIDER_CALL'
-  | 'EXTERNAL_EXECUTION';
+  | 'EXTERNAL_EXECUTION'
+  // PASS 2 — every capability invocation through lib/fabric/envelope.ts,
+  // including the ones that were REFUSED. Before this, executeEnvelope's four
+  // refusal paths (unregistered capability, NOT_CONFIGURED/UNSUPPORTED,
+  // Guardian-unenforced external action, APPROVAL_REQUIRED) returned a value
+  // to the caller and persisted nothing at all — a blocked execution left no
+  // trace anywhere, so "prove nothing ran without Guardian's consent" was
+  // unanswerable after the fact.
+  | 'CAPABILITY_INVOCATION';
 
-export type RuntimeEventTargetType = 'skill' | 'mcp_server' | 'hermes_runtime' | 'provider' | 'external_execution';
+export type RuntimeEventTargetType = 'skill' | 'mcp_server' | 'hermes_runtime' | 'provider' | 'external_execution' | 'capability';
 
 // ADR-006 — RUNNING/SUBMITTED/CANCELLED added for the external-execution
 // lifecycle (Workstream M). Purely additive: every existing producer of
@@ -32,7 +40,33 @@ export type RuntimeEventStatus =
   | 'TIMEOUT'
   | 'SUBMITTED'
   | 'RUNNING'
-  | 'CANCELLED';
+  | 'CANCELLED'
+  // PASS 2 — the outcomes an attempt ledger has to be able to express.
+  // BLOCKED is Guardian (or the envelope's external-action rule) refusing
+  // before anything ran; APPROVAL_REQUIRED is a deferral, not a denial; and
+  // UNKNOWN is a provider whose real state we could not determine — never to
+  // be collapsed into FAILED, which would be an assertion we cannot make.
+  | 'BLOCKED'
+  | 'APPROVAL_REQUIRED'
+  | 'UNKNOWN';
+
+/**
+ * Statuses that are SECURITY EVIDENCE rather than routine telemetry.
+ *
+ * This ledger is a bounded ring: every insert prunes the 500 oldest rows once
+ * the table passes 5,000. That is fine for health probes and fine for
+ * successes, and it was wrong the moment refused attempts started living here
+ * — a burst of routine SUCCESS rows would silently evict the record of a
+ * blocked execution, which is the one row an operator would later need.
+ *
+ * So the prune skips these first. They are still bounded (see
+ * HARD_CEILING_MULTIPLIER below) because an unbounded table is its own
+ * availability problem, but routine traffic can no longer displace them.
+ */
+export const SECURITY_RELEVANT_STATUSES: ReadonlySet<RuntimeEventStatus> = new Set([
+  'BLOCKED',
+  'APPROVAL_REQUIRED',
+]);
 
 export interface RuntimeEventRecord {
   event_id: string;
@@ -49,6 +83,31 @@ export interface RuntimeEventRecord {
 /** I3 — bounded retention. Enforced at insert time; no cron/scheduler needed. */
 const MAX_RUNTIME_EVENTS = 5000;
 const PRUNE_BATCH = 500;
+/** Security evidence is pruned only past this multiple of the soft cap. */
+const HARD_CEILING_MULTIPLIER = 4;
+
+/**
+ * How often the retention check is even attempted, counted in inserts.
+ *
+ * Sampling rather than every-insert. With a 5,000-row soft cap and a 500-row
+ * prune batch, checking every 100 inserts cannot let the table exceed the cap
+ * by more than 100 rows before housekeeping runs — a bound that is irrelevant
+ * to a retention policy and decisive for write contention.
+ */
+const PRUNE_CHECK_INTERVAL = 100;
+let insertsSincePruneCheck = 0;
+
+function shouldAttemptPrune(): boolean {
+  insertsSincePruneCheck += 1;
+  if (insertsSincePruneCheck < PRUNE_CHECK_INTERVAL) return false;
+  insertsSincePruneCheck = 0;
+  return true;
+}
+
+/** Test-only: forces the next insert to run the retention check. */
+export function forcePruneCheckForTests(): void {
+  insertsSincePruneCheck = PRUNE_CHECK_INTERVAL - 1;
+}
 
 export function recordRuntimeEvent(params: {
   workspaceId?: string | null;
@@ -87,13 +146,49 @@ export function recordRuntimeEvent(params: {
     record.created_at
   );
 
+  // Retention runs OFF the hot path.
+  //
+  // This used to do a COUNT(*) on every single insert, and a 500-row DELETE
+  // whenever the table was oversized. That was cheap in isolation and not
+  // cheap in aggregate: Pass 2 made executeEnvelope record an attempt row on
+  // every capability invocation, so a per-insert scan plus a possible bulk
+  // delete became per-invocation write pressure on the same SQLite file that
+  // holds execution_claims.
+  //
+  // That matters because test/jarvis-duplicate-submission.test.ts spawns a
+  // REAL second server process against the SAME database file, so the
+  // exactly-once claim path and this ledger contend across processes. Holding
+  // the write lock for a bulk delete while another writer is trying to insert
+  // a claim is exactly how a marginal timing test starts failing.
+  //
+  // The INSERT above is untouched — durability and evidence are unchanged.
+  // Only the housekeeping is sampled, so the amortised cost per insert is one
+  // INSERT instead of INSERT + COUNT (+ DELETE).
+  if (!shouldAttemptPrune()) return record;
+
   const countRow = db.prepare('SELECT COUNT(*) AS n FROM runtime_events').get() as { n: number };
   if (countRow.n > MAX_RUNTIME_EVENTS) {
-    db.prepare(
+    const securityStatuses = [...SECURITY_RELEVANT_STATUSES];
+    const placeholders = securityStatuses.map(() => '?').join(', ');
+    const pruned = db.prepare(
       `DELETE FROM runtime_events WHERE event_id IN (
-         SELECT event_id FROM runtime_events ORDER BY created_at ASC LIMIT ?
+         SELECT event_id FROM runtime_events
+          WHERE status NOT IN (${placeholders})
+          ORDER BY created_at ASC, rowid ASC LIMIT ?
        )`
-    ).run(PRUNE_BATCH);
+    ).run(...securityStatuses, PRUNE_BATCH);
+
+    // Only if routine rows could not free enough space.
+    if ((pruned as any).changes === 0) {
+      const stillOver = db.prepare('SELECT COUNT(*) AS n FROM runtime_events').get() as { n: number };
+      if (stillOver.n > MAX_RUNTIME_EVENTS * HARD_CEILING_MULTIPLIER) {
+        db.prepare(
+          `DELETE FROM runtime_events WHERE event_id IN (
+             SELECT event_id FROM runtime_events ORDER BY created_at ASC, rowid ASC LIMIT ?
+           )`
+        ).run(PRUNE_BATCH);
+      }
+    }
   }
 
   return record;
@@ -119,6 +214,11 @@ export function listRecentRuntimeEvents(params: {
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   args.push(limit);
   return db
-    .prepare(`SELECT * FROM runtime_events ${where} ORDER BY created_at DESC LIMIT ?`)
+    // rowid is the insert-order tiebreaker. ISO timestamps have millisecond
+    // resolution, and two events recorded in the same millisecond is routine —
+    // a provider success immediately followed by a failure, say. Ordering by
+    // created_at alone made "the most recent call" non-deterministic on a tie,
+    // which let a superseded success be read as the current state.
+    .prepare(`SELECT * FROM runtime_events ${where} ORDER BY created_at DESC, rowid DESC LIMIT ?`)
     .all(...args) as RuntimeEventRecord[];
 }

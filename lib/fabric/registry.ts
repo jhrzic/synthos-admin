@@ -28,6 +28,8 @@ import { getDatabase } from '../persistence';
 import { isWindmillConfigured } from '../windmill-client';
 import { getVoiceCredentialStatus } from '../voice-credentials';
 import { getModelCredentialStatus } from '../model-credentials';
+import { isAntigravityConfigured, isAntigravityEnabled } from '../antigravity-client';
+import { resolveProviderState } from '../provider-state';
 
 export type CapabilityEffectClass = 'READ' | 'COMPUTE' | 'EXTERNAL_ACTION' | 'CONTROL';
 
@@ -101,6 +103,98 @@ function modelGeminiCapability(report: RuntimeStatusReport): CapabilityDescripto
     reason: configured
       ? 'GEMINI_API_KEY is configured (see lib/runtime-status.ts geminiStatus() — real per-call health is proven at call time, not re-probed here).'
       : (gemini?.detail || 'GEMINI_API_KEY is not configured.'),
+  };
+}
+
+/**
+ * PUSH 1 — OpenAI as a real, executable capability.
+ *
+ * Status comes from getModelCredentialStatus('openai'), which is the exact
+ * resolution lib/fabric/kernel.ts performs at execution time (environment
+ * first, then the encrypted server-side row). Reading process.env directly
+ * here — as the Gemini row above still does via runtime-status.ts — would
+ * report NOT_CONFIGURED for a deployment whose key lives in the credential
+ * store and which can in fact execute. A capability registry that
+ * disagrees with the executor about what is configured is worse than no
+ * registry.
+ *
+ * AVAILABLE here means "a credential resolves", never "the provider is up".
+ * Real per-call health is proven at call time, exactly as for Gemini.
+ */
+function modelOpenAiCapability(): CapabilityDescriptor {
+  const credential = getModelCredentialStatus('openai');
+
+  // PROVIDER STATUS TRUTH — this used to be
+  //     status: credential.apiKeyPresent ? 'AVAILABLE' : 'NOT_CONFIGURED'
+  // which read AVAILABLE while every real call returned
+  // `HTTP 429: You have no credits remaining`. A resolved key is a fact about
+  // configuration; AVAILABLE is a claim about capability. Collapsing the two
+  // made the Admin confidently wrong in the direction that costs most — an
+  // operator planning work against a provider that cannot run it.
+  //
+  // The state now comes from lib/provider-state.ts, which reads the last REAL
+  // call from the PROVIDER_CALL ledger. AVAILABLE is reported only for
+  // LIVE_VERIFIED; a credential with no proven call is DEGRADED, and the
+  // reason says why rather than making the operator infer it.
+  const providerState = resolveProviderState({
+    provider: 'openai',
+    implemented: true,
+    configured: credential.apiKeyPresent,
+  });
+  const capabilityStatus: CapabilityStatus =
+    providerState.state === 'LIVE_VERIFIED' ? 'AVAILABLE'
+    : providerState.state === 'NO_CREDENTIAL' ? 'NOT_CONFIGURED'
+    // QUOTA_BLOCKED / PROVIDER_ERROR / CREDENTIAL_PRESENT are all "wired but
+    // unproven or currently refused" — DEGRADED, never AVAILABLE.
+    : 'DEGRADED';
+
+  return {
+    key: 'model.openai',
+    runtime: 'openai',
+    status: capabilityStatus,
+    effectClass: 'COMPUTE',
+    riskTier: 'LOW',
+    approvalPolicy: 'NONE',
+    workspaceScope: 'member',
+    reference: 'lib/fabric/model-openai.ts::generateViaOpenAI',
+    reason: `${providerState.state}: ${providerState.reason}`,
+  };
+}
+
+/**
+ * PUSH 1 — Antigravity as a real execution runtime.
+ *
+ * effectClass is EXTERNAL_ACTION, not COMPUTE, and that classification is
+ * the honest one: unlike a model call, this dispatches work to a remote
+ * autonomous agent that executes code and browses the web in a sandbox
+ * SynthOS does not control. Treating it as ordinary compute would let it
+ * past lib/fabric/envelope.ts Section 7, which is precisely the check that
+ * should apply to it.
+ *
+ * approvalPolicy is GUARDIAN_ENFORCED because real, wired code enforces it:
+ * lib/external-executions.ts runs every instruction through
+ * checkGuardianRules() before dispatch, and refuses BLOCKED and
+ * APPROVAL_REQUIRED outright. That is a submission gate, and the reason
+ * string says so rather than implying SynthOS supervises the remote loop.
+ */
+function antigravityRuntimeCapability(): CapabilityDescriptor {
+  const configured = isAntigravityConfigured();
+  const enabled = isAntigravityEnabled();
+  const status: CapabilityStatus = !configured ? 'NOT_CONFIGURED' : !enabled ? 'NOT_CONFIGURED' : 'AVAILABLE';
+  return {
+    key: 'runtime.antigravity',
+    runtime: 'antigravity',
+    status,
+    effectClass: 'EXTERNAL_ACTION',
+    riskTier: 'HIGH',
+    approvalPolicy: 'GUARDIAN_ENFORCED',
+    workspaceScope: 'admin',
+    reference: 'lib/external-executions.ts::submitExternalExecution (runtime: antigravity) -> lib/antigravity-client.ts::submitInteraction',
+    reason: !configured
+      ? 'No Antigravity credential resolves (neither ANTIGRAVITY_API_KEY nor a Gemini credential).'
+      : !enabled
+        ? 'A credential resolves, but ANTIGRAVITY_ENABLED is not "true" — outward execution is switched off in this deployment.'
+        : 'A credential resolves and ANTIGRAVITY_ENABLED is "true". Every instruction is evaluated by the real checkGuardianRules() gate before dispatch; BLOCKED and APPROVAL_REQUIRED are refused. Results are never trusted: they pass Aegis and the KIL gate before any receipt exists.',
   };
 }
 
@@ -313,22 +407,55 @@ function terminalExecCapability(): CapabilityDescriptor {
 }
 
 function hermesExecuteCapability(report: RuntimeStatusReport): CapabilityDescriptor {
-  // classifySkillExecutability's 'hermes_runtime' case is unconditional:
-  // execute() has no real contract regardless of HERMES_ADAPTER_BASE_URL
-  // configuration (lib/skills.ts). Connectivity (hermesRuntimeStatus) and
-  // execution are two different questions — this capability answers the
-  // execution question honestly: it does not exist yet, full stop.
-  const hermes = findSystem(report, 'Hermes Dedicated Runtime');
+  // SUPERSEDES the prior UNSUPPORTED verdict, and the reason it changed is
+  // worth stating: the old audit was about the wrong Hermes. It judged
+  // src/services/hermesAdapter.ts, which speaks a SynthOS-specific REST
+  // contract (GET /synthos/health) that nothing on this machine implements —
+  // so as a verdict on THAT adapter it was correct and still is.
+  //
+  // The Hermes actually installed here is a CLI. `hermes -z "<prompt>"` is a
+  // real, bounded, one-shot task interface, and lib/hermes-local-runtime.ts
+  // now dispatches through it. Execution is therefore real, and this
+  // capability says so — but only when the CLI genuinely answers AND the
+  // operator has switched dispatch on.
+  //
+  // approvalPolicy is GUARDIAN_ENFORCED because real, wired code enforces it:
+  // envelope.ts's executeHermesTask runs guardianCheckInstruction() on the
+  // instruction before any subprocess is spawned. Same standard as
+  // runtime.antigravity — never a label without the gate behind it.
+  const local = findSystem(report, 'Hermes Local Runtime (CLI)');
+  const configured = !!local && local.status !== 'NOT_CONFIGURED';
+  const available = !!local && local.status === 'HEALTHY';
+
+  if (!configured) {
+    return {
+      key: 'hermes.execute',
+      runtime: 'hermes',
+      status: 'NOT_CONFIGURED',
+      effectClass: 'EXTERNAL_ACTION',
+      riskTier: 'MEDIUM',
+      approvalPolicy: 'GUARDIAN_ENFORCED',
+      workspaceScope: 'admin',
+      reference: 'lib/fabric/envelope.ts::executeHermesTask -> lib/hermes-local-runtime.ts::runHermesLocalTask',
+      reason: local?.detail || 'No executable Hermes CLI was found.',
+    };
+  }
+
   return {
     key: 'hermes.execute',
     runtime: 'hermes',
-    status: 'UNSUPPORTED',
+    // DISABLED (reachable, dispatch switched off) is reported as
+    // NOT_CONFIGURED rather than AVAILABLE: a run spends real subscription
+    // quota, so "the binary answers" is not authorization.
+    status: available ? 'AVAILABLE' : 'NOT_CONFIGURED',
     effectClass: 'EXTERNAL_ACTION',
     riskTier: 'MEDIUM',
-    approvalPolicy: 'NONE',
+    approvalPolicy: 'GUARDIAN_ENFORCED',
     workspaceScope: 'admin',
-    reference: 'src/services/hermesAdapter.ts::HermesAdapter.execute (stub)',
-    reason: `execute() has no real contract regardless of connectivity (ADR-001 Phase 3, deferred). Connectivity itself: ${hermes?.status ?? 'NOT_CONFIGURED'}.`,
+    reference: 'lib/fabric/envelope.ts::executeHermesTask -> lib/hermes-local-runtime.ts::runHermesLocalTask',
+    reason: available
+      ? `Local Hermes CLI answers and dispatch is enabled. Every instruction passes checkGuardianRules() before a subprocess starts; the result goes through the canonical task -> artifact -> Aegis -> receipt -> memory-index spine. ${local?.detail || ''}`.trim()
+      : (local?.detail || 'The Hermes CLI is reachable but dispatch is switched off.'),
   };
 }
 
@@ -687,6 +814,8 @@ async function buildAllCapabilities(report: RuntimeStatusReport): Promise<Capabi
     graphReadCapability(),
     receiptReadCapability(),
     graphExecuteCapability(report),
+    modelOpenAiCapability(),
+    antigravityRuntimeCapability(),
     skillExecuteCapability(report),
     windmillJobCapability(report),
     windmillReadCapability(report),

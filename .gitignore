@@ -4,6 +4,7 @@ build/
 coverage/
 .DS_Store
 *.log
+*.mp4
 .env*
 !.env.example
 
@@ -16,3 +17,21 @@ vault/Startup-Theses/Read-SynthOS-Admin-package-version.md
 
 # SynthOS Backups (real database + vault snapshots — never committed)
 backups/
+
+# Machine-local editor / agent configuration (per-developer, never shared)
+.claude/
+.vscode/
+
+# Ad-hoc local screenshots
+gh screens/
+
+# Vault subtrees SynthOS WRITES AT RUNTIME.
+# These are execution output, not source: agent-generated reports, conversation
+# notes and per-workspace artifacts produced by whatever ran on this machine.
+# Same reason Read-SynthOS-Admin-package-version.md above is ignored — committing
+# them would put one machine's run history into every checkout, and the volume
+# (2,491 files here) drowns real diffs.
+vault/External-Executions/
+vault/SynthOS/
+vault/workspaces/
+vault/Startup-Theses/Step1b-Live-Verification.md

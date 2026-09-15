@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ClaudeArtifact, AgentModalEvent, AgentRole, AIModelInfo } from '../types';
 import { 
   Sparkles, Code2, Eye, Play, Copy, Check, ExternalLink, 
@@ -10,13 +10,19 @@ import {
 interface ClaudeArtifactsViewProps {
   models: Record<string, AIModelInfo>;
   onSendQuery: (prompt: string, modelId?: string, systemPrompt?: string) => Promise<string>;
+  /** Required to scope artifacts to the caller's workspace. */
+  activeWorkspaceId?: string;
 }
 
 export const ClaudeArtifactsView: React.FC<ClaudeArtifactsViewProps> = ({
   models,
   onSendQuery,
+  activeWorkspaceId,
 }) => {
-  const [selectedArtifactId, setSelectedArtifactId] = useState<string>('art-1');
+  // Was 'art-1' — a fixture id. With the hardcoded array gone the list starts
+  // empty, so a default pointing at a nonexistent artifact made
+  // `selectedArtifact` undefined and the drawer below crashed on mount.
+  const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'preview' | 'code' | 'schema' | 'modals'>('preview');
   const [copied, setCopied] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -24,133 +30,71 @@ export const ClaudeArtifactsView: React.FC<ClaudeArtifactsViewProps> = ({
   const [activeModalType, setActiveModalType] = useState<'none' | 'artifact_preview' | 'hydration_sheet' | 'ebook_editor' | 'claim_directory_modal'>('none');
   const [modalPayload, setModalPayload] = useState<Record<string, any>>({});
 
-  // Artifact Collection
-  const [artifacts, setArtifacts] = useState<ClaudeArtifact[]>([
-    {
-      id: 'art-1',
-      title: 'Decentralized Agent Fleet Health HUD (React Component)',
-      type: 'react-component',
-      language: 'tsx',
-      agentRole: 'dev',
-      modelName: 'Claude Code 3.7',
-      timestamp: '21:32:04',
-      version: 2,
-      tags: ['React', 'Tailwind', 'Recharts', 'Fragments'],
-      content: `import React, { useState } from 'react';
-import { ShieldCheck, Cpu, Zap, Activity, Radio } from 'lucide-react';
+  // ---------------------------------------------------------------------
+  // REAL artifacts, from the canonical Vault store.
+  //
+  // This was a hardcoded array of three invented artifacts — a "Decentralized
+  // Agent Fleet Health HUD" and friends — rendered in production as if they
+  // were the workspace's real output. The real store had 48 artifacts at the
+  // time this was found, so the panel was simultaneously fabricating rows and
+  // hiding actual work.
+  //
+  // Mapped honestly: the Vault carries id, title, path, hash, size and
+  // created_at. It does NOT carry which agent produced an artifact, which
+  // model, a language, or a version number — so those are reported as unknown
+  // rather than invented. Keep the surface, fix the data.
+  // ---------------------------------------------------------------------
+  const [artifacts, setArtifacts] = useState<ClaudeArtifact[]>([]);
+  const [artifactsLoading, setArtifactsLoading] = useState(true);
+  const [artifactsError, setArtifactsError] = useState<string | null>(null);
 
-export default function AgentFleetHUD() {
-  const [activeNode, setActiveNode] = useState('Orchestrator');
-  const fleet = [
-    { role: 'Orchestrator', model: 'Nous Hermes 3', status: 'Optimal', ping: '12ms', load: 34 },
-    { role: 'Scout', model: 'Sonar Pro', status: 'Crawling', ping: '28ms', load: 68 },
-    { role: 'Scribe', model: 'Claude 3.7', status: 'Syncing', ping: '18ms', load: 45 },
-    { role: 'Reach', model: 'ChatGPT o3', status: 'Idle', ping: '14ms', load: 12 },
-    { role: 'Dev', model: 'Codex 2', status: 'Active', ping: '22ms', load: 82 },
-  ];
-
-  return (
-    <div className="p-6 bg-[#090A16] border border-[#1A1D34] rounded-2xl text-white font-mono space-y-4 shadow-2xl">
-      <div className="flex items-center justify-between pb-3 border-b border-[#16182C]">
-        <div className="flex items-center gap-2">
-          <Radio className="w-4 h-4 text-[#00D26A] animate-pulse" />
-          <span className="text-xs font-bold tracking-wider text-[#A5A2FF]">HERMES TELEMETRY HUD</span>
-        </div>
-        <span className="text-[10px] bg-[#00D26A]/10 text-[#00D26A] px-2 py-0.5 rounded border border-[#00D26A]/30">5 NODES ONLINE</span>
-      </div>
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        {fleet.map(n => (
-          <div 
-            key={n.role}
-            onClick={() => setActiveNode(n.role)}
-            className={\`p-3 rounded-xl border transition cursor-pointer \${
-              activeNode === n.role 
-                ? 'bg-[#181B34] border-[#615EFF] shadow-md shadow-[#615EFF]/20' 
-                : 'bg-[#05060C] border-[#141628] hover:border-[#282E54]'
-            }\`}
-          >
-            <div className="flex justify-between items-center text-xs font-bold mb-1">
-              <span className="text-white">{n.role}</span>
-              <span className="text-[#38BDF8] text-[10px]">{n.ping}</span>
-            </div>
-            <div className="text-[10px] text-[#7A82A6] mb-2">{n.model}</div>
-            <div className="w-full bg-[#101222] h-1.5 rounded-full overflow-hidden">
-              <div className="bg-gradient-to-r from-[#38BDF8] to-[#8B5CF6] h-full" style={{ width: \`\${n.load}%\` }} />
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}`
-    },
-    {
-      id: 'art-2',
-      title: '3D Interactive Plant Care Card with Glassmorphic Shader',
-      type: '3d-card',
-      language: 'tsx',
-      agentRole: 'reach',
-      modelName: 'Nous Hermes 3',
-      timestamp: '21:15:20',
-      version: 1,
-      tags: ['3D Card', 'Glassmorphism', 'Bot Mode', 'E-Commerce'],
-      content: `<!-- 3D Card Interactive Preview Payload -->
-<div class="card-3d-wrapper p-6 rounded-2xl bg-gradient-to-br from-[#12142B] to-[#0A0C18] border border-[#262B4E] text-white shadow-2xl">
-  <div class="badge text-[10px] font-bold text-[#00D26A] bg-[#00D26A]/10 px-2.5 py-1 rounded-full inline-block mb-3 border border-[#00D26A]/30">
-    MONSTERA DELICIOSA · BOT HYDRATION ACTIVE
-  </div>
-  <h3 class="text-xl font-extrabold tracking-tight">Variegated Albo Borsigiana</h3>
-  <p class="text-xs text-[#8E94B8] mt-1">Autonomous Soil Moisture Sensor: 42% (Optimal: 40-60%)</p>
-  <div class="mt-4 flex gap-2">
-    <button class="px-4 py-2 bg-[#00D26A] text-black font-bold rounded-xl text-xs">Trigger Mist Sprinkler</button>
-    <button class="px-4 py-2 bg-[#1A1D34] text-white font-bold rounded-xl text-xs border border-[#2E355C]">View Care Log</button>
-  </div>
-</div>`
-    },
-    {
-      id: 'art-3',
-      title: 'Autonomous open_agent_modal Tool Invocation Schema',
-      type: 'json-schema',
-      language: 'json',
-      agentRole: 'orchestrator',
-      modelName: 'Nous Hermes 3',
-      timestamp: '20:50:11',
-      version: 3,
-      tags: ['JSON Schema', 'Function Calling', 'Modals', 'CopilotKit'],
-      content: `{
-  "name": "open_agent_modal",
-  "description": "Opens a Claude-style visual modal, side panel, or bottom sheet on the user's interface.",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "modal_type": {
-        "type": "string",
-        "enum": [
-          "artifact_preview",
-          "hydration_sheet",
-          "ebook_editor",
-          "claim_directory_modal"
-        ]
-      },
-      "title": {
-        "type": "string",
-        "description": "The title of the rendered modal dialog."
-      },
-      "payload": {
-        "type": "object",
-        "description": "Dynamic JSON data passed into the rendered modal component."
+  useEffect(() => {
+    if (!activeWorkspaceId) return;
+    let cancelled = false;
+    (async () => {
+      setArtifactsLoading(true);
+      setArtifactsError(null);
+      try {
+        const res = await fetch(`/api/vault?workspaceId=${encodeURIComponent(activeWorkspaceId)}`);
+        const data = await res.json();
+        if (cancelled) return;
+        if (!res.ok || data.success === false) {
+          setArtifactsError(data.error || `HTTP ${res.status}`);
+          setArtifacts([]);
+          return;
+        }
+        const entries: Array<Record<string, any>> = data.entries || [];
+        setArtifacts(entries.map((e) => ({
+          id: String(e.artifact_id),
+          title: String(e.title || e.relative_path || e.artifact_id),
+          // The store records a content type, not a UI artifact kind. Markdown
+          // is what the Vault writer actually produces.
+          type: 'markdown' as const,
+          content: '',
+          // UNKNOWN, not a plausible guess: the Vault has no producer column.
+          agentRole: 'UNKNOWN' as any,
+          modelName: 'UNKNOWN',
+          timestamp: String(e.created_at || ''),
+          version: 1,
+          tags: [],
+        })));
+      } catch (err: any) {
+        if (!cancelled) {
+          setArtifactsError(err?.message || 'Network error contacting the Vault API.');
+          setArtifacts([]);
+        }
+      } finally {
+        if (!cancelled) setArtifactsLoading(false);
       }
-    },
-    "required": ["modal_type", "title", "payload"]
-  }
-}`
-    }
-  ]);
+    })();
+    return () => { cancelled = true; };
+  }, [activeWorkspaceId]);
 
+  // May be undefined: an empty Vault is a real state, not an error.
   const selectedArtifact = artifacts.find(a => a.id === selectedArtifactId) || artifacts[0];
 
   const handleCopyCode = () => {
+    if (!selectedArtifact) return;
     navigator.clipboard.writeText(selectedArtifact.content);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -241,7 +185,7 @@ export default function AgentFleetHUD() {
           {/* Artifact List Picker */}
           <div className="bg-[#090B18] border border-[#1A1D34] rounded-2xl p-4 space-y-2">
             <span className="text-[11px] font-bold text-[#8E94B8] uppercase tracking-wider block">
-              Active Artifacts ({artifacts.length})
+              Active Artifacts ({artifactsLoading ? '…' : artifactsError ? 'UNKNOWN' : artifacts.length})
             </span>
             <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">
               {artifacts.map(art => {
@@ -310,6 +254,25 @@ export default function AgentFleetHUD() {
 
         {/* Right Column: Live Artifact Drawer & Interactive Canvas (7 cols) */}
         <div className="lg:col-span-7 bg-[#090B18] border border-[#1A1D34] rounded-2xl p-6 shadow-2xl space-y-4">
+          {/* An empty Vault is a real state and must render as one. Previously
+              the fixture array guaranteed a selection, so every expression
+              below assumed `selectedArtifact` existed — with real data and an
+              empty store, that assumption crashed the whole panel. */}
+          {!selectedArtifact ? (
+            <div className="py-16 text-center space-y-2">
+              <div className="text-sm font-bold text-white">
+                {artifactsLoading ? 'Loading artifacts…' : artifactsError ? 'Artifacts UNKNOWN' : 'No artifacts in this workspace yet'}
+              </div>
+              <div className="text-xs text-[#7B82A8] font-mono">
+                {artifactsError
+                  ? `The Vault API could not be read: ${artifactsError}`
+                  : artifactsLoading
+                    ? 'Reading the canonical Vault store.'
+                    : 'Artifacts appear here once a task writes one. Nothing is shown until then.'}
+              </div>
+            </div>
+          ) : (
+          <>
           {/* Drawer Header with Tabs */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-[#16182C]">
             <div>
@@ -365,66 +328,11 @@ export default function AgentFleetHUD() {
           {/* VIEW: LIVE PREVIEW */}
           {activeTab === 'preview' && (
             <div className="space-y-4">
-              {selectedArtifact.id === 'art-1' && (
-                <div className="p-6 bg-[#05060C] border border-[#1A1D34] rounded-2xl space-y-4">
-                  <div className="flex items-center justify-between pb-3 border-b border-[#16182C]">
-                    <div className="flex items-center gap-2">
-                      <span className="w-2.5 h-2.5 rounded-full bg-[#00D26A] animate-pulse" />
-                      <span className="text-xs font-bold tracking-wider text-[#A5A2FF]">HERMES TELEMETRY HUD</span>
-                    </div>
-                    <span className="text-[10px] bg-[#00D26A]/10 text-[#00D26A] px-2 py-0.5 rounded border border-[#00D26A]/30">5 NODES ONLINE</span>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {[
-                      { role: 'Orchestrator', model: 'Nous Hermes 3', ping: '12ms', load: 34, color: '#EC4899' },
-                      { role: 'Scout', model: 'Sonar Pro', ping: '28ms', load: 68, color: '#20B2AA' },
-                      { role: 'Scribe', model: 'Claude 3.7', ping: '18ms', load: 45, color: '#8B5CF6' },
-                      { role: 'Reach', model: 'ChatGPT o3', ping: '14ms', load: 12, color: '#F59E0B' },
-                      { role: 'Dev', model: 'Codex 2', ping: '22ms', load: 82, color: '#00D26A' },
-                    ].map(n => (
-                      <div key={n.role} className="p-3 bg-[#0B0D1E] rounded-xl border border-[#1A1D38]">
-                        <div className="flex justify-between items-center text-xs font-bold mb-1">
-                          <span style={{ color: n.color }}>{n.role}</span>
-                          <span className="text-[#38BDF8] text-[10px]">{n.ping}</span>
-                        </div>
-                        <div className="text-[10px] text-[#7A82A6] mb-2">{n.model}</div>
-                        <div className="w-full bg-[#101222] h-1.5 rounded-full overflow-hidden">
-                          <div className="h-full rounded-full" style={{ width: `${n.load}%`, backgroundColor: n.color }} />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {selectedArtifact.id === 'art-2' && (
-                <div className="p-6 rounded-2xl bg-gradient-to-br from-[#12142B] to-[#0A0C18] border border-[#262B4E] text-white shadow-2xl space-y-3">
-                  <span className="text-[10px] font-bold text-[#00D26A] bg-[#00D26A]/10 px-2.5 py-1 rounded-full border border-[#00D26A]/30 inline-block">
-                    MONSTERA DELICIOSA · BOT HYDRATION ACTIVE
-                  </span>
-                  <h3 className="text-xl font-extrabold tracking-tight">Variegated Albo Borsigiana</h3>
-                  <p className="text-xs text-[#8E94B8]">
-                    Autonomous Soil Moisture Sensor: 42% (Optimal: 40-60%) · Water Pump Ready
-                  </p>
-                  <div className="pt-2 flex gap-2">
-                    <button 
-                      onClick={() => alert('Triggered micro-sprinkler hydration cycle!')}
-                      className="px-4 py-2 bg-[#00D26A] hover:bg-[#00B85C] text-black font-bold rounded-xl text-xs transition"
-                    >
-                      Trigger Mist Sprinkler
-                    </button>
-                    <button 
-                      onClick={() => handleTriggerAgentModal('hydration_sheet', 'Monstera Albo Moisture Diagnostics', { moisture: 42, pump: 'online' })}
-                      className="px-4 py-2 bg-[#1A1D34] hover:bg-[#252A4E] text-white font-bold rounded-xl text-xs border border-[#2E355C] transition"
-                    >
-                      Open Modal Sheet
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {selectedArtifact.id !== 'art-1' && selectedArtifact.id !== 'art-2' && (
+              {/* One renderer for every artifact. The two id-keyed blocks that
+                  used to sit above this rendered bespoke demo content for the
+                  fixture artifacts 'art-1' and 'art-2'; with real ids from the
+                  Vault they could never match again. */}
+              {(
                 <div className="p-6 bg-[#05060C] rounded-2xl border border-[#1A1D34] text-center space-y-3">
                   <div className="text-sm font-bold text-white">Live Component Renderer Active</div>
                   <pre className="text-xs text-[#38BDF8] text-left bg-[#0A0C18] p-4 rounded-xl overflow-x-auto">
@@ -470,6 +378,8 @@ export default function AgentFleetHUD() {
 }`}
               </pre>
             </div>
+          )}
+          </>
           )}
         </div>
       </div>

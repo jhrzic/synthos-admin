@@ -390,7 +390,17 @@ describe('STEP 6 concurrent-idempotency corrective pass — LIVE: real concurren
     const taskId = deriveIdempotentTaskId('vault', key);
     expect((db.prepare('SELECT COUNT(*) AS n FROM execution_claims WHERE task_id = ?').get(taskId) as any).n).toBe(1);
     expect((db.prepare('SELECT COUNT(*) AS n FROM artifacts WHERE task_id = ?').get(taskId) as any).n).toBe(1);
-  }, 20000);
+    // 45s, raised from 20s. This fires TEN genuinely concurrent HTTP requests,
+    // each doing a real Vault write, a real Aegis verification and a real
+    // Ed25519 signature, while 80-odd other test files run in parallel. An
+    // explicit per-test timeout overrides the global config, which is why
+    // raising the global had no effect on it.
+    //
+    // A TIME BUDGET ONLY. Every assertion above is unchanged — still exactly one
+    // execution claim and exactly one artifact, which is the whole point of the
+    // test. It passes 5/5 when run alone; the budget, not the behaviour, was
+    // what the suite's growth outgrew.
+  }, 45000);
 
   it('3. same idempotency key with a DIFFERENT payload is a conflict, never an accidental duplicate execution', async () => {
     const key = `payload-collision-${Date.now()}`;

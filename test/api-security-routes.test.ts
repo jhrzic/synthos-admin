@@ -260,8 +260,10 @@ describe('Pass III API security: the explicit public allowlist (E2) — never ac
       const idx = m.index!;
       const lineEnd = serverContent.indexOf('\n', idx);
       const line = serverContent.slice(idx, lineEnd);
-      if (!/requireAuth|requireWorkspaceMember\(|requireWorkspaceAdmin\(|requirePlatformAdmin|x-internal-service-token/i.test(line) &&
-          !/app\.post\("\/api\/execute-agent-task"/.test(line)) {
+      // `x-internal-service-token` and the /api/execute-agent-task exemption
+      // were both removed from this allowlist when the bypass was deleted —
+      // leaving them would let a future unguarded route hide behind them.
+      if (!/requireAuth|requireWorkspaceMember\(|requireWorkspaceAdmin\(|requirePlatformAdmin/i.test(line)) {
         unguardedUnexpected.push(routePath);
       }
     }
@@ -289,18 +291,26 @@ describe('Pass III: session cookie security attributes', () => {
   });
 });
 
-describe('Pass III: internal service token never leaks to any client-facing response', () => {
-  it('INTERNAL_SERVICE_TOKEN is never included in a res.json(...) call', () => {
-    const tokenUsages = [...serverContent.matchAll(/INTERNAL_SERVICE_TOKEN/g)];
-    expect(tokenUsages.length).toBeGreaterThan(0);
-    for (const usage of tokenUsages) {
-      const contextStart = Math.max(0, usage.index! - 200);
-      const contextEnd = Math.min(serverContent.length, usage.index! + 200);
-      const context = serverContent.slice(contextStart, contextEnd);
-      // The only legitimate appearances are: its own declaration/comment,
-      // the internal fetch header, and the auth-check comparison — never
-      // inside a JSON response body.
-      expect(context).not.toMatch(/res\.json\(\s*\{[^}]*INTERNAL_SERVICE_TOKEN/);
-    }
+// SUPERSEDED: this used to assert the internal service token never leaked
+// into a response, which required the token to exist. It no longer does.
+//
+// The bypass was dead code — nothing in server.ts, lib/ or src/ ever SET the
+// X-Internal-Service-Token header, there is no self-call to our own host, and
+// PORT is referenced only in the startup log — but it still skipped
+// requireWorkspaceMember and then took workspaceId from the request body,
+// defaulting to "ws-synthos-primary". "It cannot leak" is a weaker guarantee
+// than "it does not exist", so the assertion is inverted rather than deleted.
+describe('Pass III: the internal service token no longer exists at all', () => {
+  it('neither the constant nor the header appears anywhere in server.ts', () => {
+    const code = serverContent.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+    expect(code).not.toContain('INTERNAL_SERVICE_TOKEN');
+    expect(code).not.toMatch(/x-internal-service-token/i);
+  });
+
+  it('the route it used to exempt now carries a normal workspace guard', () => {
+    const idx = serverContent.indexOf('app.post("/api/execute-agent-task"');
+    expect(idx).toBeGreaterThan(-1);
+    const declaration = serverContent.slice(idx, serverContent.indexOf('\n', idx));
+    expect(declaration).toContain('requireWorkspaceMember(fromBody)');
   });
 });

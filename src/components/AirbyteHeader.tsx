@@ -19,6 +19,8 @@ interface AirbyteHeaderProps {
   onToggleVoice?: () => void;
   activeAgentsCount?: number;
   activeWorkspaceId?: string;
+  /** The real workspace NAME, so the header cannot contradict the selector. */
+  activeWorkspaceName?: string;
 }
 
 interface RuntimeSystemReport {
@@ -88,18 +90,25 @@ export const AirbyteHeader: React.FC<AirbyteHeaderProps> = ({
   onToggleVoice,
   activeAgentsCount = 0,
   activeWorkspaceId = 'ws-synthos-primary',
+  activeWorkspaceName,
 }) => {
   const [currentTime, setCurrentTime] = useState<string>('');
 
+  // Was a hardcoded switch on two workspace ids that do not exist in this
+  // deployment ('ws-research-sandbox', 'ws-growth-reach'), with a default of
+  // "Primary Fleet / PRODUCTION". So EVERY real workspace rendered as
+  // "Primary Fleet" — including the Isolation Test Workspace and any client
+  // workspace. Observed live: the header read "Primary Fleet · PRODUCTION"
+  // while the page showed the isolation workspace's zeros, which is what made
+  // those zeros look like a counter bug instead of an empty workspace.
+  //
+  // Now the real name, and no invented tier. `ws-synthos-primary` is the one
+  // id this deployment genuinely treats as production.
   const getWorkspaceDetails = () => {
-    switch (activeWorkspaceId) {
-      case 'ws-research-sandbox':
-        return { name: 'arXiv Lab', tier: 'STAGING', color: 'text-amber-400 border-amber-500/30 bg-amber-500/10' };
-      case 'ws-growth-reach':
-        return { name: 'Reach GTM', tier: 'VIRAL ENGINE', color: 'text-pink-400 border-pink-500/30 bg-pink-500/10' };
-      default:
-        return { name: 'Primary Fleet', tier: 'PRODUCTION', color: 'text-[#00D26A] border-[#00D26A]/30 bg-[#00D26A]/10' };
-    }
+    const name = activeWorkspaceName || activeWorkspaceId || 'No workspace';
+    return activeWorkspaceId === 'ws-synthos-primary'
+      ? { name, tier: 'PRODUCTION', color: 'text-[#00D26A] border-[#00D26A]/30 bg-[#00D26A]/10' }
+      : { name, tier: 'WORKSPACE', color: 'text-[#8E94B8] border-[#8E94B8]/30 bg-[#8E94B8]/10' };
   };
 
   const wsInfo = getWorkspaceDetails();
@@ -185,15 +194,15 @@ export const AirbyteHeader: React.FC<AirbyteHeaderProps> = ({
   ];
 
   return (
-    <header className="sticky top-0 z-50 bg-[#070812]/95 backdrop-blur-xl border-b border-[#181B2E] text-[#F3F4F9]">
+    <header className="sticky top-0 z-50 bg-[#08090b]/90 backdrop-blur-2xl border-b border-white/[0.07] text-[#f7f8f8] shadow-[0_1px_0_rgba(255,255,255,0.025)]">
       {/* Main Navigation & Telemetry Bar */}
-      <div className="max-w-[1920px] mx-auto px-4 sm:px-6 lg:px-8 h-16 py-2 flex items-center justify-between gap-4">
+      <div className="max-w-[1920px] mx-auto px-4 sm:px-6 lg:px-8 h-[68px] flex items-center justify-between gap-4">
         {/* Left: Sidebar Toggle + Brand Logo */}
         <div className="flex items-center gap-3 select-none shrink-0">
           {onToggleSidebar && (
             <button
               onClick={onToggleSidebar}
-              className="p-2 rounded-xl bg-[#0C0E1E] hover:bg-[#161B38] border border-[#1E2345] text-[#8E94B8] hover:text-white transition cursor-pointer flex items-center justify-center"
+              className="p-2 rounded-lg bg-white/[0.025] hover:bg-white/[0.055] border border-white/[0.08] text-[#8a8f98] hover:text-white transition-colors cursor-pointer flex items-center justify-center"
               title={isSidebarVisible ? "Collapse Left Navigation" : "Expand Left Navigation"}
             >
               <Menu className="w-5 h-5 text-[#8C8AFF]" />
@@ -205,9 +214,9 @@ export const AirbyteHeader: React.FC<AirbyteHeaderProps> = ({
             onClick={() => setActiveTab('overview')}
           >
             {/* Glowing Dual-Ring Logo */}
-            <div className="relative w-9 h-9 rounded-full bg-gradient-to-br from-[#615EFF] via-[#8C8AFF] to-[#EC4899] p-0.5 shadow-[0_0_16px_rgba(97,94,255,0.4)] flex items-center justify-center transition-transform group-hover:scale-105">
-              <div className="w-full h-full rounded-full bg-[#070812] flex items-center justify-center p-1">
-                <div className="w-4 h-4 rounded-full bg-gradient-to-tr from-[#615EFF] to-[#38BDF8] shadow-[0_0_8px_rgba(56,189,248,0.8)]" />
+            <div className="relative w-9 h-9 rounded-[10px] bg-[#5e6ad2] border border-white/15 shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_8px_24px_rgba(94,106,210,0.25)] flex items-center justify-center transition-transform group-hover:scale-[1.03]">
+              <div className="w-[18px] h-[18px] rounded-md border border-white/70 flex items-center justify-center">
+                <div className="w-1.5 h-1.5 rounded-full bg-white shadow-[0_0_10px_rgba(255,255,255,0.7)]" />
               </div>
             </div>
 
@@ -231,7 +240,7 @@ export const AirbyteHeader: React.FC<AirbyteHeaderProps> = ({
             <button
               key={card.name}
               onClick={card.onClick}
-              className="px-3 py-1.5 rounded-xl bg-[#0B0D1B] border border-[#1A1E36] hover:border-[#615EFF]/50 text-left transition cursor-pointer flex items-center gap-2.5 shrink-0 group"
+              className="px-3 py-1.5 rounded-lg bg-white/[0.025] border border-white/[0.07] hover:bg-white/[0.05] hover:border-white/[0.13] text-left transition-colors cursor-pointer flex items-center gap-2.5 shrink-0 group"
               title={`View ${card.name} details`}
             >
               <div className="flex flex-col">
@@ -261,7 +270,7 @@ export const AirbyteHeader: React.FC<AirbyteHeaderProps> = ({
           <button
             id="btn-restart-tour"
             onClick={onOpenTour}
-            className="hidden sm:inline-flex items-center gap-1.5 text-[10px] font-mono font-bold text-white bg-gradient-to-r from-[#615EFF] to-[#38BDF8] px-3 py-1.5 rounded-full shadow-[0_0_10px_rgba(97,94,255,0.4)] hover:opacity-90 transition cursor-pointer"
+            className="hidden sm:inline-flex items-center gap-1.5 text-[10px] font-mono font-semibold text-white bg-[#5e6ad2] border border-white/15 px-3 py-1.5 rounded-lg shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_6px_18px_rgba(94,106,210,0.2)] hover:bg-[#7170ff] transition-colors cursor-pointer"
             title="Start Interactive Guided Walkthrough"
           >
             <Sparkles className="w-3.5 h-3.5 text-white" />
@@ -288,7 +297,7 @@ export const AirbyteHeader: React.FC<AirbyteHeaderProps> = ({
           <button 
             id="header-search"
             onClick={onOpenQuickPrompt}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#0F1122] hover:bg-[#181B34] border border-[#222744] text-xs text-[#8E94B8] hover:text-white transition font-mono cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.025] hover:bg-white/[0.055] border border-white/[0.08] text-xs text-[#8a8f98] hover:text-white transition-colors font-mono cursor-pointer"
             title="Press Cmd+K for Command Palette"
           >
             <Zap className="w-3.5 h-3.5 text-[#615EFF]" />

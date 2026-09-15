@@ -14,12 +14,15 @@ interface SettingsViewProps {
   settings?: JarvisSettings;
   onUpdateSettings?: (newSettings: Partial<JarvisSettings>) => void;
   onRefreshMesh?: () => void;
+  /** Needed because the model-credential route is workspace-admin scoped. */
+  activeWorkspaceId?: string;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   settings: initialSettings,
   onUpdateSettings,
   onRefreshMesh,
+  activeWorkspaceId,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<'general' | 'connected' | 'security'>('general');
   const [isSyncing, setIsSyncing] = useState(false);
@@ -79,7 +82,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       },
       customApiKeys: {
         gemini: 'SERVER_MANAGED_KEY',
-        openai: s.customApiKeys?.openai || '',
+        // Server-managed, exactly like gemini: this screen must not hold an
+        // OpenAI key in browser state. See persistModelCredential below.
+        openai: 'SERVER_MANAGED_KEY',
         anthropic: s.customApiKeys?.anthropic || '',
         deepseek: s.customApiKeys?.deepseek || '',
         perplexity: s.customApiKeys?.perplexity || '',
@@ -156,6 +161,72 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setKeyDraft('');
     await refreshCredentialStatus();
   }, [refreshCredentialStatus]);
+
+  // ---------------------------------------------------------------------
+  // MODEL-PROVIDER CREDENTIALS — server state, presence only.
+  //
+  // This screen used to read these straight out of `settings.customApiKeys`,
+  // i.e. out of browser localStorage. So it could show a key the server had
+  // never received, and report "configured" for a provider that would fail on
+  // the first real call. The server is now the only authority; this is a
+  // presence cache of it, and the key value is never read back.
+  // ---------------------------------------------------------------------
+  const MODEL_CREDENTIAL_PROVIDERS = ['gemini', 'openai'] as const;
+  const [modelCredentials, setModelCredentials] = React.useState<Record<string, { apiKeyPresent: boolean; source: string; envVar: string }> | null>(null);
+  const [modelKeySaving, setModelKeySaving] = React.useState<string | null>(null);
+  /** Transient key drafts. Deliberately NOT part of `settings`, so nothing here can reach localStorage. */
+  const [modelKeyDrafts, setModelKeyDrafts] = React.useState<Record<string, string>>({});
+  const [modelKeyResult, setModelKeyResult] = React.useState<{ provider: string; ok: boolean; message: string } | null>(null);
+
+  const refreshModelCredentials = React.useCallback(async () => {
+    if (!activeWorkspaceId) return;
+    try {
+      const res = await fetch(`/api/business/model-credentials?workspaceId=${encodeURIComponent(activeWorkspaceId)}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const next: Record<string, { apiKeyPresent: boolean; source: string; envVar: string }> = {};
+      for (const row of data.providers || []) {
+        next[row.provider] = { apiKeyPresent: Boolean(row.apiKeyPresent), source: String(row.source), envVar: String(row.envVar) };
+      }
+      setModelCredentials(next);
+    } catch { /* presence unknown; the UI does not claim configured */ }
+  }, [activeWorkspaceId]);
+
+  React.useEffect(() => { void refreshModelCredentials(); }, [refreshModelCredentials]);
+
+  const persistModelCredential = React.useCallback(async (provider: string, apiKey: string) => {
+    if (!activeWorkspaceId || !apiKey.trim()) return;
+    setModelKeySaving(provider);
+    setModelKeyResult(null);
+    try {
+      const res = await fetch('/api/business/model-credential', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId: activeWorkspaceId, provider, apiKey: apiKey.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        setModelKeyResult({ provider, ok: false, message: String(data?.error || `Save failed (HTTP ${res.status}).`) });
+      } else {
+        // The save and the live verification are reported separately: a saved
+        // key that the provider rejects is stored but not working, and
+        // conflating the two is how a broken key looks configured.
+        const verified = data?.verification?.ok === true;
+        setModelKeyResult({
+          provider,
+          ok: verified,
+          message: verified
+            ? `Saved and verified against the provider (model ${data.verification.model}).`
+            : `Saved server-side, but the provider rejected it: ${String(data?.verification?.error || 'no reason given')}`,
+        });
+      }
+    } catch (err: any) {
+      setModelKeyResult({ provider, ok: false, message: String(err?.message || 'Save failed.') });
+    } finally {
+      setModelKeySaving(null);
+      await refreshModelCredentials();
+    }
+  }, [activeWorkspaceId, refreshModelCredentials]);
 
   const handleTestFishAudio = async () => {
     const targetVoiceId = settings.FISH_AUDIO_DEFAULT_VOICE_ID || settings.fishAudioConfig?.voiceId || DEFAULT_FISH_AUDIO_VOICE_ID;
@@ -835,15 +906,29 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <div className="relative">
                     <input
                       type={showKeys[item.key] ? 'text' : 'password'}
-                      value={(settings.customApiKeys as any)[item.key] || ''}
+                      value={
+                        // A server-managed provider's field is always an empty
+                        // draft box, never a rendering of stored state: the
+                        // value is not readable back, and showing anything here
+                        // would be showing browser state as if it were the
+                        // server's.
+                        (MODEL_CREDENTIAL_PROVIDERS as readonly string[]).includes(item.key) || item.key === 'fish_audio'
+                          ? (modelKeyDrafts[item.key] ?? '')
+                          : ((settings.customApiKeys as any)[item.key] || '')
+                      }
                       onChange={(e) => {
                         const val = e.target.value;
-                        setSettings(s => ({
-                          ...s,
-                          // fish_audio deliberately omitted: the Fish Audio key
-                          // is server-side state, not settings state.
-                          customApiKeys: { ...s.customApiKeys, [item.key]: item.key === 'fish_audio' ? '' : val },
-                        }));
+                        const serverManaged = (MODEL_CREDENTIAL_PROVIDERS as readonly string[]).includes(item.key) || item.key === 'fish_audio';
+                        if (serverManaged) {
+                          // Held only in a transient draft. Never written into
+                          // `settings`, so it can never reach localStorage.
+                          setModelKeyDrafts((d) => ({ ...d, [item.key]: val }));
+                        } else {
+                          setSettings(s => ({
+                            ...s,
+                            customApiKeys: { ...s.customApiKeys, [item.key]: val },
+                          }));
+                        }
                         if (item.key === 'fish_audio' && val.trim()) {
                           void persistVoiceCredential(val);
                         }
@@ -859,6 +944,47 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       {showKeys[item.key] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                     </button>
                   </div>
+
+                  {/* Server-managed providers: the authority line and the save
+                      action. Presence comes from the SERVER, never from the
+                      browser, so this can never claim configured for a key the
+                      server does not hold. */}
+                  {(MODEL_CREDENTIAL_PROVIDERS as readonly string[]).includes(item.key) && (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[10px] font-mono text-[#7B82A8]">
+                          {modelCredentials === null ? (
+                            <span className="text-[#8E94B8]">SERVER STATE UNKNOWN — could not be read</span>
+                          ) : modelCredentials[item.key]?.apiKeyPresent ? (
+                            <span className="text-[#00D26A] font-bold">
+                              KEY SET (server-side, source: {modelCredentials[item.key].source})
+                            </span>
+                          ) : (
+                            <span className="text-[#8E94B8]">
+                              NOT CONFIGURED — server holds no key ({modelCredentials[item.key]?.envVar || 'env var'} also unset)
+                            </span>
+                          )}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={!activeWorkspaceId || modelKeySaving === item.key || !(modelKeyDrafts[item.key] || '').trim()}
+                          onClick={() => void persistModelCredential(item.key, modelKeyDrafts[item.key] || '')
+                            .then(() => setModelKeyDrafts((d) => ({ ...d, [item.key]: '' })))}
+                          className="text-[10px] font-mono font-bold px-2.5 py-1 rounded-md bg-[#615EFF] hover:bg-[#524EFA] disabled:opacity-40 disabled:cursor-not-allowed text-white shrink-0"
+                        >
+                          {modelKeySaving === item.key ? 'Saving…' : 'Save to server'}
+                        </button>
+                      </div>
+                      {modelKeyResult?.provider === item.key && (
+                        <p className={`text-[10px] font-mono ${modelKeyResult.ok ? 'text-[#00D26A]' : 'text-[#FFB020]'}`}>
+                          {modelKeyResult.message}
+                        </p>
+                      )}
+                      <p className="text-[9px] text-[#585E82]">
+                        Written to the encrypted server-side store. The value is never returned to this screen and never kept in browser storage.
+                      </p>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

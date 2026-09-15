@@ -445,9 +445,15 @@ describe('STATIC: provider-error and empty-response failure branches (unreachabl
 const vaultContent = fs.readFileSync(path.resolve(REPO_ROOT, 'lib/vault.ts'), 'utf-8');
 
 describe('STATIC: the success path (VERIFIED) — ordering that Step 3+ must preserve', () => {
-  it('exact order: model.gemini invocation -> PROVIDER_COMPLETED -> writeWorkspaceArtifact (canonical writer, DB+disk) -> ARTIFACT_SAVED -> AWAITING_VERIFICATION -> Aegis run -> recordQualityReview -> (VERIFIED branch) AWAITING_RECEIPT -> AEGIS_REVIEWED -> sign -> verify -> recordReceipt -> RECEIPT_CREATED -> DONE -> TASK_COMPLETED -> KIL (best-effort) -> memory index (best-effort)', () => {
+  // PUSH 1 — the first marker changed from the literal ctx.invoke("model.gemini")
+  // to the provider-derived ctx.invoke(invocationName). The ORDERING this
+  // test exists to pin is what matters and is entirely unchanged: the
+  // provider call still happens first, and every persistence, verification
+  // and signing step after it still happens in exactly this sequence, for
+  // both providers, from this one shared block.
+  it('exact order: provider invocation -> PROVIDER_COMPLETED -> writeWorkspaceArtifact (canonical writer, DB+disk) -> ARTIFACT_SAVED -> AWAITING_VERIFICATION -> Aegis run -> recordQualityReview -> (VERIFIED branch) AWAITING_RECEIPT -> AEGIS_REVIEWED -> sign -> verify -> recordReceipt -> RECEIPT_CREATED -> DONE -> TASK_COMPLETED -> KIL (best-effort) -> memory index (best-effort)', () => {
     const order = [
-      'await ctx.invoke("model.gemini", async () => {',
+      'await ctx.invoke(invocationName, async () => {',
       'eventType: "PROVIDER_COMPLETED"',
       'writeWorkspaceArtifact({',
       'eventType: "ARTIFACT_SAVED"',
@@ -517,11 +523,19 @@ describe('STATIC (PHASE 0b FIX, preserved through Step 1b): the signed receipt\'
     expect(payloadBlock).toContain('workspaceId: resolvedWorkspaceId,');
   });
 
-  it('resolvedWorkspaceId is derived once in the route wrapper (server.ts), from the real authenticated/verified membership when the auth middleware ran, falling back to the request body only for the internal-service-token bypass (which skips that middleware by design) — then passed into the kernel as a plain parameter, never re-derived inside it', () => {
+  // UPDATED: the fallback is gone with the bypass. There is no longer any
+  // path into this route that skips requireWorkspaceMember, so
+  // authWorkspaceId is always present — and the old
+  // `?? req.body.workspaceId || "ws-synthos-primary"` tail was the dangerous
+  // half: it silently wrote real tasks, artifacts and signed receipts into
+  // the primary workspace for any caller that reached the handler without
+  // membership.
+  it('resolvedWorkspaceId comes ONLY from the verified membership, with no caller-supplied fallback and no hardcoded default — then passed into the kernel as a plain parameter, never re-derived inside it', () => {
     const routeSlice = executeAgentTaskRouteSlice();
-    expect(routeSlice).toContain(
-      'const resolvedWorkspaceId =\n        (req as AuthedRequest).authWorkspaceId ?? ((req.body || {}).workspaceId || "ws-synthos-primary");'
-    );
+    const code = routeSlice.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+    expect(code).toContain('const resolvedWorkspaceId = (req as AuthedRequest).authWorkspaceId!');
+    expect(code).not.toContain('"ws-synthos-primary"');
+    expect(code).not.toMatch(/req\.body[^\n]*workspaceId/);
     expect(routeSlice).toContain('executeAgentTask(req.body, resolvedWorkspaceId, ctx)');
     // Inside the kernel, resolvedWorkspaceId is only ever a function
     // parameter, read many times, assigned nowhere.
@@ -558,7 +572,11 @@ describe('STATIC (STEP 1b — the one permitted evidence correction over Phase 0
 
   it('this changes nothing observable in this environment: BLOCKED_MISSING_CREDENTIAL (the only reachable outcome, per LIVE 3 above) returns before ctx.invoke() is ever called, so ctx.getInvocations() is empty and toolCalls would still be [] if that response included the field at all — and it does not (LIVE 3 already asserts the exact response body, which has no toolCalls key)', () => {
     const apiKeyCheckIdx = kernelContent.indexOf('if (!apiKey) {');
-    const invokeIdx = kernelContent.indexOf('await ctx.invoke("model.gemini"');
+    // PUSH 1 — same marker change as the ordering test above. The property
+    // asserted is unchanged: the credential gate still returns before any
+    // provider call can be observed, so a blocked run can never leave an
+    // invocation trace implying a provider ran.
+    const invokeIdx = kernelContent.indexOf('await ctx.invoke(invocationName');
     expect(apiKeyCheckIdx).toBeGreaterThan(-1);
     expect(invokeIdx).toBeGreaterThan(apiKeyCheckIdx); // the only live-reachable return in this environment happens first
   });

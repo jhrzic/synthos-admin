@@ -21,9 +21,11 @@
 
 import { getDatabase } from './persistence';
 import { encryptVoiceSecret, decryptVoiceSecret } from './voice-credentials';
+import { recordProviderAttempt } from './provider-state';
+import { scrubSecrets } from './redact';
 
 /** Providers this build can actually execute. Not a wish list. */
-export const SUPPORTED_MODEL_PROVIDERS = ['gemini'] as const;
+export const SUPPORTED_MODEL_PROVIDERS = ['gemini', 'openai'] as const;
 export type ModelProvider = (typeof SUPPORTED_MODEL_PROVIDERS)[number];
 
 export function isModelProvider(v: unknown): v is ModelProvider {
@@ -33,6 +35,7 @@ export function isModelProvider(v: unknown): v is ModelProvider {
 /** The environment variable each provider reads, so precedence is inspectable. */
 const PROVIDER_ENV_VAR: Record<ModelProvider, string> = {
   gemini: 'GEMINI_API_KEY',
+  openai: 'OPENAI_API_KEY',
 };
 
 export type ModelKeySource = 'environment' | 'server_store' | 'none';
@@ -52,9 +55,18 @@ interface Row {
 }
 
 function readRow(provider: ModelProvider): Row | undefined {
-  return getDatabase()
-    .prepare('SELECT provider, api_key_encrypted, updated_at FROM model_credentials WHERE provider = ?')
-    .get(provider) as Row | undefined;
+  // A credential lookup must never be the thing that takes a request down.
+  // This is now called from the execution kernel, where an unreachable or
+  // not-yet-migrated database would otherwise turn "no key stored" into a
+  // 500. Absent is reported as absent; the environment is still consulted
+  // by the caller either way.
+  try {
+    return getDatabase()
+      .prepare('SELECT provider, api_key_encrypted, updated_at FROM model_credentials WHERE provider = ?')
+      .get(provider) as Row | undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -128,11 +140,32 @@ export async function verifyModelCredential(provider: ModelProvider): Promise<
   { ok: true; model: string; sample: string } | { ok: false; error: string }
 > {
   const { apiKey } = resolveModelApiKey(provider);
+  // Not an attempt: nothing was sent, so recording a provider failure here
+  // would blame the provider for a missing key.
   if (!apiKey) return { ok: false, error: 'No API key is configured for this provider.' };
-  if (provider !== 'gemini') return { ok: false, error: `No verification path is implemented for ${provider}.` };
+
+  if (provider === 'openai') {
+    const startedAt = Date.now();
+    const result = await verifyOpenAiCredential(apiKey);
+    // PROVIDER STATUS TRUTH — this is a REAL call, so its outcome is the
+    // evidence lib/provider-state.ts reads to decide LIVE_VERIFIED versus
+    // QUOTA_BLOCKED versus PROVIDER_ERROR. Before this, PROVIDER_CALL was a
+    // declared event type that nothing emitted, so "last verified" had no
+    // source and the registry fell back to "a key exists" as if that proved
+    // the provider worked.
+    recordProviderAttempt({
+      provider: 'openai',
+      ok: result.ok,
+      modelUsed: result.ok ? result.model : null,
+      errorMessage: result.ok ? null : (result as { ok: false; error: string }).error,
+      latencyMs: Date.now() - startedAt,
+    });
+    return result;
+  }
 
   const { normalizeGeminiModel } = await import('./model-router');
   const model = normalizeGeminiModel();
+  const geminiStartedAt = Date.now();
   try {
     const { GoogleGenAI } = await import('@google/genai');
     const ai = new GoogleGenAI({ apiKey });
@@ -142,16 +175,49 @@ export async function verifyModelCredential(provider: ModelProvider): Promise<
       config: { maxOutputTokens: 10, temperature: 0 },
     });
     const sample = String((response as any)?.text ?? '').trim();
-    if (!sample) return { ok: false, error: 'The provider accepted the key but returned nothing.' };
+    if (!sample) {
+      const empty = { ok: false as const, error: 'The provider accepted the key but returned nothing.' };
+      recordProviderAttempt({ provider, ok: false, errorMessage: empty.error, latencyMs: Date.now() - geminiStartedAt });
+      return empty;
+    }
+    recordProviderAttempt({ provider, ok: true, modelUsed: model, latencyMs: Date.now() - geminiStartedAt });
     return { ok: true, model, sample: sample.slice(0, 80) };
   } catch (err: any) {
     // Provider errors can echo the key back in a URL or header dump. Scrub any
     // long key-shaped token before this reaches a log or a response.
-    const raw = String(err?.message || 'The provider call failed.');
-    const safe = raw
-      .replace(/AIza[A-Za-z0-9_-]{10,}/g, 'AIza…REDACTED…')
-      .replace(/\b[A-Za-z0-9_-]{32,}\b/g, '…REDACTED…')
-      .slice(0, 300);
+    // Uses the one shared scrubber (lib/redact.ts) rather than a third local
+    // copy of the pattern list — the divergence Pass 2 consolidated.
+    const safe = scrubSecrets(String(err?.message || 'The provider call failed.'), 300);
+    recordProviderAttempt({ provider, ok: false, errorMessage: safe, latencyMs: Date.now() - geminiStartedAt });
     return { ok: false, error: safe };
   }
+}
+
+/**
+ * A real OpenAI call proving the key works, before it is ever relied on in
+ * a run. Deliberately routed through the SAME adapter the kernel executes
+ * with (lib/fabric/model-openai.ts) rather than a private fetch: a
+ * verification that exercises a different code path than production can
+ * pass while production fails, which is worse than no verification.
+ *
+ * Returns the model the PROVIDER reported running, never the key.
+ */
+async function verifyOpenAiCredential(
+  apiKey: string
+): Promise<{ ok: true; model: string; sample: string } | { ok: false; error: string }> {
+  const { resolveDefaultOpenAiModel } = await import('./model-router');
+  const { generateViaOpenAI } = await import('./fabric/model-openai');
+  const model = resolveDefaultOpenAiModel();
+
+  const result = await generateViaOpenAI({
+    apiKey,
+    contents: 'Reply with the single word: ready',
+    candidateModels: [model],
+    timeoutMs: 20_000,
+  });
+
+  if (!result.output.trim()) {
+    return { ok: false, error: result.lastProviderError || 'The provider accepted the key but returned nothing.' };
+  }
+  return { ok: true, model: result.modelUsed || model, sample: result.output.trim().slice(0, 80) };
 }

@@ -217,7 +217,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
 
       {/* Rail Navigation Sidebar */}
       <aside
-        className={`fixed md:sticky md:top-[73px] h-screen md:h-[calc(100vh-73px)] top-0 bottom-0 left-0 z-40 bg-[#060710] border-r border-[#151728] flex flex-col justify-between transition-all duration-300 font-mono shrink-0 select-none ${
+        className={`fixed md:sticky md:top-[68px] h-screen md:h-[calc(100vh-68px)] top-0 bottom-0 left-0 z-40 bg-[#0b0c0f]/95 backdrop-blur-xl border-r border-white/[0.065] flex flex-col justify-between transition-all duration-300 font-sans shrink-0 select-none ${
           isMobileOpen
             ? 'translate-x-0 w-64 p-3 z-50'
             : isVisible
@@ -226,7 +226,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
         } ${isVisible && isCollapsed ? 'md:w-14 md:p-2' : isVisible ? 'md:w-64 md:p-3' : ''}`}
       >
         {/* Top Header & Collapse Toggle */}
-        <div className="flex items-center justify-between pb-3 border-b border-[#151728] shrink-0">
+        <div className="flex items-center justify-between pb-3 border-b border-white/[0.06] shrink-0">
           {!isCollapsed ? (
             <div className="flex items-center gap-2 px-1">
               <div className="w-3 h-3 rounded-full bg-[#615EFF] shadow-[0_0_8px_#615EFF]" />
@@ -249,7 +249,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
         
         {/* Environment Selector Dropdown for Left Rail */}
         {!isCollapsed && (
-          <div className="py-2 px-2 border-b border-[#151728] space-y-1 shrink-0 bg-[#080916]/60">
+          <div className="py-3 px-2 border-b border-white/[0.06] space-y-1.5 shrink-0">
             <div className="flex items-center justify-between">
               <span className="text-[9px] font-bold text-[#555A7E] uppercase block font-mono tracking-wider">
                 ENVIRONMENT
@@ -313,10 +313,10 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
                             }}
                             className={`group relative w-full flex items-center ${
                               isCollapsed ? 'justify-center p-2.5' : 'justify-between px-2.5 py-1.5'
-                            } rounded-xl text-xs font-medium transition cursor-pointer select-none ${
+                            } rounded-lg text-[13px] font-medium transition-colors cursor-pointer select-none ${
                               isActive
-                                ? 'bg-[#615EFF] text-white shadow-lg shadow-[#615EFF]/30 font-bold'
-                                : 'text-[#9AA2C6] hover:bg-[#121424] hover:text-white'
+                                ? 'bg-white/[0.075] text-white shadow-[inset_3px_0_0_#7170ff] font-semibold'
+                                : 'text-[#8a8f98] hover:bg-white/[0.04] hover:text-[#f7f8f8]'
                             }`}
                           >
                             <div className="flex items-center gap-2.5 min-w-0">

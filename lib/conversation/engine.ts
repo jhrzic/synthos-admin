@@ -33,8 +33,9 @@
 
 import crypto from 'node:crypto';
 import { getDatabase } from '../persistence';
-import { searchWorkspaceMemoryScoped, type ScopedMemoryResult } from '../memory-index';
+import { searchWorkspaceMemoryScoped, listWorkspaceMemoryContent, workspaceCorpusFingerprint, type ScopedMemoryResult } from '../memory-index';
 import { normalizeOrigin } from './origins';
+import { questionFocus, isAnswerable, FRAMING_VERBS } from './answerability';
 
 export type Channel = 'WEB' | 'MOBILE_APP' | 'VOICE_CALL' | 'SMS' | 'WHATSAPP';
 export type ConversationStatus = 'ACTIVE' | 'HANDOFF_REQUESTED' | 'CLOSED';
@@ -499,6 +500,41 @@ export const BUSINESS_KNOWLEDGE_FOLDER = 'Business-Knowledge/';
 const SPECIFIC_TERM_MIN_LENGTH = 5;
 
 /**
+ * DAYS 4-5 — length is a poor proxy for specificity, and the attorney vertical
+ * proved it.
+ *
+ * The length rule above rejects incidental overlap on SHORT common words
+ * ("work", "area", "time"). It cannot reject overlap on a LONG word that
+ * happens to be ubiquitous in one particular business's corpus. Real failures,
+ * both from live runs:
+ *
+ *   "Is there parking at your office?"        -> matched on "office"
+ *   "Which attorney would be assigned to me?" -> matched on "attorney"
+ *
+ * Both are ≥5 characters, so both counted as specific; both appear in nearly
+ * every document a law firm publishes, so neither carries any information. The
+ * assistant answered a parking question with a privacy disclaimer. It never
+ * INVENTED anything — the quote was real published material — but returning a
+ * confidently irrelevant passage instead of admitting ignorance is its own
+ * failure, and a worse one for a demo, because it reads as an answer.
+ *
+ * The same shape appeared in the mattress vertical on "mattress", which is why
+ * this is a corpus property rather than a legal-domain quirk.
+ *
+ * The fix is document frequency, the classic signal for exactly this: a term
+ * appearing in most of a corpus distinguishes nothing within it. Expressed as a
+ * FRACTION, so it stays corpus-size independent in the way the note above
+ * cares about — unlike the bm25 magnitude that was correctly abandoned.
+ *
+ * Below three documents the notion is meaningless (in a two-document corpus
+ * every shared term is "ubiquitous"), so the rule does not apply there and the
+ * length rule alone governs — which is the behaviour every new customer starts
+ * with, unchanged.
+ */
+const UBIQUITOUS_DOC_FRACTION = 0.6;
+const MIN_DOCS_FOR_UBIQUITY = 3;
+
+/**
  * Vocabulary bridging.
  *
  * A customer asks "how much does it cost"; the business wrote "the diagnostic
@@ -538,7 +574,19 @@ const SYNONYMS: Record<string, string[]> = {
   services: ['service', 'offer', 'provide'],
   replacement: ['replace', 'replacements', 'replacing', 'new'],
   repair: ['repairs', 'repairing', 'fix', 'fixing'],
+  // General English, not domain vocabulary: a customer says "take away", a
+  // business writes "removal". Both name the same act for a mattress, a skip or
+  // a piano, which is what keeps this vertical-neutral.
+  take: ['remove', 'removal', 'removes', 'removing', 'collect', 'collection'],
+  remove: ['removal', 'take', 'collect', 'collection'],
+  removal: ['remove', 'take', 'collect'],
+  parking: ['park', 'car park', 'carpark'],
+  documents: ['document', 'paperwork', 'papers', 'certificate', 'certificates'],
+  document: ['documents', 'paperwork', 'papers'],
 };
+
+/** Exported for tests, so answerability is exercised against the real vocabulary. */
+export const SYNONYMS_FOR_TEST = SYNONYMS;
 
 function queryTerms(query: string): string[] {
   return (query.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) || []).filter((w) => !STOPWORDS.has(w));
@@ -592,17 +640,109 @@ function hasTerm(haystackLower: string, term: string): boolean {
  * like "…profiling captures cycle-accurate execution costs…" — technically a
  * quote, useless as an answer. A business answer has to be a whole thought.
  */
-export function bestPassage(content: string, query: string, maxChars = 700): { text: string; score: number } | null {
+/**
+ * Terms that appear in at least UBIQUITOUS_DOC_FRACTION of a workspace's
+ * published knowledge, and therefore distinguish nothing within it.
+ *
+ * Computed from the real indexed corpus, bounded by listWorkspaceMemory's own
+ * limit. Memoised per workspace against a cheap fingerprint (document count +
+ * latest update), so an unchanged corpus is computed once rather than on every
+ * turn, and a changed one is recomputed without any explicit invalidation.
+ */
+const ubiquityCache = new Map<string, { fingerprint: string; terms: Set<string> }>();
+
+export function ubiquitousTerms(workspaceId: string): Set<string> {
+  // Check the cache with two SQL aggregates FIRST. Loading every document's
+  // text just to decide whether the cache is still valid made this the most
+  // expensive thing on the conversation path, for no benefit on a warm cache.
+  const fingerprint = workspaceCorpusFingerprint(workspaceId, BUSINESS_KNOWLEDGE_FOLDER);
+  const cached = ubiquityCache.get(workspaceId);
+  if (cached && cached.fingerprint === fingerprint) return cached.terms;
+
+  const docs = listWorkspaceMemoryContent(workspaceId, BUSINESS_KNOWLEDGE_FOLDER, 200);
+  if (docs.length < MIN_DOCS_FOR_UBIQUITY) {
+    // Cache the empty answer too — otherwise a small corpus reloads every turn.
+    ubiquityCache.set(workspaceId, { fingerprint, terms: new Set() });
+    return new Set();
+  }
+
+  const docFreq = new Map<string, number>();
+  for (const doc of docs) {
+    const seen = new Set<string>();
+    for (const raw of `${doc.title} ${doc.content}`.toLowerCase().split(/[^a-z0-9']+/)) {
+      if (raw.length < SPECIFIC_TERM_MIN_LENGTH) continue;
+      if (seen.has(raw)) continue;
+      seen.add(raw);
+      docFreq.set(raw, (docFreq.get(raw) || 0) + 1);
+    }
+  }
+  const threshold = docs.length * UBIQUITOUS_DOC_FRACTION;
+  const terms = new Set<string>();
+  for (const [term, n] of docFreq) if (n >= threshold) terms.add(term);
+
+  ubiquityCache.set(workspaceId, { fingerprint, terms });
+  return terms;
+}
+
+export function bestPassage(content: string, query: string, maxChars = 700, ubiquitous?: Set<string>): { text: string; score: number } | null {
   const concepts = conceptsOf(query);
   if (concepts.length === 0) return null;
 
-  const body = String(content || '')
+  const stripped = String(content || '')
     .replace(/^#+\s.*$/gm, '')            // headings carry the title, not the answer
-    .replace(/^-{3,}[\s\S]*?-{3,}/m, '')  // yaml frontmatter
-    .replace(/\s+/g, ' ')
-    .trim();
+    .replace(/^-{3,}[\s\S]*?-{3,}/m, ''); // yaml frontmatter
 
-  const sentences = body.split(/(?<=[.!?])\s+(?=[A-Z"'(])/).filter((x) => x.trim().length > 25);
+  // DAYS 4-5 — tables must not collapse into one passage.
+  //
+  // This used to `.replace(/\s+/g, ' ')` the whole document before splitting on
+  // sentence punctuation. A markdown table contains no sentence punctuation, so
+  // an entire product catalogue became a SINGLE enormous "sentence" holding
+  // every model name and every attribute in the range. It then matched almost
+  // any question about any product and, being one unit, always won — so the
+  // mattress vertical answered "how much is the Ashgrove Latex?", "do you have
+  // the Carrow Hybrid in stock?" and "latex versus memory foam?" with the same
+  // undifferentiated table dump.
+  //
+  // Product catalogues are tables, so this is a general defect rather than a
+  // quirk of one demo. Each table ROW is a coherent unit about one thing and is
+  // treated as its own passage; the header and separator rows are dropped
+  // because they describe the table rather than answer anything.
+  const units: string[] = [];
+  let paragraph: string[] = [];
+  const flushParagraph = () => {
+    if (paragraph.length === 0) return;
+    const text = paragraph.join(' ').replace(/\s+/g, ' ').trim();
+    paragraph = [];
+    for (const piece of text.split(/(?<=[.!?])\s+(?=[A-Z"'(])/)) units.push(piece);
+  };
+
+  const isSeparatorRow = (line: string) => /^\|[\s:|-]+\|?$/.test(line);
+  const lines = stripped.split(/\r?\n/).map((l) => l.trim());
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith('|')) {
+      flushParagraph();
+      // A separator row (|---|---|) carries no content.
+      if (isSeparatorRow(line)) continue;
+      // The row immediately ABOVE a separator is the header. It names the
+      // columns rather than saying anything, and including it was visible in
+      // real output: every table answer opened with
+      // "Model | Construction | Firmness | Typically suits". Dropping it needs
+      // this lookahead — a header row is otherwise indistinguishable from a
+      // data row, since both are just pipes and text.
+      const next = lines.slice(i + 1).find((l) => l !== '');
+      if (next && isSeparatorRow(next)) continue;
+      units.push(line.replace(/\s*\|\s*/g, ' | ').replace(/^\s*\|\s*|\s*\|\s*$/g, '').trim());
+    } else if (line === '') {
+      flushParagraph();
+    } else {
+      paragraph.push(line);
+    }
+  }
+  flushParagraph();
+
+  const sentences = units.filter((x) => x.trim().length > 25);
   if (sentences.length === 0) return null;
 
   const coverage = (text: string) => {
@@ -635,9 +775,32 @@ export function bestPassage(content: string, query: string, maxChars = 700): { t
 
   if (matched.length === 1) {
     const only = matched[0];
-    // A lone match must be on a specific word. Overlapping on a short common
-    // term ("work", "area", "time") is a coincidence, not an answer.
-    if (!only.some((t) => t.length >= SPECIFIC_TERM_MIN_LENGTH && hasTerm(low, t))) return null;
+    // A lone match must be on a specific word. Two ways a word fails that:
+    //   - it is SHORT and common ("work", "area", "time") — coincidence;
+    //   - it is long but UBIQUITOUS in this business's own corpus ("attorney"
+    //     for a law firm, "mattress" for a mattress shop) — it distinguishes
+    //     nothing, so matching it is not evidence the passage answers anything.
+    //
+    // EXCEPTION, found by rerunning the attorney vertical: when the question
+    // contains only ONE concept and that concept is the corpus's own central
+    // subject, ubiquity must not veto. "How does a consultation work?" reduces
+    // to the single concept "consultation" — ubiquitous in a law firm's
+    // corpus — and refusing it meant refusing a question answered by a document
+    // literally titled "How a consultation with Harrow & Vance works". Ubiquity
+    // means "this term does not DISTINGUISH between documents", which is only a
+    // reason to refuse when something more specific was available to ask about.
+    // "Substantive" excludes the light/process verbs that frame a request
+    // without being its subject — shared with the answerability module so both
+    // use one notion of what counts as a thing being asked about. Without this,
+    // "How does a consultation work?" looks like a two-concept question
+    // (consultation + work) and the exception below never fires.
+    const substantive = concepts.filter((g) => !FRAMING_VERBS.has(g[0]));
+    const onlyConceptAsked = substantive.length <= 1;
+    const specific = only.some((t) =>
+      t.length >= SPECIFIC_TERM_MIN_LENGTH
+      && hasTerm(low, t)
+      && (onlyConceptAsked || !(ubiquitous && ubiquitous.has(t))));
+    if (!specific) return null;
 
     // ...and it must be the customer's OWN word, not only a synonym of it.
     //
@@ -768,12 +931,39 @@ export function gatherEvidence(workspaceId: string, text: string): {
   hit: ScopedMemoryResult; passage: string; score: number;
 }[] {
   const hits = retrieveBusinessContext(workspaceId, text, 4);
+  // Computed once per turn, memoised across turns for an unchanged corpus.
+  const ubiquitous = ubiquitousTerms(workspaceId);
   const scored: { hit: ScopedMemoryResult; passage: string; score: number }[] = [];
   for (const h of hits) {
-    const p = bestPassage(h.content, text);
+    const p = bestPassage(h.content, text, 700, ubiquitous);
     if (p) scored.push({ hit: h, passage: p.text, score: p.score });
   }
   scored.sort((a, b) => b.score - a.score);
+
+  // ANSWERABILITY GATE — placed here deliberately, and this placement is the fix.
+  //
+  // It was first put in answerQuestion(), where it did nothing: the live path is
+  // answerWithBestAvailableMode(), which calls gatherEvidence() directly and
+  // builds its own extractive reply, reaching answerQuestion() only when there
+  // is no evidence at all. Two callers, two copies of the same decision, and the
+  // gate sitting in the one that customers never reach.
+  //
+  // gatherEvidence() is the single point where retrieval becomes an answer, so
+  // gating here covers every consumer and cannot drift between them. Returning
+  // [] rather than a flag is deliberate too: both callers already treat "no
+  // evidence" as a refusal, so no caller has to learn a new concept.
+  //
+  // Retrieval itself is untouched — relevance still finds and orders the
+  // candidates. This only asks whether the best one speaks to what was asked.
+  if (scored.length > 0) {
+    const verdict = isAnswerable(questionFocus(text), scored[0].passage, {
+      ubiquitous: ubiquitousTerms(workspaceId),
+      synonymsOf: (t) => SYNONYMS[t] || [],
+      matches: hasTerm,
+    });
+    if (!verdict.answerable) return [];
+  }
+
   return scored;
 }
 

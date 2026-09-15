@@ -55,7 +55,9 @@ import { verifyTaskAtGate } from '../kil-gate';
 import { indexVaultArtifact, searchWorkspaceMemory } from '../memory-index';
 import { writeWorkspaceArtifact, listWorkspaceVaultEntries } from '../vault';
 import * as windmillClient from '../windmill-client';
-import { listWorkspaceExternalExecutions } from '../external-executions';
+import { listWorkspaceExternalExecutions, guardianCheckInstruction } from '../external-executions';
+import { recordRuntimeEvent, type RuntimeEventStatus } from '../runtime-events';
+import { runHermesLocalTask, isHermesLocalConfigured, isHermesLocalEnabled, getHermesCliPath } from '../hermes-local-runtime';
 
 export type EnvelopeOutcome = 'SUCCESS' | 'READ_OK' | 'BLOCKED' | 'NOT_CONFIGURED' | 'APPROVAL_REQUIRED' | 'FAILED' | 'IN_PROGRESS' | 'CONFLICT';
 
@@ -104,7 +106,129 @@ export interface ExecutionEnvelopeResult {
 // silently special-cased inline in the dispatch switch below.
 export const EXTERNAL_ACTION_EXEMPT_FROM_GUARDIAN_RULE = new Set<string>(['vault.write']);
 
+/**
+ * PASS 2 — the attempt ledger.
+ *
+ * executeEnvelope is now a thin recording wrapper around the real dispatcher.
+ * Before this, the four refusal paths below (unregistered capability,
+ * NOT_CONFIGURED/UNSUPPORTED, an external action without wired Guardian
+ * enforcement, APPROVAL_REQUIRED) each returned a value to the caller and
+ * persisted NOTHING. A Guardian-blocked execution therefore left no trace in
+ * any table, which made "prove nothing ran without Guardian's consent"
+ * unanswerable after the fact — the absence of a receipt is not evidence of a
+ * refusal, because it is equally consistent with the attempt never happening.
+ *
+ * Every outcome now writes one row to the existing runtime_events ledger. No
+ * second truth store: successes still own their task/artifact/Aegis/receipt
+ * chain, and this row references it rather than restating it.
+ *
+ * What is deliberately NOT recorded: rawText and parameter VALUES. A refused
+ * instruction can contain exactly the content that got it refused, and an
+ * attempt ledger is the wrong place to durably store it. A SHA-256 digest of
+ * the request goes in instead, which is enough to prove two attempts were the
+ * same request without retaining the request.
+ */
 export async function executeEnvelope(input: ExecutionEnvelopeInput): Promise<ExecutionEnvelopeResult> {
+  const startedAt = Date.now();
+  let result: ExecutionEnvelopeResult;
+  try {
+    result = await dispatchEnvelope(input);
+  } catch (err: any) {
+    // An exception is itself an attempt outcome and must be recorded before
+    // it propagates, or a crash becomes an untraceable attempt.
+    recordAttempt(input, {
+      outcome: 'FAILED',
+      capability: input.capability,
+      reason: `Uncaught dispatch error: ${err?.message || String(err)}`,
+    }, Date.now() - startedAt);
+    throw err;
+  }
+  recordAttempt(input, result, Date.now() - startedAt);
+  return result;
+}
+
+/** Maps an envelope outcome onto the ledger's status vocabulary. */
+function attemptStatus(outcome: EnvelopeOutcome): RuntimeEventStatus {
+  switch (outcome) {
+    case 'SUCCESS':
+    case 'READ_OK':
+      return 'SUCCESS';
+    case 'BLOCKED':
+      return 'BLOCKED';
+    case 'APPROVAL_REQUIRED':
+      return 'APPROVAL_REQUIRED';
+    case 'NOT_CONFIGURED':
+      return 'NOT_CONFIGURED';
+    case 'IN_PROGRESS':
+      return 'RUNNING';
+    case 'CONFLICT':
+      // A claim collision: another attempt owns this work. Not a failure of
+      // this request, and not a success either.
+      return 'UNKNOWN';
+    case 'FAILED':
+    default:
+      return 'FAILED';
+  }
+}
+
+function recordAttempt(input: ExecutionEnvelopeInput, result: ExecutionEnvelopeResult, latencyMs: number): void {
+  try {
+    // Digest, never content. Stable across attempts of the same request.
+    const requestDigest = crypto
+      .createHash('sha256')
+      .update(JSON.stringify({ capability: input.capability, action: input.action, rawText: input.rawText, parameters: input.parameters }))
+      .digest('hex');
+
+    recordRuntimeEvent({
+      workspaceId: input.workspaceId,
+      eventType: 'CAPABILITY_INVOCATION',
+      targetType: 'capability',
+      targetId: input.capability,
+      status: attemptStatus(result.outcome),
+      latencyMs,
+      detail: {
+        outcome: result.outcome,
+        action: input.action,
+        actorUserId: input.actorUserId,
+        // The reason string is authored by this codebase, never by a
+        // provider, so it carries no secret material.
+        reason: result.reason?.slice(0, 500) ?? null,
+        requestDigest,
+        idempotencyKey: input.idempotencyKey ?? null,
+        // PASS 3 — the canonical join key for one end-to-end trace.
+        //
+        // lib/external-executions.ts already derives external_executions
+        // .correlation_id from exactly this value (`params.idempotencyKey ||
+        // adhoc-…`), and a retry chains it as `<parent>::retry-N`. So using
+        // the same derivation here means an attempt row and the external
+        // execution it caused share a key, without inventing a second id
+        // scheme or a second ledger.
+        //
+        // Always present, never null: a trace with a missing join key is not
+        // a trace, and an attempt with no natural key still needs to be
+        // distinguishable from the next one.
+        correlationId: input.idempotencyKey || `attempt-${requestDigest.slice(0, 12)}`,
+        // References into the evidence chain, not copies of it.
+        taskId: result.taskId ?? null,
+        artifactId: result.artifact?.id ?? null,
+        artifactHash: result.artifact?.contentHash ?? null,
+        aegisDecision: result.aegis?.decision ?? null,
+        receiptId: result.receipt?.receiptId ?? null,
+        receiptVerified: result.receipt?.verified ?? null,
+        // Whether an outward call really happened — the difference between
+        // "refused before dispatch" and "the provider was contacted".
+        providerCalled: Array.isArray(result.toolsInvoked) && result.toolsInvoked.length > 0,
+        toolsInvoked: result.toolsInvoked ?? [],
+      },
+    });
+  } catch {
+    // Evidence recording must never be the thing that fails an execution, and
+    // must never mask the real outcome. A lost row is visible as a gap in the
+    // ledger; a thrown error here would be a worse failure.
+  }
+}
+
+async function dispatchEnvelope(input: ExecutionEnvelopeInput): Promise<ExecutionEnvelopeResult> {
   const capability = await resolveCapability(input.capability);
 
   if (!capability) {
@@ -172,6 +296,8 @@ export async function executeEnvelope(input: ExecutionEnvelopeInput): Promise<Ex
       return executeSchedule(input);
     case 'aeo.audit':
       return executeAeoAudit(input);
+    case 'hermes.execute':
+      return executeHermesTask(input);
     default:
       // A registered, AVAILABLE capability with no wired executor here —
       // honest, never a fabricated attempt.
@@ -505,6 +631,116 @@ async function executeResearch(input: ExecutionEnvelopeInput): Promise<Execution
       content: result.reportMarkdown,
       folder: 'Research',
       toolsInvoked: ctx.getInvocations().map((r) => r.name),
+    });
+  });
+}
+
+/**
+ * Hermes, dispatched through the real CLI on this machine.
+ *
+ * Everything the brief requires preserved is preserved by NOT doing it here:
+ *
+ *   Guardian gating  — guardianCheckInstruction() below, the same gate
+ *                      runtime.antigravity uses, run BEFORE the subprocess
+ *                      starts. That is what makes the registry's
+ *                      approvalPolicy: 'GUARDIAN_ENFORCED' a true statement
+ *                      rather than a label.
+ *   Activity ledger  — commitEvidencedArtifact() writes the full
+ *                      TASK_CREATED -> ... -> TASK_COMPLETED event chain.
+ *   Aegis + receipt  — same function: deterministic verification, then an
+ *                      Ed25519-signed receipt that is verified before it is
+ *                      stored.
+ *   Brain writeback  — same function: the artifact is written to the Vault
+ *                      and indexed into the FTS5 memory index.
+ *
+ * So this executor only does the part that is genuinely new: gate, run,
+ * and hand a real result to the spine that already exists.
+ */
+async function executeHermesTask(input: ExecutionEnvelopeInput): Promise<ExecutionEnvelopeResult> {
+  const params = (input.parameters || {}) as Record<string, unknown>;
+  const prompt = typeof params.prompt === 'string' && params.prompt.trim()
+    ? params.prompt.trim()
+    : (input.rawText || '').trim();
+
+  if (!prompt) {
+    return { outcome: 'FAILED', capability: 'hermes.execute', reason: 'No prompt supplied for the Hermes task.' };
+  }
+
+  // Guardian first, before anything is spawned and before a claim is taken:
+  // a refused instruction must not consume an idempotency key the caller
+  // could legitimately retry with a different, allowed instruction.
+  const guardian = guardianCheckInstruction(prompt);
+  if (!guardian.allowed) {
+    return {
+      outcome: 'BLOCKED',
+      capability: 'hermes.execute',
+      reason: guardian.error || 'Guardian refused this instruction before dispatch.',
+    };
+  }
+
+  // Static deployment conditions are checked before the claim, for the same
+  // reason executeResearch checks its key first.
+  if (!isHermesLocalConfigured()) {
+    return {
+      outcome: 'NOT_CONFIGURED',
+      capability: 'hermes.execute',
+      reason: `No executable Hermes CLI at ${getHermesCliPath()}. Set HERMES_CLI_PATH if it lives elsewhere.`,
+    };
+  }
+  if (!isHermesLocalEnabled()) {
+    return {
+      outcome: 'NOT_CONFIGURED',
+      capability: 'hermes.execute',
+      reason: 'HERMES_LOCAL_ENABLED is not "true". The Hermes CLI is installed and answers, but dispatch is switched off because a run spends real ChatGPT/Codex subscription quota.',
+    };
+  }
+
+  const taskId = deriveIdempotentTaskId('hermes', input.idempotencyKey);
+
+  return withAtomicClaim(input, 'hermes.execute', taskId, async () => {
+    const timeoutMs = typeof params.timeoutMs === 'number' ? params.timeoutMs : undefined;
+    const run = await runHermesLocalTask({ prompt, timeoutMs });
+
+    if (run.status !== 'SUCCESS') {
+      return {
+        outcome: run.status === 'TIMEOUT' ? 'FAILED' : 'FAILED',
+        capability: 'hermes.execute',
+        reason: `Hermes task ${run.status}: ${run.error || 'no further detail'}`,
+        toolsInvoked: ['hermes.cli'],
+      };
+    }
+
+    const truncationNote = run.truncated
+      ? '\n\n> Output was truncated at the configured ceiling; this note is part of the artifact so the truncation cannot be mistaken for the whole answer.\n'
+      : '';
+    const content = [
+      `# Hermes task`,
+      '',
+      `- Dispatched by: SynthOS execution envelope (capability \`hermes.execute\`)`,
+      `- Runtime: local Hermes CLI (\`hermes -z\`)`,
+      `- Duration: ${run.durationMs}ms`,
+      `- Exit code: ${run.exitCode}`,
+      `- Output truncated: ${run.truncated ? 'YES' : 'no'}`,
+      '',
+      '## Instruction',
+      '',
+      prompt,
+      '',
+      '## Result',
+      '',
+      run.output,
+      truncationNote,
+    ].join('\n');
+
+    return commitEvidencedArtifact({
+      taskId,
+      workspaceId: input.workspaceId,
+      title: `Hermes — ${prompt.slice(0, 70)}`,
+      description: `Bounded Hermes CLI task: ${prompt.slice(0, 200)}`,
+      assignedAgent: 'hermes',
+      content,
+      folder: 'Hermes-Tasks',
+      toolsInvoked: ['hermes.cli'],
     });
   });
 }

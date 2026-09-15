@@ -1,0 +1,56 @@
+# SynthOS Admin — production Caddyfile, used by docker-compose.prod.yml.
+#
+# Differs from Caddyfile.example (a single-host, app-on-localhost example) in
+# three ways that matter: the domain comes from the environment rather than
+# being edited into the file, the upstream is the compose service name rather
+# than 127.0.0.1, and an ACME contact address is set so certificate-expiry
+# warnings actually reach a human.
+
+{
+	email {$SYNTHOS_ACME_EMAIL}
+	# Uncomment for a dry run against Let's Encrypt's staging CA. Staging certs
+	# are untrusted by browsers, but the rate limits are far higher — use this
+	# while getting DNS right, then comment it out and restart to get a real
+	# certificate. Getting this wrong in the other order is how a domain ends up
+	# rate-limited for a week.
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+{$SYNTHOS_DOMAIN} {
+	# Real TLS, requested and renewed automatically for this domain.
+
+	# Matches the app's own express.json/urlencoded limit. A larger proxy limit
+	# is a memory-exhaustion surface that only the app would reject anyway.
+	request_body {
+		max_size 10MB
+	}
+
+	timeouts {
+		read_body   30s
+		read_header 10s
+		write       60s
+		idle        120s
+	}
+
+	# Liveness passthrough — no session required, so an external uptime check
+	# can use it.
+	handle /health {
+		reverse_proxy synthos-admin:3000
+	}
+
+	reverse_proxy synthos-admin:3000 {
+		# Caddy sets X-Forwarded-For / -Proto / -Host correctly by default. The
+		# app must run with TRUST_PROXY_HOPS=1 to trust exactly this one hop —
+		# docker-compose.prod.yml sets that explicitly rather than leaving it to
+		# the .env file, because getting it wrong silently produces http links
+		# in the customer's embed snippet.
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	encode gzip zstd
+
+	log {
+		output stdout
+		format console
+	}
+}

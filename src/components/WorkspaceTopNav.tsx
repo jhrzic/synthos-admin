@@ -315,7 +315,7 @@ export const WorkspaceTopNav: React.FC<WorkspaceTopNavProps> = ({
   const hermesDisplayStatus = deriveHermesDisplayStatus(hermesHealth);
 
   return (
-    <div className="w-full bg-[#080A16] border-b border-[#1A1D33] px-3 sm:px-6 py-2 shrink-0 relative z-30">
+    <div className="w-full bg-[#0b0c0f]/88 backdrop-blur-xl border-b border-white/[0.06] px-3 sm:px-6 py-2 shrink-0 relative z-30">
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
         
         {/* Left Badge & Workspace Context */}
@@ -382,12 +382,13 @@ export const WorkspaceTopNav: React.FC<WorkspaceTopNavProps> = ({
                 onClick={() => setActiveTab(tab.id)}
                 className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition cursor-pointer shrink-0 ${
                   isActive
-                    ? 'text-white shadow-md border'
-                    : 'text-[#9AA2C6] hover:text-white hover:bg-[#121426] border border-transparent'
+                    ? 'text-white border'
+                    : 'text-[#8a8f98] hover:text-[#f7f8f8] hover:bg-white/[0.04] border border-transparent'
                 }`}
                 style={{
-                  backgroundColor: isActive ? activeConfig.accentColor : undefined,
-                  borderColor: isActive ? '#FFFFFF40' : undefined,
+                  backgroundColor: isActive ? `${activeConfig.accentColor}22` : undefined,
+                  borderColor: isActive ? `${activeConfig.accentColor}66` : undefined,
+                  boxShadow: isActive ? `inset 0 -2px 0 ${activeConfig.accentColor}` : undefined,
                 }}
               >
                 <Icon className="w-3.5 h-3.5" style={{ color: isActive ? '#FFFFFF' : tab.color }} />
