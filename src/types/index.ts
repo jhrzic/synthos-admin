@@ -31,6 +31,8 @@ export type ActiveTab =
   | 'idea-strategy'
   | 'jarvis'
   | 'skill-registry'
+  | 'tool-registry'
+  | 'approval-queue'
   | 'system-diagnostics'
   | 'message-bridge'
   | 'claude-artifacts'

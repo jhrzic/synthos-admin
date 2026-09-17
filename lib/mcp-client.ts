@@ -1,6 +1,12 @@
 import dns from 'node:dns';
 import crypto from 'node:crypto';
 
+// TOOL PACK 1 — the private/reserved-IP classifier that used to live in this
+// file now lives in lib/net-guard.ts, because research.fetch needs the same
+// one. Two copies of this table is how a range gets forgotten in one of them;
+// see the header of net-guard.ts.
+import { isPrivateOrReservedIp } from './net-guard';
+
 // ---------------------------------------------------------------------------
 // Pass V / Workstream F — real MCP (Model Context Protocol) connectivity.
 //
@@ -87,31 +93,6 @@ export async function isSafeMcpUrl(rawUrl: string): Promise<{ safe: boolean; rea
     }
   }
   return { safe: true };
-}
-
-function isPrivateOrReservedIp(addr: string): boolean {
-  // IPv4
-  const v4 = addr.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (v4) {
-    const [a, b] = [Number(v4[1]), Number(v4[2])];
-    if (a === 127) return true; // loopback
-    if (a === 10) return true; // private
-    if (a === 0) return true; // "this network"
-    if (a === 172 && b >= 16 && b <= 31) return true; // private
-    if (a === 192 && b === 168) return true; // private
-    if (a === 169 && b === 254) return true; // link-local / cloud metadata (169.254.169.254)
-    return false;
-  }
-  // IPv6
-  const lower = addr.toLowerCase();
-  if (lower === '::1') return true; // loopback
-  if (lower.startsWith('fc') || lower.startsWith('fd')) return true; // unique local (fc00::/7)
-  if (lower.startsWith('fe80')) return true; // link-local
-  if (lower.startsWith('::ffff:')) {
-    // IPv4-mapped IPv6 — recurse on the embedded v4 address
-    return isPrivateOrReservedIp(lower.replace('::ffff:', ''));
-  }
-  return false;
 }
 
 interface JsonRpcResponse {

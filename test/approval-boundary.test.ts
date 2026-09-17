@@ -7,6 +7,10 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'synthos-approval-'));
 process.env.SYNTHOS_DB_PATH = path.join(TMP, 'approval.db');
 process.env.SYNTHOS_SIGNING_KEY_DIR = path.join(TMP, 'keys');
 
+import { isolateVaultForTest } from './helpers/isolated-vault';
+// VAULT ISOLATION (must precede the lib/ imports — see the helper's header):
+isolateVaultForTest('approval-boundary');
+
 import { executeEnvelope, EXTERNAL_ACTION_EXEMPT_FROM_GUARDIAN_RULE } from '../lib/fabric/envelope';
 import { listCapabilities, resolveCapability } from '../lib/fabric/registry';
 import { createValidatedSchedule } from '../lib/fabric/scheduler';

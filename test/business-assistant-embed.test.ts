@@ -14,8 +14,13 @@ import os from 'os';
 // suffix/prefix/scheme confusions that make naive origin checks useless.
 // ---------------------------------------------------------------------------
 
+import { isolateVaultForTest } from './helpers/isolated-vault';
+
 process.env.SYNTHOS_DB_PATH = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'convembed-')), 'test.db');
-process.env.VAULT_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'convembed-vault-'));
+// VAULT ISOLATION (must precede the lib/ imports — see the helper's header):
+// NOTE: this file previously set VAULT_ROOT only. lib/vault-config.ts does not
+// read VAULT_ROOT, so knowledge notes still went to the repository's vault/.
+isolateVaultForTest('convembed');
 
 const { normalizeOrigin, isOriginAuthorized, frameAncestorsFor, assistantPageCsp } =
   await import('../lib/conversation/origins');

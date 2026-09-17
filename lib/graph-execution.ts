@@ -144,3 +144,121 @@ export const GRAPH_EXECUTABLE_CAPABILITIES: string[] = [
   'create_mission',
   'schedule_recheck',
 ];
+
+// ---------------------------------------------------------------------------
+// APPROVAL FOUNDATION — C7, the graph's external-action stop.
+//
+// STATE OF THE WORLD, said plainly before the mechanism: no capability in
+// GRAPH_EXECUTABLE_CAPABILITIES above is an EXTERNAL_ACTION. All four are
+// internal/compute, so today a graph structurally cannot traverse an external
+// action — "the graph cannot self-approve" is currently true because the graph
+// cannot perform an external action at all.
+//
+// This guard exists so that stays true when Tool Pack 2 adds Gmail and somebody
+// adds it to that list. The failure it prevents is specific: the graph runner
+// dispatches capability nodes through its own bespoke calls (runAeoAudit and
+// friends), NOT through executeEnvelope, so it does not inherit the approval
+// gate that protects every other caller. A Gmail node added to the allowlist
+// would have sent mail without ever consulting an approval.
+//
+// WHAT THIS DOES AND DOES NOT DO:
+//   It halts the run at the node, records current_node_id and a
+//   WAITING_FOR_APPROVAL status, and requests a human approval bound to that
+//   run's own correlation. The run's position is preserved in the existing
+//   graph_runs columns, so the work done before the node is not thrown away.
+//
+//   It does NOT implement automatic resume-after-approval. There is no
+//   continuation mechanism in this runtime to reuse — graph_runs carries the
+//   columns for one but nothing reads them to restart mid-graph — and inventing
+//   one here would be a second execution path in a pass whose instruction was
+//   not to build one. So a halted run must be re-triggered once the approval is
+//   granted, and it resumes from the recorded node rather than restarting.
+//   Recorded as a known limit rather than implied to be finished.
+// ---------------------------------------------------------------------------
+
+import { checkApprovalGate, requestApproval, computeInputDigest } from './approvals';
+
+export interface GraphNodeApprovalVerdict {
+  /** True when the node may execute now. */
+  mayTraverse: boolean;
+  /** Present when traversal is withheld. */
+  approvalId?: string;
+  state?: string;
+  reason?: string;
+}
+
+/**
+ * Decide whether a graph capability node may traverse.
+ *
+ * `effectClass` is passed in by the caller from the real registry rather than
+ * re-derived here, so the graph and the envelope cannot disagree about what a
+ * capability is.
+ */
+export function checkGraphNodeApproval(params: {
+  workspaceId: string;
+  runId: string;
+  nodeId: string;
+  capability: string;
+  effectClass: string;
+  parameters: Record<string, unknown>;
+  requestedByUserId: string;
+  guardianDecision: string;
+}): GraphNodeApprovalVerdict {
+  // Only external actions stop. A compute or read node is unaffected, which is
+  // why adding this guard changes nothing about any graph that runs today.
+  if (params.effectClass !== 'EXTERNAL_ACTION') return { mayTraverse: true };
+
+  // Correlation is the RUN plus the NODE. Per-run so two runs of the same graph
+  // need separate approvals; per-node so approving one external node in a graph
+  // does not authorize a different one later in the same run.
+  const correlationId = `graph-run:${params.runId}:node:${params.nodeId}`;
+  const inputDigest = computeInputDigest({
+    workspaceId: params.workspaceId,
+    capability: params.capability,
+    action: 'graph-node',
+    parameters: params.parameters || {},
+  });
+
+  const gate = checkApprovalGate({
+    workspaceId: params.workspaceId,
+    capability: params.capability,
+    action: 'graph-node',
+    inputDigest,
+    correlationId,
+  });
+
+  if (gate.allowed) {
+    // NOTE: consumption is the CALLER's responsibility, immediately before it
+    // performs the action. Consuming here would spend the approval during a
+    // check, so a node that then failed to start would have burned it.
+    return { mayTraverse: true, approvalId: gate.approval.approval_id };
+  }
+
+  if (gate.state === 'WAITING_FOR_APPROVAL' && !gate.approval) {
+    const requested = requestApproval({
+      workspaceId: params.workspaceId,
+      taskId: null,
+      correlationId,
+      capability: params.capability,
+      action: 'graph-node',
+      effectClass: params.effectClass,
+      requestedByUserId: params.requestedByUserId,
+      guardianDecision: params.guardianDecision,
+      actionSummary: `Graph run ${params.runId}, node ${params.nodeId}: ${params.capability}`,
+      inputDigest,
+    });
+    return {
+      mayTraverse: false,
+      approvalId: requested.approval_id,
+      state: 'WAITING_FOR_APPROVAL',
+      reason: `Graph node "${params.nodeId}" performs an external action and is waiting for human approval "${requested.approval_id}". The run is halted at this node; work already completed is preserved.`,
+    };
+  }
+
+  return {
+    mayTraverse: false,
+    approvalId: gate.approval?.approval_id,
+    state: gate.state,
+    reason: gate.reason,
+  };
+}

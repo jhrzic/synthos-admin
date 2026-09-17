@@ -48,6 +48,7 @@ import {
   isScheduleInWorkspace,
   listWorkspaceSchedules,
   setScheduleStatus,
+  resumeSchedule,
   getScheduleOccurrences,
   closeDatabase,
   type ScheduleStatus
@@ -64,7 +65,31 @@ import { getVaultStatus, SYNTHOS_VAULT_SUBDIR } from "./lib/vault-config";
 import { listKnowledgeNotes, searchKnowledgeNotes, listKnowledgeNotesDetailed } from "./lib/knowledge-vault";
 import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory, listWorkspaceMemory } from "./lib/memory-index";
 import { runAeoAudit, createAuditMissionTasks, resolveGeoProvider } from "./lib/aeo/service";
-import { listCapabilities, conversationModelConfigured } from "./lib/fabric/registry";
+import { listCapabilities, conversationModelConfigured, toolPackCapabilities } from "./lib/fabric/registry";
+import { TOOL_PACK_1, resolveToolReadiness } from "./lib/fabric/tool-pack";
+import {
+  listWorkspaceGmailConnections,
+  gmailWorkspaceReadiness,
+  upsertGmailConnection,
+  deleteGmailConnection,
+  gmailOAuthConfigured,
+  GMAIL_REQUIRED_SCOPES,
+} from "./lib/gmail-connection";
+import { listWorkspaceGmailSendAttempts } from "./lib/gmail-send-ledger";
+import { getOrchestratorHealth, runOrchestrationTick } from "./lib/fabric/orchestrator";
+import { resolveAutonomyLevel, AUTONOMY_LEVELS } from "./lib/autonomy";
+import {
+  listOrchestratorEligibleTasks,
+  listTasksAwaitingApproval,
+  listStrandedOrchestrationTasks,
+} from "./lib/persistence";
+import {
+  listWorkspaceApprovals,
+  listApprovalsForCorrelation,
+  getApproval,
+  decideApproval,
+  expireStaleApprovals,
+} from "./lib/approvals";
 import { GRAPH_EXECUTABLE_CAPABILITIES } from "./lib/graph-execution";
 import { estimateGraphExecution, selectLiveExecutionNodes } from "./lib/graph-execution";
 import { listWorkspaceSkills, getWorkspaceSkill, createSkill, updateSkill, testSkill, discoverRepoSkillFiles, isValidMcpEndpointRef, classifySkillExecutability, getRawCredentialCiphertext, ExecutionTargetType } from "./lib/skills";
@@ -1587,6 +1612,351 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to list capabilities" });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // TOOL PACK 1 — the production tool surface.
+  //
+  // Every field is derived from the canonical registry and the one tool
+  // manifest. There is no second status store, no cached table, and nothing a
+  // UI could disagree with: `status`, `effectClass`, `approvalPolicy` and
+  // `reason` are the registry's own values, and lastVerifiedAt comes from the
+  // real PROVIDER_CALL/CAPABILITY_INVOCATION ledger rather than from a
+  // timestamp written when someone looked at the page.
+  //
+  // An unconfigured tool is reported as unconfigured. There are no placeholder
+  // rows, no example metrics, and no tool listed that has no executor.
+  // -------------------------------------------------------------------------
+  app.get("/api/tools", requireAuth, async (_req, res) => {
+    try {
+      const registryRows = toolPackCapabilities();
+      const byKey = new Map(registryRows.map((r) => [r.key, r]));
+
+      // Real last-invocation evidence, per tool, from the attempt ledger.
+      const recent = listRecentRuntimeEvents({ targetType: "capability", limit: 500 });
+      const lastByCapability = new Map<string, { at: string; status: string }>();
+      for (const ev of recent) {
+        if (ev.event_type !== "CAPABILITY_INVOCATION") continue;
+        if (lastByCapability.has(ev.target_id)) continue; // newest first
+        lastByCapability.set(ev.target_id, { at: ev.created_at, status: ev.status });
+      }
+
+      const tools = TOOL_PACK_1.map((tool) => {
+        const row = byKey.get(tool.capability);
+        const readiness = resolveToolReadiness(tool.capability);
+        const last = lastByCapability.get(tool.capability) ?? null;
+        return {
+          capability: tool.capability,
+          displayName: tool.displayName,
+          category: tool.category,
+          summary: tool.summary,
+          runtime: tool.runtime,
+          // Registry truth — not a second opinion computed here.
+          status: row?.status ?? "NOT_CONFIGURED",
+          effectClass: tool.effectClass,
+          registryEffectClass: row?.effectClass ?? null,
+          riskTier: tool.riskTier,
+          approvalPolicy: tool.approvalPolicy,
+          guardianEnforced: tool.guardianEnforced,
+          workspaceScope: tool.workspaceScope,
+          brainWriteback: tool.brainWriteback,
+          configured: readiness.configured,
+          enabled: readiness.enabled,
+          missingConfiguration: readiness.missingConfiguration,
+          reason: row?.reason ?? readiness.reason,
+          reference: tool.reference,
+          // Null when this tool has genuinely never been invoked. Never a
+          // fabricated "just now".
+          lastInvokedAt: last?.at ?? null,
+          lastInvokedStatus: last?.status ?? null,
+        };
+      });
+
+      return res.json({
+        success: true,
+        count: tools.length,
+        tools,
+        summary: {
+          available: tools.filter((t) => t.status === "AVAILABLE").length,
+          notConfigured: tools.filter((t) => t.status === "NOT_CONFIGURED").length,
+          readOnly: tools.filter((t) => t.effectClass === "READ_ONLY").length,
+          internalMutation: tools.filter((t) => t.effectClass === "INTERNAL_MUTATION").length,
+          externalAction: tools.filter((t) => t.effectClass === "EXTERNAL_ACTION").length,
+        },
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list tools" });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // APPROVAL FOUNDATION — the human-decision surface.
+  //
+  // AUTHORITY, and it is the whole point of these three routes:
+  //   GET  is requireWorkspaceMember — any member may SEE what is waiting.
+  //   POST is requireWorkspaceAdmin  — only an admin may DECIDE.
+  //
+  // Both use the existing middleware rather than a bespoke check. The Tool Pack
+  // 1 vulnerability was two places deciding the same authority question with
+  // different logic, so there is deliberately no second role check inside
+  // lib/approvals.ts — it takes an already-authenticated decider id and
+  // enforces only the workspace match as a backstop.
+  //
+  // The decider id comes from the SESSION (getRequestUser), never from the
+  // request body. A client-supplied "approvedBy" or "approved: true" is not
+  // read by anything here; there is no field for it.
+  // -------------------------------------------------------------------------
+  app.get("/api/approvals", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const workspaceId = authorizedWorkspaceId(req);
+      if (!workspaceId) return res.status(403).json({ success: false, error: "No authorized workspace on this request." });
+
+      // Sweep first so the queue never presents a lapsed approval as
+      // actionable. Expiry is also enforced at the gate, so this is
+      // presentation hygiene rather than the protection itself.
+      expireStaleApprovals();
+
+      const statusFilter = typeof req.query?.status === "string" ? String(req.query.status) : undefined;
+      const allowed = ["PENDING", "APPROVED", "REJECTED", "EXPIRED", "CONSUMED"];
+      if (statusFilter && !allowed.includes(statusFilter)) {
+        return res.status(400).json({ success: false, error: `status must be one of: ${allowed.join(", ")}` });
+      }
+
+      const approvals = listWorkspaceApprovals(workspaceId, {
+        status: statusFilter as any,
+        limit: Math.min(Number(req.query?.limit) || 100, 500),
+      });
+
+      return res.json({
+        success: true,
+        count: approvals.length,
+        approvals,
+        summary: {
+          pending: listWorkspaceApprovals(workspaceId, { status: "PENDING", limit: 500 }).length,
+          approved: listWorkspaceApprovals(workspaceId, { status: "APPROVED", limit: 500 }).length,
+          rejected: listWorkspaceApprovals(workspaceId, { status: "REJECTED", limit: 500 }).length,
+          consumed: listWorkspaceApprovals(workspaceId, { status: "CONSUMED", limit: 500 }).length,
+          expired: listWorkspaceApprovals(workspaceId, { status: "EXPIRED", limit: 500 }).length,
+        },
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list approvals" });
+    }
+  });
+
+  app.get("/api/approvals/:id", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const workspaceId = authorizedWorkspaceId(req);
+      if (!workspaceId) return res.status(403).json({ success: false, error: "No authorized workspace on this request." });
+      const approval = getApproval(req.params.id);
+      // Cross-workspace reads are reported as absent, not as forbidden:
+      // confirming an approval exists elsewhere is itself a disclosure.
+      if (!approval || approval.workspace_id !== workspaceId) {
+        return res.status(404).json({ success: false, error: `No approval "${req.params.id}" exists.` });
+      }
+      return res.json({
+        success: true,
+        approval,
+        // The evidence trail for this unit of work, so Details can link into it.
+        relatedApprovals: listApprovalsForCorrelation(workspaceId, approval.correlation_id),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to read approval" });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // NO-COPY/PASTE ORCHESTRATION — operator visibility.
+  //
+  // Answers, from real state only: what is queued, what is running, what is
+  // waiting on a human, what is stranded, what finished last, and which
+  // provider or tool did it. No new dashboard — this is the data the existing
+  // Admin surfaces read.
+  //
+  // READ-ONLY. There is deliberately no route that starts, stops or
+  // reconfigures the loop: autonomy level is deployment configuration (see
+  // lib/autonomy.ts), and the loop is armed by the scheduler at server start.
+  // A button that widened autonomy would be exactly the policy editor the
+  // instruction said not to build.
+  // -------------------------------------------------------------------------
+  app.get("/api/orchestration", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const workspaceId = authorizedWorkspaceId(req);
+      if (!workspaceId) return res.status(403).json({ success: false, error: "No authorized workspace on this request." });
+
+      const health = getOrchestratorHealth();
+      const db = getDatabase();
+      const strandedCutoff = new Date(Date.now() - 10 * 60_000).toISOString();
+
+      // Running / terminal state read straight from canonical tasks.
+      const running: any[] = db.prepare(
+        `SELECT task_id, title, capability, assigned_model, status, updated_at
+           FROM tasks
+          WHERE workspace_id = ? AND autonomy_eligible = 1
+            AND status IN ('RUNNING','AWAITING_VERIFICATION','AWAITING_RECEIPT')
+          ORDER BY updated_at DESC LIMIT 25`,
+      ).all(workspaceId);
+
+      const lastCompleted: any[] = db.prepare(
+        `SELECT task_id, title, capability, assigned_model, status, updated_at
+           FROM tasks
+          WHERE workspace_id = ? AND autonomy_eligible = 1
+            AND status IN ('DONE','VERIFIED','FAILED','BLOCKED','REJECTED')
+          ORDER BY updated_at DESC LIMIT 10`,
+      ).all(workspaceId);
+
+      return res.json({
+        success: true,
+        autonomy: { level: resolveAutonomyLevel(), levels: AUTONOMY_LEVELS },
+        loop: {
+          running: health.running,
+          ticks: health.ticks,
+          lastTickAt: health.lastTickAt,
+          lastTickAdvanced: health.lastTickAdvanced,
+          tickErrors: health.tickErrors,
+          lastError: health.lastError,
+        },
+        queued: listOrchestratorEligibleTasks(workspaceId, 25).map((t) => ({
+          taskId: t.task_id, title: t.title, capability: t.capability,
+          model: t.assigned_model, status: t.status, createdAt: t.created_at,
+        })),
+        running: running.map((t) => ({ taskId: t.task_id, title: t.title, capability: t.capability, model: t.assigned_model, status: t.status, updatedAt: t.updated_at })),
+        waitingForApproval: listTasksAwaitingApproval(workspaceId, 25).map((t) => ({
+          taskId: t.task_id, title: t.title, capability: t.capability,
+        })),
+        // Claimed but never finished. Surfaced, never re-run.
+        stranded: listStrandedOrchestrationTasks(workspaceId, strandedCutoff).map((t) => ({
+          taskId: t.task_id, title: t.title, capability: t.capability,
+        })),
+        lastCompleted: lastCompleted.map((t) => ({ taskId: t.task_id, title: t.title, capability: t.capability, model: t.assigned_model, status: t.status, updatedAt: t.updated_at })),
+        // The most recent step, with the evidence ids an operator needs to
+        // follow it into the existing task/receipt surfaces.
+        lastStep: health.lastStep ?? null,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to read orchestration state" });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // TOOL PACK 2 — Gmail connection management.
+  //
+  // NOTHING HERE RETURNS A TOKEN. The only shape these routes serialise is
+  // GmailConnectionView, which has no token field at all (see
+  // lib/gmail-connection.ts) — so a leak would require changing the type, not
+  // forgetting a redaction.
+  //
+  // Connecting an account is ADMIN-only: a Gmail connection is standing
+  // authority for a workspace to read and send mail, which is a configuration
+  // decision rather than an operational one.
+  // -------------------------------------------------------------------------
+  app.get("/api/gmail/connections", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const workspaceId = authorizedWorkspaceId(req);
+      if (!workspaceId) return res.status(403).json({ success: false, error: "No authorized workspace on this request." });
+      const readiness = gmailWorkspaceReadiness(workspaceId);
+      return res.json({
+        success: true,
+        oauthConfigured: gmailOAuthConfigured(),
+        requiredScopes: GMAIL_REQUIRED_SCOPES,
+        configured: readiness.configured,
+        reason: readiness.reason,
+        missingConfiguration: readiness.missingConfiguration,
+        connections: listWorkspaceGmailConnections(workspaceId),
+        recentSends: listWorkspaceGmailSendAttempts(workspaceId, 25).map((a) => ({
+          attemptId: a.attempt_id,
+          approvalId: a.approval_id,
+          status: a.status,
+          providerMessageId: a.provider_message_id,
+          errorCategory: a.error_category,
+          dispatchedAt: a.dispatched_at,
+          resolvedAt: a.resolved_at,
+        })),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to list Gmail connections" });
+    }
+  });
+
+  // Stores an OAuth result. The refresh token arrives from the OAuth callback,
+  // never from a human pasting it, and is encrypted before it touches disk.
+  app.post("/api/gmail/connections", requireWorkspaceAdmin(fromBody), (req, res) => {
+    try {
+      const workspaceId = authorizedWorkspaceId(req);
+      if (!workspaceId) return res.status(403).json({ success: false, error: "No authorized workspace on this request." });
+      const user = getRequestUser(req);
+      if (!user) return res.status(401).json({ success: false, error: "Authentication required." });
+
+      const accountEmail = String((req.body as any)?.accountEmail || "").trim();
+      const refreshToken = (req.body as any)?.refreshToken;
+      const scopes = Array.isArray((req.body as any)?.scopes) ? (req.body as any).scopes.map(String) : [...GMAIL_REQUIRED_SCOPES];
+      if (!accountEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(accountEmail)) {
+        return res.status(400).json({ success: false, error: "A valid accountEmail is required." });
+      }
+      if (typeof refreshToken !== "string" || !refreshToken.trim()) {
+        return res.status(400).json({ success: false, error: "A refreshToken from the OAuth exchange is required." });
+      }
+
+      const connection = upsertGmailConnection({
+        workspaceId,
+        accountEmail,
+        refreshToken,
+        scopes,
+        connectedByUserId: user.user_id,
+      });
+      // The view carries no token. Echoing the request body back would.
+      return res.json({ success: true, connection });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to store Gmail connection" });
+    }
+  });
+
+  app.delete("/api/gmail/connections/:id", requireWorkspaceAdmin(fromQuery), (req, res) => {
+    try {
+      const workspaceId = authorizedWorkspaceId(req);
+      if (!workspaceId) return res.status(403).json({ success: false, error: "No authorized workspace on this request." });
+      // Scoped delete: a connection id from another workspace simply does not
+      // match, and is reported as absent rather than forbidden.
+      const removed = deleteGmailConnection(workspaceId, req.params.id);
+      if (!removed) return res.status(404).json({ success: false, error: `No Gmail connection "${req.params.id}" exists in this workspace.` });
+      return res.json({ success: true, removed: req.params.id });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to remove Gmail connection" });
+    }
+  });
+
+  app.post("/api/approvals/:id/decide", requireWorkspaceAdmin(fromBody), (req, res) => {
+    try {
+      const workspaceId = authorizedWorkspaceId(req);
+      if (!workspaceId) return res.status(403).json({ success: false, error: "No authorized workspace on this request." });
+
+      // The human is the SESSION user. Never req.body.
+      const user = getRequestUser(req);
+      if (!user) return res.status(401).json({ success: false, error: "Authentication required." });
+
+      const decision = String((req.body as any)?.decision || "").toUpperCase();
+      if (decision !== "APPROVED" && decision !== "REJECTED") {
+        return res.status(400).json({ success: false, error: 'decision must be "APPROVED" or "REJECTED".' });
+      }
+      const reasonRaw = (req.body as any)?.reason;
+      const reason = typeof reasonRaw === "string" ? reasonRaw.slice(0, 1000) : null;
+
+      const outcome = decideApproval({
+        approvalId: req.params.id,
+        workspaceId,
+        decidedByUserId: user.user_id,
+        decision: decision as "APPROVED" | "REJECTED",
+        reason,
+      });
+
+      if (!outcome.ok) {
+        const status = outcome.code === "NOT_FOUND" || outcome.code === "WRONG_WORKSPACE" ? 404 : 409;
+        return res.status(status).json({ success: false, error: outcome.reason });
+      }
+      return res.json({ success: true, approval: outcome.approval });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to decide approval" });
     }
   });
 
@@ -5381,9 +5751,8 @@ Rules for spokenSummary specifically:
       return res.status(400).json({ success: false, error: `Cannot resume a schedule in status ${schedule.status} (only PAUSED schedules can be resumed).` });
     }
     const nextRunAt = computeResumeNextRunAt(schedule, new Date().toISOString());
-    const db = getDatabase();
-    db.prepare("UPDATE schedules SET status = 'ACTIVE', status_reason = NULL, next_run_at = ?, updated_at = ? WHERE schedule_id = ?")
-      .run(nextRunAt, new Date().toISOString(), req.params.id);
+    // TOOL PACK 1 — one writer for this transition, shared with schedule.resume.
+    resumeSchedule(req.params.id, nextRunAt);
     return res.json({ success: true, schedule: getSchedule(req.params.id) });
   });
 

@@ -79,6 +79,8 @@ import { TONNetworkView } from './components/products/TONNetworkView';
 import { TwinsConciergeView } from './components/products/TwinsConciergeView';
 import { FrontendDemosView } from './components/products/FrontendDemosView';
 import { UpstreamCapabilityRegistry } from './components/UpstreamCapabilityRegistry';
+import { ToolRegistryView } from './components/ToolRegistryView';
+import { ApprovalQueueView } from './components/ApprovalQueueView';
 import { PageHelpDrawer } from './components/PageHelpDrawer';
 import { FirstRunTour } from './components/FirstRunTour';
 import { RightActivityPane } from './components/RightActivityPane';
@@ -1618,6 +1620,16 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           {/* Skill Registry & Model Context Protocol (MCP) Manager */}
           {activeTab === 'skill-registry' && (
             <SkillRegistryView activeWorkspaceId={activeWorkspaceId} />
+          )}
+
+          {/* TOOL PACK 1 — production tools exposed through the Execution Fabric */}
+          {activeTab === 'tool-registry' && (
+            <ToolRegistryView activeWorkspaceId={activeWorkspaceId} />
+          )}
+
+          {/* APPROVAL FOUNDATION — the human decision queue for external actions */}
+          {activeTab === 'approval-queue' && (
+            <ApprovalQueueView activeWorkspaceId={activeWorkspaceId} />
           )}
 
           {/* System Audit & Diagnostics Telemetry */}

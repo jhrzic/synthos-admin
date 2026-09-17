@@ -7,6 +7,10 @@ import fs from 'node:fs';
 const TEST_DB_PATH = path.join(os.tmpdir(), `synthos-openai-kernel-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
 process.env.SYNTHOS_DB_PATH = TEST_DB_PATH;
 
+import { isolateVaultForTest } from './helpers/isolated-vault';
+// VAULT ISOLATION (must precede the lib/ imports — see the helper's header):
+isolateVaultForTest('openai-kernel');
+
 import { executeAgentTask } from '../lib/fabric/kernel';
 import { createExecutionContext } from '../lib/fabric/context';
 import {

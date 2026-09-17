@@ -71,6 +71,7 @@ import {
 } from '../persistence';
 import { classifyModelRequest, DEFAULT_CANDIDATE_MODELS, PROVIDER_ENV_VAR, type ExecutableProvider } from '../model-router';
 import { resolveModelApiKey, type ModelProvider } from '../model-credentials';
+import { recordProviderAttempt } from '../provider-state';
 import { verifyTaskAtGate } from '../kil-gate';
 import { indexVaultArtifact } from '../memory-index';
 // STEP 2 — the canonical Vault writer (lib/vault.ts). Replaces this file's
@@ -435,6 +436,7 @@ export async function executeAgentTask(
       // fixed the provider before this point, so every candidate in this
       // queue is guaranteed to belong to it.
       const modelsToTry = [normalizedAssignedModel, ...candidateModels].filter((v, i, a) => a.indexOf(v) === i);
+      const providerStartedAt = Date.now();
       const genResult = provider === "OPENAI"
         ? await generateViaOpenAI({ apiKey, contents: rolePrompt, candidateModels: modelsToTry })
         : await generateViaGemini({ apiKey, contents: rolePrompt, candidateModels: modelsToTry });
@@ -443,6 +445,50 @@ export async function executeAgentTask(
       if (genResult.providerUsageMetadata) providerUsageMetadata = genResult.providerUsageMetadata;
       hadProviderError = genResult.hadProviderError;
       lastProviderError = genResult.lastProviderError;
+
+      // ---------------------------------------------------------------------
+      // PROVIDER LEDGER TRUTH.
+      //
+      // THE GAP THIS CLOSES, found while proving OpenAI live: this block
+      // recorded PROVIDER_COMPLETED into the TASK's activity evidence but
+      // never wrote a PROVIDER_CALL row, so lib/provider-state.ts — which
+      // derives provider truth from that ledger — only ever learned about
+      // calls made by lib/model-credentials.ts's verification probe.
+      //
+      // The consequence was a quiet, one-directional lie of omission: a
+      // deployment could run real OpenAI work all week and `lastVerifiedAt`
+      // would still point at whenever somebody last clicked "verify". The
+      // state was never FALSE, but it under-reported reality, and it decayed
+      // in the direction of looking less capable than it was — so an operator
+      // would eventually distrust a provider that had been working all along.
+      //
+      // Placement is deliberate: INSIDE the existing ctx.invoke callback,
+      // after the one generate call, so there is exactly one ledger row per
+      // real provider call. Recording it outside would double-count the
+      // retry loop; recording it per candidate model would count one logical
+      // call several times. Both providers go through this single site, so
+      // Gemini gets the same mechanism rather than a parallel one.
+      //
+      // The kernel is not restructured: this adds a record, it changes no
+      // control flow, no retry behaviour, and no error handling. A failure to
+      // record must never fail the run, which is why recordProviderAttempt is
+      // itself non-throwing.
+      // ---------------------------------------------------------------------
+      const providerOk = !!genResult.output.trim() && !genResult.hadProviderError;
+      recordProviderAttempt({
+        // lib/provider-state.ts keys on the lowercase provider id, the same
+        // one lib/model-credentials.ts uses, so probe and real work land in
+        // one ledger rather than two spellings of it.
+        provider: provider === "OPENAI" ? "openai" : "gemini",
+        ok: providerOk,
+        modelUsed: genResult.modelUsed,
+        // Only meaningful on failure; scrubbed downstream before storage.
+        errorMessage: providerOk ? null : genResult.lastProviderError,
+        // OpenAI's adapter measures its own latency; Gemini's does not report
+        // one, so it is measured here rather than left null.
+        latencyMs: (genResult as { latencyMs?: number }).latencyMs ?? (Date.now() - providerStartedAt),
+        workspaceId: resolvedWorkspaceId,
+      });
     });
 
     // Provider fails:

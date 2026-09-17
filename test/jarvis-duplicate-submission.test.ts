@@ -145,6 +145,10 @@ const REPO_ROOT = process.cwd();
 const TEST_DB_PATH = path.join(os.tmpdir(), `synthos-jarvis-dup-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
 process.env.SYNTHOS_DB_PATH = TEST_DB_PATH;
 
+import { isolateVaultForTest } from './helpers/isolated-vault';
+// VAULT ISOLATION (must precede the lib/ imports — see the helper's header):
+isolateVaultForTest('jarvis-dup');
+
 import { getDatabase } from '../lib/persistence';
 import { createUser, login } from '../lib/auth';
 import { ensureWorkspace, grantMembership } from '../lib/workspaces';

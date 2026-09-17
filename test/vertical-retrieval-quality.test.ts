@@ -3,7 +3,11 @@ import os from 'node:os';
 import path from 'node:path';
 
 const TEST_DB = path.join(os.tmpdir(), `synthos-retr-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+import { isolateVaultForTest } from './helpers/isolated-vault';
+
 process.env.SYNTHOS_DB_PATH = TEST_DB;
+// VAULT ISOLATION (must precede the lib/ imports — see the helper's header):
+isolateVaultForTest('vert-retr');
 
 import { bestPassage } from '../lib/conversation/engine';
 

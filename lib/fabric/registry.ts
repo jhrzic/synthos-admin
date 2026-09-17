@@ -30,8 +30,26 @@ import { getVoiceCredentialStatus } from '../voice-credentials';
 import { getModelCredentialStatus } from '../model-credentials';
 import { isAntigravityConfigured, isAntigravityEnabled } from '../antigravity-client';
 import { resolveProviderState } from '../provider-state';
+import { TOOL_PACK_1, resolveToolReadiness, toCapabilityEffectClass, type ToolDefinition } from './tool-pack';
 
-export type CapabilityEffectClass = 'READ' | 'COMPUTE' | 'EXTERNAL_ACTION' | 'CONTROL';
+/**
+ * TOOL PACK 1 added 'INTERNAL_MUTATION'.
+ *
+ * Before it, there was no way to say "this changes SynthOS's own state and
+ * reaches nothing outside it". The consequence was visible: vault.write —
+ * writing a file into SynthOS's own vault — was classed EXTERNAL_ACTION, and
+ * lib/fabric/envelope.ts then needed a named exemption set
+ * (EXTERNAL_ACTION_EXEMPT_FROM_GUARDIAN_RULE) purely to let that plainly
+ * internal write through. The exemption existed to work around a wrong
+ * classification, and every new internal-mutating tool would have had to be
+ * added to it — each one recorded, misleadingly, as an external action
+ * somebody decided to allow.
+ *
+ * INTERNAL_MUTATION is NOT a weaker class. The envelope requires real Guardian
+ * enforcement for it exactly as for EXTERNAL_ACTION. It is a more precise
+ * classification, not a cheaper one.
+ */
+export type CapabilityEffectClass = 'READ' | 'COMPUTE' | 'INTERNAL_MUTATION' | 'EXTERNAL_ACTION' | 'CONTROL';
 
 export type CapabilityStatus =
   | 'AVAILABLE'
@@ -838,7 +856,100 @@ async function buildAllCapabilities(report: RuntimeStatusReport): Promise<Capabi
     conversationVoiceOutputCapability(),
     conversationEmbedCapability(),
     mcpConnectivityCapability(report),
+    // TOOL PACK 1 — derived rows, one manifest (lib/fabric/tool-pack.ts).
+    ...toolPackCapabilities(),
+    // APPROVAL FOUNDATION — synthetic external action for lifecycle proof only.
+    approvalVerificationCapability(),
   ];
+}
+
+
+// ---------------------------------------------------------------------------
+// TOOL PACK 1 — capability rows, DERIVED from the one manifest.
+//
+// Each row's status comes from resolveToolReadiness(), which reads real
+// evidence (is the vault reachable, is the repo allowlist populated, …). None
+// of it is hardcoded, and the Admin surface renders exactly these rows rather
+// than keeping a parallel notion of tool status — the instruction's "do not
+// hardcode UI status separately from registry truth", enforced by there being
+// only one source to read.
+//
+// The status mapping is deliberately narrow:
+//   configured && enabled        -> AVAILABLE
+//   !configured                  -> NOT_CONFIGURED
+//   configured && !enabled       -> UNSUPPORTED (switched off in code)
+//
+// AVAILABLE here means "preconditions are met and the executor will really
+// run", which for a local filesystem or vault read is a complete statement.
+// It is NOT the provider-style claim that a remote service is up — the GitHub
+// and research tools depend on a third party, and their real per-call health
+// is proven at call time and recorded in the attempt ledger, exactly as the
+// model providers are. lib/provider-state.ts stays the authority for
+// "did a real call to an outside service succeed"; this is the authority for
+// "may this tool be dispatched at all".
+// ---------------------------------------------------------------------------
+
+function toolCapability(tool: ToolDefinition): CapabilityDescriptor {
+  const readiness = resolveToolReadiness(tool.capability);
+  const status: CapabilityStatus = !readiness.configured
+    ? 'NOT_CONFIGURED'
+    : readiness.enabled ? 'AVAILABLE' : 'UNSUPPORTED';
+
+  return {
+    key: tool.capability,
+    runtime: tool.runtime,
+    status,
+    effectClass: toCapabilityEffectClass(tool.effectClass),
+    riskTier: tool.riskTier,
+    approvalPolicy: tool.approvalPolicy,
+    workspaceScope: tool.workspaceScope,
+    reference: tool.reference,
+    reason: readiness.reason,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// APPROVAL FOUNDATION — a synthetic EXTERNAL_ACTION, for proving the lifecycle
+// without sending anything.
+//
+// The approval gate has to be demonstrated end to end before Gmail exists, and
+// demonstrating it with Gmail would mean sending a real email to prove that
+// sending is gated. So this capability is a real registered EXTERNAL_ACTION
+// that passes through the identical gate, and whose "external call" is a
+// bounded local contract double that opens no socket.
+//
+// WHY THIS IS NOT A BACK DOOR:
+//  - It is EXTERNAL_ACTION with GUARDIAN_ENFORCED, so it gets the full gate:
+//    Guardian, then human approval, then single-use consumption.
+//  - Its executor cannot reach the network. It writes one bounded file into the
+//    workspace artifact path through the canonical writer and returns. There is
+//    no URL, no recipient, no credential.
+//  - It is only ever AVAILABLE when SYNTHOS_APPROVAL_VERIFICATION=true, so it
+//    does not sit in a production registry offering itself to callers.
+//
+// It is named "verification." rather than given a plausible product name so
+// nobody mistakes it for a shipped feature.
+// ---------------------------------------------------------------------------
+function approvalVerificationCapability(): CapabilityDescriptor {
+  const enabled = process.env.SYNTHOS_APPROVAL_VERIFICATION === 'true';
+  return {
+    key: 'verification.external_action',
+    runtime: 'contract-double',
+    status: enabled ? 'AVAILABLE' : 'NOT_CONFIGURED',
+    effectClass: 'EXTERNAL_ACTION',
+    riskTier: 'LOW',
+    approvalPolicy: 'GUARDIAN_ENFORCED',
+    workspaceScope: 'member',
+    reference: 'lib/fabric/envelope.ts::executeApprovalVerification',
+    reason: enabled
+      ? 'Approval-workflow verification only. Passes the full EXTERNAL_ACTION gate (Guardian, then human approval, then single-use consumption) and executes a bounded LOCAL contract double \u2014 it opens no socket and contacts no provider.'
+      : 'Approval-workflow verification capability, switched off. Set SYNTHOS_APPROVAL_VERIFICATION=true to enable it for a lifecycle proof; it performs no external action in any case.',
+  };
+}
+
+/** The Tool Pack 1 rows. Exported so the /api/tools route and tests read the same list. */
+export function toolPackCapabilities(): CapabilityDescriptor[] {
+  return TOOL_PACK_1.map(toolCapability);
 }
 
 /** Real, evidence-based capability list — platform-level, no Jarvis/graph/scheduler-specific filtering. */

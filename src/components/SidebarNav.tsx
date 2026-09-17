@@ -6,7 +6,7 @@ import {
   HardDrive, Terminal, ShieldCheck, CheckCircle2, FileCheck, 
   Building2, Server, HelpCircle, Command, Sparkles, Network, Code2, Crown,
   Volume2, Radio, MessageSquare, Clock, BarChart2, RefreshCw, Cpu,
-  Shield, CheckSquare, Key, Zap, Flame, Compass, Box, UserCheck, Search
+  Shield, CheckSquare, Key, Zap, Flame, Compass, Box, UserCheck, Search, Wrench
 } from 'lucide-react';
 
 interface SidebarNavProps {
@@ -131,6 +131,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
         { id: 'graph-builder' as ActiveTab, label: 'Graph Builder', icon: GitMerge, color: '#38BDF8' },
         { id: 'graph-runs' as ActiveTab, navId: 'graph-runs-orchestration', label: 'Graph Runtime', icon: Activity, color: '#EC4899' },
         { id: 'skill-registry' as ActiveTab, label: 'Skills Registry', icon: Cpu, color: '#615EFF' },
+        { id: 'tool-registry' as ActiveTab, label: 'Tool Registry', icon: Wrench, color: '#38BDF8' },
         { id: 'bot-mode' as ActiveTab, label: 'Automation', icon: Terminal, color: '#F59E0B' },
         { id: 'startup-generator' as ActiveTab, label: 'Launchpad', icon: Zap, color: '#00D26A' },
       ]
@@ -150,6 +151,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
     {
       category: 'GOVERNANCE',
       items: [
+        { id: 'approval-queue' as ActiveTab, label: 'Approval Queue', icon: ShieldCheck, color: '#F59E0B' },
         { id: 'guardian-aegis' as ActiveTab, navId: 'guardian-aegis-governance', label: 'Approvals', icon: Shield, color: '#F59E0B' },
         { id: 'system-audit' as ActiveTab, label: 'Aegis Verifier', icon: ShieldCheck, color: '#00D26A' },
         { id: 'receipts' as ActiveTab, navId: 'receipts-governance', label: 'Receipts', icon: FileCheck, color: '#38BDF8' },

@@ -20,6 +20,10 @@ import net from 'node:net';
 
 const TEST_DB_PATH = path.join(os.tmpdir(), `synthos-scheduler-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
 process.env.SYNTHOS_DB_PATH = TEST_DB_PATH;
+
+import { isolateVaultForTest } from './helpers/isolated-vault';
+// VAULT ISOLATION (must precede the lib/ imports — see the helper's header):
+isolateVaultForTest('scheduler');
 delete process.env.GEMINI_API_KEY;
 delete process.env.WINDMILL_BASE_URL;
 

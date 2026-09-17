@@ -448,6 +448,11 @@ export interface SchedulerHealth {
   lastReconcileConsidered: number | null;
   /** Sweeps that threw. Tracked apart from tickErrors: a provider outage is not a scheduler fault. */
   reconcileErrors: number;
+  /** NO-COPY/PASTE ORCHESTRATION — tracked apart for the same reason: an orchestration failure is not a scheduler fault. */
+  lastOrchestrationAt: string | null;
+  lastOrchestrationAdvanced: number | null;
+  orchestrationErrors: number;
+  lastOrchestrationError: { at: string; message: string } | null;
   lastReconcileError: { at: string; message: string } | null;
 }
 
@@ -464,6 +469,10 @@ const schedulerHealth: SchedulerHealth = {
   lastReconcileConsidered: null,
   reconcileErrors: 0,
   lastReconcileError: null,
+  lastOrchestrationAt: null,
+  lastOrchestrationAdvanced: null,
+  orchestrationErrors: 0,
+  lastOrchestrationError: null,
 };
 
 /** The scheduler's real, recorded liveness in this process. Never a configuration read. */
@@ -485,6 +494,10 @@ export function resetSchedulerHealthForTests(): void {
   schedulerHealth.lastReconcileConsidered = null;
   schedulerHealth.reconcileErrors = 0;
   schedulerHealth.lastReconcileError = null;
+  schedulerHealth.lastOrchestrationAt = null;
+  schedulerHealth.lastOrchestrationAdvanced = null;
+  schedulerHealth.orchestrationErrors = 0;
+  schedulerHealth.lastOrchestrationError = null;
 }
 
 /** Registers the ONE real in-process poll loop for schedules. Idempotent — calling twice does not start a second timer. */
@@ -502,6 +515,41 @@ export function startScheduler(intervalMs = 10000): void {
         schedulerHealth.lastTickError = { at: new Date().toISOString(), message: err?.message || String(err) };
         // eslint-disable-next-line no-console
         console.error('[scheduler] tick failed:', err);
+      });
+
+    // NO-COPY/PASTE ORCHESTRATION — the third thing this ONE timer drives.
+    //
+    // Added here rather than on a timer of its own, for the reason the comment
+    // below already gives about reconciliation: a second interval would be a
+    // second scheduler, with its own lifecycle to start, stop, health-check
+    // and get wrong. Three independent promise chains on one timer share a
+    // heartbeat and nothing else — an orchestration failure must not stop
+    // scheduled work from dispatching, and vice versa.
+    //
+    // It is also why the tick is bounded (maxTasks: 3). An unbounded queue
+    // drain would hold the timer past its own interval and the next tick would
+    // overlap itself, which is how a task storm starts.
+    // Lazily imported, NOT a top-level import, and the reason is a real cycle:
+    // scheduler -> orchestrator -> envelope -> scheduler (the envelope needs
+    // createValidatedSchedule for schedule.create_internal). ESM tolerates
+    // that cycle but can hand back a binding that is still undefined at module
+    // evaluation time, which would fail only at the first tick. A dynamic
+    // import inside the callback resolves after both modules are fully
+    // initialised — the same technique lib/model-credentials.ts already uses
+    // to reach the provider adapters.
+    import('./orchestrator')
+      .then((m) => m.orchestrationTickForScheduler())
+      .then((result) => {
+        if (result) {
+          schedulerHealth.lastOrchestrationAt = new Date().toISOString();
+          schedulerHealth.lastOrchestrationAdvanced = result.steps.filter((x) => x.outcome === 'ADVANCED').length;
+        }
+      })
+      .catch((err) => {
+        schedulerHealth.orchestrationErrors += 1;
+        schedulerHealth.lastOrchestrationError = { at: new Date().toISOString(), message: err?.message || String(err) };
+        // eslint-disable-next-line no-console
+        console.error('[orchestration] tick failed:', err);
       });
 
     // Separate promise chain on purpose. A provider outage during

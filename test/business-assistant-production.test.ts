@@ -2,6 +2,9 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { isolateVaultForTest } from './helpers/isolated-vault';
+// VAULT ISOLATION (must precede the lib/ imports — see the helper's header):
+isolateVaultForTest('convprod');
 
 // ---------------------------------------------------------------------------
 // PRODUCTION READINESS

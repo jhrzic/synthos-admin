@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { isolateVaultForTest } from './helpers/isolated-vault';
+// VAULT ISOLATION (must precede the lib/ imports — see the helper's header):
+isolateVaultForTest('answerability');
 import { questionFocus, isAnswerable, splitRequest } from '../lib/conversation/answerability';
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,10 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'synthos-attempt-'));
 process.env.SYNTHOS_DB_PATH = path.join(TMP, 'attempt.db');
 process.env.SYNTHOS_SIGNING_KEY_DIR = path.join(TMP, 'keys');
 
+import { isolateVaultForTest } from './helpers/isolated-vault';
+// VAULT ISOLATION (must precede the lib/ imports — see the helper's header):
+isolateVaultForTest('attempt-evidence');
+
 import { executeEnvelope } from '../lib/fabric/envelope';
 import { recordRuntimeEvent, listRecentRuntimeEvents, SECURITY_RELEVANT_STATUSES } from '../lib/runtime-events';
 import { getDatabase } from '../lib/persistence';

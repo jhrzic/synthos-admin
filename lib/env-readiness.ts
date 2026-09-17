@@ -116,6 +116,22 @@ export const ENV_VAR_SPECS: EnvVarSpec[] = [
   { variable: 'GITHUB_TOKEN', subsystem: 'Repository Research', requiredFor: 'Raises the GitHub Search API rate limit. Unset still works at the anonymous limit.', requirement: 'OPTIONAL', secrecy: 'SECRET' },
   { variable: 'GITHUB_API_BASE_URL', subsystem: 'Repository Research', requiredFor: 'Override for GitHub Enterprise or a test double', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
 
+  // --- TOOL PACK 1 (lib/github-readonly.ts, lib/workspace-files.ts) ---
+  // Declared here even though the completeness guard did not demand it: both
+  // are read via a parameterised `env` argument rather than a literal
+  // process-env member access, which is exactly the shape that scan cannot
+  // see (and writing the literal form here would itself trip it). Leaving
+  // them undeclared would have made the readiness panel silent about the one
+  // variable that decides whether the repo-scoped GitHub tools work at all.
+  { variable: 'GITHUB_APPROVED_REPOS', subsystem: 'Tool Pack — GitHub', requiredFor: 'The repository allowlist for github.read_file and github.inspect. Comma-separated owner/name, or owner/* for one owner. UNSET MEANS NO REPOSITORY IS APPROVED and both tools report NOT_CONFIGURED. github.search does not need it.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  // --- TOOL PACK 2: Gmail (lib/gmail-connection.ts) ---
+  { variable: 'GOOGLE_OAUTH_CLIENT_ID', subsystem: 'Gmail Connector', requiredFor: 'Identifies the SynthOS application to Google. Required before any Gmail account can be connected or any access token refreshed. Without it every Gmail capability reports NOT_CONFIGURED.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  { variable: 'GOOGLE_OAUTH_CLIENT_SECRET', subsystem: 'Gmail Connector', requiredFor: 'The OAuth client secret used in the refresh-token exchange. Never stored in the database and never returned by any route.', requirement: 'OPTIONAL', secrecy: 'SECRET' },
+  { variable: 'GOOGLE_OAUTH_TOKEN_URL', subsystem: 'Gmail Connector', requiredFor: 'Override for the Google token endpoint (a test double). Defaults to https://oauth2.googleapis.com/token.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
+  { variable: 'GMAIL_API_BASE_URL', subsystem: 'Gmail Connector', requiredFor: 'Override for the Gmail API base URL (a test double), same convention as GITHUB_API_BASE_URL. Defaults to https://gmail.googleapis.com.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
+  { variable: 'SYNTHOS_APPROVAL_VERIFICATION', subsystem: 'Approval Foundation', requiredFor: 'Enables verification.external_action \u2014 a synthetic EXTERNAL_ACTION used only to prove the human-approval lifecycle end to end. It passes the full gate (Guardian, then human approval, then single-use consumption) and executes a bounded LOCAL contract double: no socket, no provider, no recipient. Unset means the capability reports NOT_CONFIGURED.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+  { variable: 'SYNTHOS_REPO_ROOT', subsystem: 'Tool Pack — Files', requiredFor: 'Base directory the files.read allowed roots (docs, vault, scripts) resolve against. Defaults to the process working directory; overridden in tests.', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },
+
   // --- TON supplementary (lib/ton-readiness.ts, lib/ton-probe.ts) ---
   { variable: 'TON_CENTER_API_URL', subsystem: 'TON Readiness', requiredFor: 'TON Center RPC endpoint override', requirement: 'OPTIONAL', secrecy: 'NON_SECRET', validate: isHttpUrl },
   { variable: 'TONAPI_STATUS', subsystem: 'TON Readiness', requiredFor: 'Operator-declared TONAPI approval state', requirement: 'OPTIONAL', secrecy: 'NON_SECRET' },

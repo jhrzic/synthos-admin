@@ -623,3 +623,206 @@ export function listKnowledgeNotesDetailed(
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// TOOL PACK 1 — workspace-scoped Brain access (brain.search / brain.read).
+//
+// THE GAP THIS CLOSES, stated plainly because it is a real isolation hole and
+// not a missing convenience:
+//
+// listKnowledgeNotes() and searchKnowledgeNotes() above take an env and scan
+// the ENTIRE SynthOS/ subtree. They have no workspace parameter and apply no
+// workspace filter. Every note carries `workspaceId` in its frontmatter, and
+// listKnowledgeNotesDetailed() reads it — but nothing has ever filtered ON it.
+//
+// That was tolerable while the only caller was a single-workspace Brain panel
+// rendering the operator's own vault. Exposing brain.search as a capability any
+// workspace may invoke makes it a cross-workspace read: workspace A asking for
+// "pricing" would have matched workspace B's notes about B's pricing. So the
+// scoping is added here rather than left to each caller to remember, because a
+// filter that every caller must apply is a filter that one caller will forget.
+//
+// WHY UNATTRIBUTED NOTES ARE EXCLUDED, NOT SHARED
+// A note with no `workspaceId` in its frontmatter is not visible to anyone
+// through these functions. The alternative — treating an absent field as
+// "belongs to everybody" — would mean any note written before provenance
+// existed, or by a path that forgot to set it, silently becomes readable from
+// every workspace. Absent provenance is a reason to withhold, not to share.
+// listKnowledgeNotesDetailed() keeps its unfiltered behaviour for the
+// operator's own Brain panel, which is a deliberate single-workspace surface.
+// ---------------------------------------------------------------------------
+
+/** Notes belonging to exactly one workspace, by frontmatter attribution. */
+export function listWorkspaceKnowledgeNotes(
+  workspaceId: string,
+  env: NodeJS.ProcessEnv = process.env,
+  limit = 200,
+): KnowledgeNoteDetail[] {
+  const wanted = String(workspaceId || '').trim();
+  if (!wanted) return [];
+  // Scan wider than `limit` before filtering: taking the newest 200 notes and
+  // THEN filtering by workspace would return almost nothing for a workspace
+  // whose notes are older than another's, which reads as "your Brain is empty"
+  // when it is not.
+  return listKnowledgeNotesDetailed(env, Math.max(limit * 5, 1000))
+    .filter((n) => n.workspaceId === wanted)
+    .slice(0, limit);
+}
+
+export interface WorkspaceKnowledgeMatch {
+  fileName: string;
+  vaultRelativePath: string;
+  kind: string;
+  title: string;
+  matchedIn: 'title' | 'filename' | 'topics' | 'tags' | 'content';
+  /** A bounded excerpt around the match. Never the whole note. */
+  snippet: string | null;
+  modifiedAt: string;
+  createdAt: string | null;
+  /** Where this knowledge came from — the provenance the instruction requires. */
+  provenance: {
+    workspaceId: string | null;
+    source: string | null;
+    sessionId: string | null;
+    runtime: string | null;
+    model: string | null;
+    generatedBy: string | null;
+    artifacts: string[];
+    receipts: string[];
+  };
+}
+
+const SNIPPET_RADIUS = 160;
+
+function buildSnippet(body: string, needle: string): string | null {
+  const idx = body.toLowerCase().indexOf(needle);
+  if (idx < 0) return null;
+  const start = Math.max(0, idx - SNIPPET_RADIUS);
+  const end = Math.min(body.length, idx + needle.length + SNIPPET_RADIUS);
+  return `${start > 0 ? '…' : ''}${body.slice(start, end).replace(/\s+/g, ' ').trim()}${end < body.length ? '…' : ''}`;
+}
+
+/**
+ * Search one workspace's canonical knowledge.
+ *
+ * Bounded by `limit`. Match location is reported rather than implied, because
+ * "matched in the filename" and "matched in the body" are different strengths
+ * of evidence and a caller ranking results should be able to tell them apart.
+ */
+export function searchWorkspaceKnowledge(
+  workspaceId: string,
+  query: string,
+  env: NodeJS.ProcessEnv = process.env,
+  limit = 20,
+): WorkspaceKnowledgeMatch[] {
+  const needle = String(query || '').trim().toLowerCase();
+  if (!needle) return [];
+
+  const out: WorkspaceKnowledgeMatch[] = [];
+  for (const note of listWorkspaceKnowledgeNotes(workspaceId, env, 1000)) {
+    if (out.length >= limit) break;
+
+    let matchedIn: WorkspaceKnowledgeMatch['matchedIn'] | null = null;
+    let snippet: string | null = null;
+
+    if (note.title.toLowerCase().includes(needle)) matchedIn = 'title';
+    else if (note.fileName.toLowerCase().includes(needle)) matchedIn = 'filename';
+    else if (note.topics.some((t) => t.toLowerCase().includes(needle))) matchedIn = 'topics';
+    else if (note.tags.some((t) => t.toLowerCase().includes(needle))) matchedIn = 'tags';
+    else if (note.body.toLowerCase().includes(needle)) {
+      matchedIn = 'content';
+      snippet = buildSnippet(note.body, needle);
+    }
+    if (!matchedIn) continue;
+
+    out.push({
+      fileName: note.fileName,
+      vaultRelativePath: note.vaultRelativePath,
+      kind: note.kind,
+      title: note.title,
+      matchedIn,
+      snippet,
+      modifiedAt: note.modifiedAt,
+      createdAt: note.createdAt,
+      provenance: {
+        workspaceId: note.workspaceId,
+        source: note.source,
+        sessionId: note.sessionId,
+        runtime: note.runtime,
+        model: note.model,
+        generatedBy: note.generatedBy,
+        artifacts: note.artifacts,
+        receipts: note.receipts,
+      },
+    });
+  }
+  return out;
+}
+
+export class KnowledgeAccessError extends Error {
+  readonly code: 'BAD_PATH' | 'OUT_OF_SCOPE' | 'NOT_FOUND' | 'FOREIGN_WORKSPACE';
+  constructor(code: KnowledgeAccessError['code'], message: string) {
+    super(message);
+    this.name = 'KnowledgeAccessError';
+    this.code = code;
+  }
+}
+
+/**
+ * Read ONE knowledge note by its vault-relative path, enforcing both the path
+ * scope and the workspace scope.
+ *
+ * Two independent checks, and both are necessary:
+ *
+ *   PATH SCOPE — the path must sit inside the `SynthOS/` subtree. This is what
+ *   stops brain.read being a general filesystem reader: the caller supplies a
+ *   path, and without this check `../../../.env` relative to the vault root is
+ *   a credential read. Resolution is done by listing the subtree and matching,
+ *   never by joining caller input onto a root and reading the result, so there
+ *   is no constructed path to escape from in the first place.
+ *
+ *   WORKSPACE SCOPE — the note's frontmatter workspace must equal the caller's.
+ *   A correct path to another workspace's note is still refused, and the
+ *   refusal deliberately does not distinguish "exists but is not yours" from
+ *   "does not exist": the first phrasing confirms the existence of another
+ *   workspace's note to a caller with no right to know it.
+ */
+export function readWorkspaceKnowledgeNote(
+  workspaceId: string,
+  vaultRelativePath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): KnowledgeNoteDetail {
+  const requested = String(vaultRelativePath || '').trim();
+  if (!requested) {
+    throw new KnowledgeAccessError('BAD_PATH', 'A vault-relative note path is required.');
+  }
+  if (requested.includes('\0')) {
+    throw new KnowledgeAccessError('BAD_PATH', 'A path containing a NUL byte is refused.');
+  }
+  const segments = requested.split(/[\\/]+/).filter(Boolean);
+  if (segments.some((s) => s === '..' || s === '.')) {
+    throw new KnowledgeAccessError('BAD_PATH', 'A path containing "." or ".." segments is refused.');
+  }
+  if (segments[0] !== SYNTHOS_VAULT_SUBDIR) {
+    throw new KnowledgeAccessError(
+      'OUT_OF_SCOPE',
+      `brain.read only reads inside the "${SYNTHOS_VAULT_SUBDIR}/" subtree — "${segments[0] ?? requested}" is outside it.`,
+    );
+  }
+  const normalised = segments.join('/');
+
+  // Resolution by enumeration, not by path construction: the only candidates
+  // are notes the lister already found inside the approved subtree.
+  const all = listKnowledgeNotesDetailed(env, 5000);
+  const found = all.find((n) => n.vaultRelativePath === normalised);
+  if (!found) {
+    throw new KnowledgeAccessError('NOT_FOUND', `No knowledge note exists at "${normalised}".`);
+  }
+
+  const wanted = String(workspaceId || '').trim();
+  if (!wanted || found.workspaceId !== wanted) {
+    // Same message as NOT_FOUND on purpose — see the docblock.
+    throw new KnowledgeAccessError('NOT_FOUND', `No knowledge note exists at "${normalised}".`);
+  }
+  return found;
+}

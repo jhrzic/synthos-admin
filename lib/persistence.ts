@@ -206,7 +206,35 @@ export function getDatabase(): any {
         assigned_model TEXT,
         status TEXT,
         created_at TEXT,
-        updated_at TEXT
+        updated_at TEXT,
+        -- NO-COPY/PASTE ORCHESTRATION.
+        --
+        -- These three columns let a QUEUED task say what it is, so the
+        -- orchestrator can carry it forward without a human restating the
+        -- request in another runtime.
+        --
+        -- They are added to THIS table rather than to a new one on purpose.
+        -- The instruction was not to create a second queue, and canonical
+        -- tasks already carry workspace, status, lifecycle history, activity
+        -- events, artifacts and receipts. A parallel "orchestration_tasks"
+        -- table would have duplicated every one of those and then had to be
+        -- kept in step with them.
+        --
+        -- capability      NULL  -> a model task: the kernel runs it on the
+        --                          router-selected provider.
+        --                 set   -> a tool task: dispatched through
+        --                          lib/fabric/envelope.ts by capability id.
+        -- parameters_json       the tool's bounded inputs. Never a shell
+        --                       string, never code — the envelope resolves the
+        --                       capability from the registry, so a task cannot
+        --                       name an executor that does not exist.
+        -- autonomy_eligible     whether the orchestrator may pick this task up
+        --                       unattended. Defaults to 0 so that every task
+        --                       created by existing code paths stays manual,
+        --                       and autonomy is something a caller opts into.
+        capability TEXT,
+        parameters_json TEXT,
+        autonomy_eligible INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS task_status_history (
@@ -272,6 +300,61 @@ export function getDatabase(): any {
       -- there is no SELECT-then-INSERT window (see acquireExecutionClaim).
       -- workspace_id leads the UNIQUE tuple so no claim can ever cross a
       -- workspace boundary.
+      -- APPROVAL FOUNDATION (prerequisite for Tool Pack 2 / Gmail).
+      --
+      -- WHY A TABLE AND NOT runtime_events.detail_json:
+      -- An approval is not an observation, it is authority with a lifecycle.
+      -- Three things it must do are impossible inside an append-only JSON blob:
+      --
+      --   1. BE QUERIED. The approval queue asks "what is PENDING in this
+      --      workspace" on every page load. That is an indexed lookup, not a
+      --      scan-and-parse over an event ring that prunes itself.
+      --   2. BE CONSUMED ATOMICALLY. Single-use is enforced by
+      --      UPDATE ... WHERE status = 'APPROVED' and checking the row count,
+      --      so two concurrent dispatches cannot both spend one approval. That
+      --      needs a real column with a real constraint.
+      --   3. NOT BE PRUNED. runtime_events is a bounded ring (5,000 soft cap);
+      --      an authority record that vanishes when the ledger rolls over is
+      --      not an audit trail.
+      --
+      -- Evidence about approvals still flows to activity_events/runtime_events.
+      -- This table holds the DECISION; those hold the history. One fact, one
+      -- home, cross-referenced by correlation_id.
+      CREATE TABLE IF NOT EXISTS approvals (
+        approval_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        -- The task this gates, when there is one. Nullable because an approval
+        -- can be requested before a task row exists.
+        task_id TEXT,
+        -- The join key into every other ledger for this unit of work.
+        correlation_id TEXT NOT NULL,
+        capability TEXT NOT NULL,
+        action TEXT NOT NULL,
+        effect_class TEXT NOT NULL,
+        -- Requester and decider are deliberately separate columns so that
+        -- "the requester approved their own request" is a query, not a guess.
+        requested_by_user_id TEXT NOT NULL,
+        decided_by_user_id TEXT,
+        -- Guardian's independent verdict, recorded at request time. Human
+        -- approval never overwrites it.
+        guardian_decision TEXT NOT NULL,
+        guardian_citation TEXT,
+        -- Bounded, human-readable. Never a raw provider payload, never a secret.
+        action_summary TEXT NOT NULL,
+        -- THE BINDING. Approval is valid only for inputs hashing to this.
+        input_digest TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED', 'EXPIRED', 'CONSUMED')),
+        decision_reason TEXT,
+        created_at TEXT NOT NULL,
+        decided_at TEXT,
+        expires_at TEXT,
+        consumed_at TEXT,
+        consumed_by_task_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_approvals_queue ON approvals(workspace_id, status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_approvals_binding ON approvals(workspace_id, capability, input_digest, status);
+      CREATE INDEX IF NOT EXISTS idx_approvals_correlation ON approvals(correlation_id);
+
       CREATE TABLE IF NOT EXISTS execution_claims (
         claim_id TEXT PRIMARY KEY,
         workspace_id TEXT NOT NULL,
@@ -733,6 +816,22 @@ export function getDatabase(): any {
       dbInstance.exec("ALTER TABLE external_executions ADD COLUMN poll_attempts INTEGER NOT NULL DEFAULT 0");
     }
 
+    // NO-COPY/PASTE ORCHESTRATION — additive task columns. Same
+    // check-then-ALTER pattern used above, so an existing database gains them
+    // without a rebuild and a fresh one gets them from the CREATE TABLE.
+    const taskCols = dbInstance.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+    if (taskCols.length > 0 && !taskCols.some((c) => c.name === 'capability')) {
+      dbInstance.exec("ALTER TABLE tasks ADD COLUMN capability TEXT");
+    }
+    if (taskCols.length > 0 && !taskCols.some((c) => c.name === 'parameters_json')) {
+      dbInstance.exec("ALTER TABLE tasks ADD COLUMN parameters_json TEXT");
+    }
+    if (taskCols.length > 0 && !taskCols.some((c) => c.name === 'autonomy_eligible')) {
+      // DEFAULT 0: every task that already exists stays manual. Autonomy is
+      // opted into, never inherited by rows written before it existed.
+      dbInstance.exec("ALTER TABLE tasks ADD COLUMN autonomy_eligible INTEGER NOT NULL DEFAULT 0");
+    }
+
     const skillCols = dbInstance.prepare("PRAGMA table_info(skills)").all() as Array<{ name: string }>;
     if (!skillCols.some((c) => c.name === 'execution_target_type')) {
       dbInstance.exec("ALTER TABLE skills ADD COLUMN execution_target_type TEXT");
@@ -990,6 +1089,73 @@ export function getDatabase(): any {
         updated_at TEXT NOT NULL
       );
 
+      -- TOOL PACK 2 — Gmail connections.
+      --
+      -- WORKSPACE-SCOPED, and that is the one structural difference from the two
+      -- credential tables below it. model_credentials and voice_credentials are
+      -- keyed by provider alone, because a model API key is platform-level:
+      -- SynthOS holds it and pays for it (CLAUDE.md, managed-keys phase 1).
+      --
+      -- A Gmail account is the opposite. It belongs to whoever connected it, and
+      -- "workspace A cannot read workspace B's Gmail" is a requirement rather
+      -- than a nicety — mail is the most sensitive data this system will touch.
+      -- So workspace_id leads the UNIQUE tuple, exactly as it does in
+      -- execution_claims, and there is deliberately no lookup function in
+      -- lib/gmail-connection.ts that omits it.
+      --
+      -- Tokens are stored encrypted (AES-256-GCM via lib/voice-credentials.ts,
+      -- the same helper model_credentials uses — not a second crypto path) and
+      -- are never returned by any API route. See lib/gmail-connection.ts.
+      CREATE TABLE IF NOT EXISTS gmail_connections (
+        connection_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        account_email TEXT NOT NULL,
+        refresh_token_encrypted TEXT,
+        access_token_encrypted TEXT,
+        access_token_expires_at TEXT,
+        scopes TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('CONNECTED', 'NEEDS_REAUTH', 'REVOKED')),
+        connected_by_user_id TEXT NOT NULL,
+        last_verified_at TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (workspace_id, account_email)
+      );
+      CREATE INDEX IF NOT EXISTS idx_gmail_connections_workspace ON gmail_connections(workspace_id, status);
+
+      -- TOOL PACK 2 — the send ledger. The duplicate-send defence.
+      --
+      -- Gmail's API has no idempotency key, so "did this already send?" cannot
+      -- be asked of the provider. This table answers it locally: one row per
+      -- approved send, claimed BEFORE the provider is called, carrying the
+      -- provider's message id once it answers.
+      --
+      -- UNIQUE(approval_id) is the actual protection. An approval is single-use
+      -- already, but that guards the authority; this guards the SIDE EFFECT, and
+      -- they are different failures. If the process dies between the provider
+      -- accepting a message and the row being updated, the row survives in
+      -- DISPATCHED with no message id — which is the UNKNOWN state, and the one
+      -- state that must never be retried automatically.
+      CREATE TABLE IF NOT EXISTS gmail_send_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        approval_id TEXT NOT NULL,
+        connection_id TEXT NOT NULL,
+        task_id TEXT,
+        correlation_id TEXT NOT NULL,
+        content_digest TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('DISPATCHED', 'SENT', 'FAILED', 'UNKNOWN')),
+        provider_message_id TEXT,
+        provider_thread_id TEXT,
+        error_category TEXT,
+        error_message TEXT,
+        dispatched_at TEXT NOT NULL,
+        resolved_at TEXT,
+        UNIQUE (approval_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_gmail_send_attempts_workspace ON gmail_send_attempts(workspace_id, dispatched_at);
+
       CREATE TABLE IF NOT EXISTS voice_credentials (
         provider TEXT PRIMARY KEY,
         api_key_encrypted TEXT,
@@ -1156,6 +1322,190 @@ export function listGraphRuns(workspaceId: string): GraphRunRecord[] {
     .all(workspaceId) as GraphRunRecord[]) || [];
 }
 
+// ---------------------------------------------------------------------------
+// NO-COPY/PASTE ORCHESTRATION — the queue, expressed over canonical tasks.
+// ---------------------------------------------------------------------------
+
+/**
+ * Statuses from which the orchestrator may advance a task.
+ *
+ * TODO and READY only. Deliberately NOT the mid-flight states: a task sitting
+ * in RUNNING / AWAITING_VERIFICATION / AWAITING_RECEIPT either belongs to a
+ * live execution or belongs to one that died, and re-entering it from a
+ * scheduler tick is how a half-finished run acquires a second artifact.
+ * Recovering those is reconciliation's job, not the queue's.
+ */
+export const ORCHESTRATOR_ELIGIBLE_STATUSES = ['TODO', 'READY'] as const;
+
+/**
+ * Terminal statuses. A task here is finished, for good or ill, and the
+ * orchestrator must never pick it up again.
+ *
+ * REJECTED and BLOCKED are terminal for autonomy specifically: a human said no,
+ * or policy said no, and an unattended loop that retried either would be
+ * converting a refusal into a delay.
+ */
+export const TASK_TERMINAL_STATUSES = ['DONE', 'VERIFIED', 'FAILED', 'BLOCKED', 'REJECTED', 'CANCELLED'] as const;
+
+export interface OrchestratorTaskRow {
+  task_id: string;
+  workspace_id: string | null;
+  title: string | null;
+  description: string | null;
+  assigned_agent: string | null;
+  assigned_model: string | null;
+  status: string | null;
+  capability: string | null;
+  parameters_json: string | null;
+  autonomy_eligible: number;
+  created_at: string | null;
+}
+
+/**
+ * The next tasks the orchestrator may consider, oldest first.
+ *
+ * WORKSPACE-SCOPED, always — there is no unscoped variant to misuse, for the
+ * same reason every other read in this file is scoped.
+ *
+ * `autonomy_eligible = 1` is required, so a task created by any existing code
+ * path (all of which leave it 0) can never be picked up unattended. Autonomy
+ * is opted into per task, not inherited.
+ *
+ * Oldest first is FIFO rather than a priority scheme. There is no priority
+ * column and inventing one here would be inventing product; FIFO is the
+ * behaviour an operator can predict from what they queued.
+ */
+export function listOrchestratorEligibleTasks(workspaceId: string, limit = 25): OrchestratorTaskRow[] {
+  const db = getDatabase();
+  const eligible = ORCHESTRATOR_ELIGIBLE_STATUSES.map(() => '?').join(', ');
+  const rows: any = db.prepare(
+    `SELECT task_id, workspace_id, title, description, assigned_agent, assigned_model, status,
+            capability, parameters_json, autonomy_eligible, created_at
+       FROM tasks
+      WHERE workspace_id = ?
+        AND autonomy_eligible = 1
+        AND status IN (${eligible})
+      ORDER BY created_at ASC, rowid ASC
+      LIMIT ?`,
+  ).all(workspaceId, ...ORCHESTRATOR_ELIGIBLE_STATUSES, Math.max(1, Math.min(limit, 200)));
+  return (rows || []) as OrchestratorTaskRow[];
+}
+
+/** Tasks parked at the human gate, so the orchestrator can notice when one is decided. */
+export function listTasksAwaitingApproval(workspaceId: string, limit = 50): OrchestratorTaskRow[] {
+  const rows: any = getDatabase().prepare(
+    `SELECT task_id, workspace_id, title, description, assigned_agent, assigned_model, status,
+            capability, parameters_json, autonomy_eligible, created_at
+       FROM tasks
+      WHERE workspace_id = ? AND autonomy_eligible = 1 AND status = 'WAITING_FOR_APPROVAL'
+      ORDER BY updated_at ASC
+      LIMIT ?`,
+  ).all(workspaceId, Math.max(1, Math.min(limit, 200)));
+  return (rows || []) as OrchestratorTaskRow[];
+}
+
+/** Create a task the orchestrator is allowed to advance. */
+export function createOrchestratedTask(params: {
+  taskId: string;
+  workspaceId: string;
+  title: string;
+  description: string;
+  assignedAgent: string;
+  assignedModel: string;
+  /** NULL for a model task; a registry capability id for a tool task. */
+  capability?: string | null;
+  parameters?: Record<string, unknown> | null;
+  createdAt?: string;
+}): TaskRecord {
+  const created = createInitialTask({
+    taskId: params.taskId,
+    workspaceId: params.workspaceId,
+    title: params.title,
+    description: params.description,
+    assignedAgent: params.assignedAgent,
+    assignedModel: params.assignedModel,
+    createdAt: params.createdAt,
+  });
+  getDatabase()
+    .prepare('UPDATE tasks SET capability = ?, parameters_json = ?, autonomy_eligible = 1 WHERE task_id = ?')
+    .run(params.capability ?? null, params.parameters ? JSON.stringify(params.parameters) : null, params.taskId);
+  return created;
+}
+
+export function getOrchestratorTask(taskId: string, workspaceId: string): OrchestratorTaskRow | null {
+  const row: any = getDatabase().prepare(
+    `SELECT task_id, workspace_id, title, description, assigned_agent, assigned_model, status,
+            capability, parameters_json, autonomy_eligible, created_at
+       FROM tasks WHERE task_id = ? AND workspace_id = ?`,
+  ).get(taskId, workspaceId);
+  return row ? (row as OrchestratorTaskRow) : null;
+}
+
+/**
+ * Atomically move a task out of the eligible set.
+ *
+ * THIS IS THE DUPLICATE-EXECUTION DEFENCE, and it is a single guarded UPDATE
+ * rather than a read-then-write. The `status IN (...)` predicate means SQLite
+ * decides the winner: two workers racing the same task produce exactly one
+ * `changes === 1`, and the loser sees 0 and moves on. A check-then-claim would
+ * have a gap, and for a task that calls a paid provider the gap is a duplicate
+ * bill and a duplicate artifact.
+ *
+ * Returns true if THIS caller now owns the task.
+ */
+export function claimTaskForOrchestration(taskId: string, workspaceId: string, nowIso?: string): boolean {
+  const db = getDatabase();
+  const now = nowIso || new Date().toISOString();
+  const eligible = ORCHESTRATOR_ELIGIBLE_STATUSES.map(() => '?').join(', ');
+  const res: any = db.prepare(
+    `UPDATE tasks SET status = 'RUNNING', updated_at = ?
+      WHERE task_id = ? AND workspace_id = ? AND status IN (${eligible})`,
+  ).run(now, taskId, workspaceId, ...ORCHESTRATOR_ELIGIBLE_STATUSES);
+  const won = !!res && res.changes === 1;
+  if (won) {
+    db.prepare('INSERT INTO task_status_history (task_id, status, created_at) VALUES (?, ?, ?)')
+      .run(taskId, 'RUNNING', now);
+  }
+  return won;
+}
+
+/** Release a claim back to READY — used when dispatch is refused before any work happened. */
+export function releaseTaskClaim(taskId: string, workspaceId: string, toStatus: string, reason?: string): void {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  db.prepare("UPDATE tasks SET status = ?, updated_at = ? WHERE task_id = ? AND workspace_id = ? AND status = 'RUNNING'")
+    .run(toStatus, now, taskId, workspaceId);
+  db.prepare('INSERT INTO task_status_history (task_id, status, created_at) VALUES (?, ?, ?)')
+    .run(taskId, toStatus, now);
+  if (reason) {
+    try {
+      recordActivityEvent({
+        taskId, expectedWorkspaceId: workspaceId, eventType: 'ORCHESTRATION_DEFERRED',
+        agentId: 'orchestrator', payload: { toStatus, reason },
+      });
+    } catch { /* evidence must never fail the transition */ }
+  }
+}
+
+/**
+ * Tasks the orchestrator claimed but never finished — the crash-recovery set.
+ *
+ * A RUNNING task with no live execution is the signature of a process that
+ * died mid-flight. It is NOT automatically re-run: re-running it is exactly
+ * how a duplicate provider call and a duplicate artifact appear. It is
+ * surfaced for reconciliation instead.
+ */
+export function listStrandedOrchestrationTasks(workspaceId: string, olderThanIso: string): OrchestratorTaskRow[] {
+  const rows: any = getDatabase().prepare(
+    `SELECT task_id, workspace_id, title, description, assigned_agent, assigned_model, status,
+            capability, parameters_json, autonomy_eligible, created_at
+       FROM tasks
+      WHERE workspace_id = ? AND autonomy_eligible = 1 AND status = 'RUNNING' AND updated_at < ?
+      ORDER BY updated_at ASC`,
+  ).all(workspaceId, olderThanIso);
+  return (rows || []) as OrchestratorTaskRow[];
+}
+
 export function createInitialTask(params: {
   taskId: string;
   workspaceId?: string;
@@ -1269,6 +1619,26 @@ export function acquireExecutionClaim(params: {
 }
 
 /** Resolves a claim this process owns to its terminal state. Called from a try/finally so a claim is never left CLAIMED once its owning call has returned or thrown. */
+/**
+ * DELETE a claim, for the outcomes that mean "nothing happened; this may be
+ * attempted again later".
+ *
+ * Distinct from resolveExecutionClaim on purpose. Resolving to DONE records
+ * that work COMPLETED, and a later attempt correctly short-circuits on it.
+ * That is wrong for a task that merely paused — a task parked at an approval
+ * gate, or deferred because a capability was briefly unconfigured, did no work
+ * at all, and a DONE claim would make the resumed attempt report success
+ * without ever executing. That bug existed for one commit and is what this
+ * function exists to prevent.
+ *
+ * Deleting rather than adding a RELEASED status keeps the CHECK constraint and
+ * every existing query unchanged, and an absent row is exactly what
+ * "unclaimed" already means everywhere else in this table.
+ */
+export function releaseExecutionClaim(claimId: string): void {
+  getDatabase().prepare('DELETE FROM execution_claims WHERE claim_id = ? AND status = ?').run(claimId, 'CLAIMED');
+}
+
 export function resolveExecutionClaim(claimId: string, status: 'DONE' | 'FAILED'): void {
   const db = getDatabase();
   db.prepare(`UPDATE execution_claims SET status = ?, updated_at = ? WHERE claim_id = ?`).run(status, new Date().toISOString(), claimId);
@@ -1388,6 +1758,25 @@ export function setScheduleStatus(scheduleId: string, status: ScheduleStatus, st
   const db = getDatabase();
   db.prepare('UPDATE schedules SET status = ?, status_reason = ?, updated_at = ? WHERE schedule_id = ?')
     .run(status, statusReason ?? null, new Date().toISOString(), scheduleId);
+}
+
+/**
+ * TOOL PACK 1 — resume a paused schedule.
+ *
+ * Extracted from POST /api/schedules/:id/resume, which built this UPDATE
+ * inline. schedule.resume needs the identical write, and the alternative was a
+ * second copy of the SQL in lib/fabric/envelope.ts. Two copies of a status
+ * transition drift: one gets a new column and the other does not, and then the
+ * same logical action leaves the row in two different shapes depending on
+ * which door it came through.
+ *
+ * The caller computes nextRunAt (lib/fabric/scheduler.ts::computeResumeNextRunAt)
+ * — this function does not decide scheduling policy, only how to persist it.
+ */
+export function resumeSchedule(scheduleId: string, nextRunAt: string | null): void {
+  const db = getDatabase();
+  db.prepare("UPDATE schedules SET status = 'ACTIVE', status_reason = NULL, next_run_at = ?, updated_at = ? WHERE schedule_id = ?")
+    .run(nextRunAt, new Date().toISOString(), scheduleId);
 }
 
 /** Applied after every real occurrence resolves (never for an IN_PROGRESS duplicate, which contributes nothing — the owning call already does this). */
