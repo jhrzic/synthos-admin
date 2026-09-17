@@ -846,10 +846,25 @@ provenance: "${finalMeta.provenance}"
   };
 
   // Kanban Task Operations
-  const handleAddKanbanTask = (task: Omit<KanbanTask, 'id' | 'createdAt' | 'updatedAt'>) => {
+  // `subtasks` is REQUIRED on KanbanTask, but the components that call this
+  // are typed Omit<KanbanTask, ... | 'subtasks'> and two of them —
+  // GlobalVoiceOverlay and ApolloVoiceView — genuinely do not pass it. The
+  // spread then produced a task whose `subtasks` was `undefined` while the
+  // type insisted it was an array, and three call sites read it unguarded:
+  // handleCompleteTask (task.subtasks.map), the Brain note builder
+  // (task.subtasks.map) and KanbanView's subtask toggle. Creating a task by
+  // voice and then completing it threw a TypeError.
+  //
+  // Defaulted here, at the one place every task is constructed, so the
+  // invariant the type promises is actually true. This also makes the prop
+  // signatures agree.
+  const handleAddKanbanTask = (
+    task: Omit<KanbanTask, 'id' | 'createdAt' | 'updatedAt' | 'subtasks'> & { subtasks?: KanbanTask['subtasks'] },
+  ) => {
     const now = new Date().toISOString().slice(0, 16).replace('T', ' ');
     const newTask: KanbanTask = {
       ...task,
+      subtasks: task.subtasks ?? [],
       id: `task-kanban-${Date.now()}`,
       createdAt: now,
       updatedAt: now,
@@ -1176,7 +1191,8 @@ Output your audit in markdown with your exact decision at the very top.`;
         text: replyText,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         modelUsed: agent.assignedModel || 'hermes',
-        tokensUsed: 240
+        // `tokensUsed: 240` was a fixed number on every message. No usage
+        // figure reaches this handler, so none is reported.
       };
 
       setTelegramMessages(prev => ({
@@ -1920,7 +1936,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
                 column: 'todo',
                 tags: ['lead-gen', 'outreach', 'directory'],
                 subtasks: [
-                  { id: `st-1`, title: 'Verify business credentials & phone', completed: true },
+                  { id: `st-1`, title: 'Verify business credentials & phone', completed: false },
                   { id: `st-2`, title: 'Dispatch Reach agent WhatsApp introductory message', completed: false }
                 ],
                 obsidianWikilinks: ['Directory-Leads', 'Outreach-Templates']

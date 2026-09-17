@@ -101,20 +101,31 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         promptInjectionDefense: true,
         maxTokenCap: 8192,
       },
+      // These defaults render in the settings form as though they were this
+      // install's current configuration, so every one of them was a claim:
+      // a Telegram webhook URL and master chat id for a transport that does
+      // not exist in this build (nothing here ever calls api.telegram.org),
+      // an Obsidian daemon socket and a 15s sync interval for a daemon that
+      // is not running, a vaultRoot of '~/Documents/Obsidian/Hermes-Vault'
+      // which is NOT the real vault path, and a Tailscale hostname with
+      // `tunnelActive: true` asserting a live tunnel.
+      //
+      // Fields kept — they are the right things to configure. Values empty,
+      // so the form shows what is actually set, which is nothing.
       telegramConfig: s.telegramConfig || {
         botToken: '',
-        webhookUrl: 'https://api.telegram.org/bot/hermes-router',
-        masterChatId: '-100827364819',
+        webhookUrl: '',
+        masterChatId: '',
       },
       obsidianConfig: s.obsidianConfig || {
-        daemonSocket: 'ws://127.0.0.1:27124',
-        vaultRoot: '~/Documents/Obsidian/Hermes-Vault',
-        syncInterval: '15s',
+        daemonSocket: '',
+        vaultRoot: '',
+        syncInterval: '',
       },
       tailscaleConfig: s.tailscaleConfig || {
-        nodeHostname: 'hermes-mission-control.ts.net',
+        nodeHostname: '',
         authKey: '',
-        tunnelActive: true,
+        tunnelActive: false,
       }
     };
   });
@@ -998,7 +1009,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </div>
                 <input
                   type="text"
-                  value={settings.telegramConfig?.webhookUrl || 'https://api.telegram.org/bot/hermes-router'}
+                  value={settings.telegramConfig?.webhookUrl || ''}
                   onChange={(e) => setSettings(s => ({
                     ...s,
                     telegramConfig: { ...s.telegramConfig!, webhookUrl: e.target.value }
@@ -1014,7 +1025,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </div>
                 <input
                   type="text"
-                  value={settings.tailscaleConfig?.nodeHostname || 'hermes-mission-control.ts.net'}
+                  value={settings.tailscaleConfig?.nodeHostname || ''}
                   onChange={(e) => setSettings(s => ({
                     ...s,
                     tailscaleConfig: { ...s.tailscaleConfig!, nodeHostname: e.target.value }

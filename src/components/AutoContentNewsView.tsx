@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AgentInfo, AIModelInfo, ObsidianNote } from '../types';
+import { AgentInfo, AgentRole, AIModelInfo, ObsidianNote } from '../types';
 import { 
   Newspaper, Sparkles, Globe, Send, Share2, Copy, CheckCircle2, 
   ExternalLink, ArrowRight, RefreshCw, FileText, Database, MessageSquare,
@@ -10,7 +10,10 @@ interface AutoContentNewsViewProps {
   agents: Record<string, AgentInfo>;
   models: Record<string, AIModelInfo>;
   onAddNoteToVault: (title: string, content: string, tags: string[], folder?: string) => void;
-  onSendTelegramMessage?: (channel: string, text: string) => void;
+  // Takes an AgentRole, not a free string. Typed as `channel: string` this
+  // accepted a Telegram thread id, and App's handler then resolved
+  // `agents['104']` to undefined and silently fell back to the orchestrator.
+  onSendTelegramMessage?: (role: AgentRole, text: string) => void;
   onSendQuery: (query: string, model: string) => Promise<string>;
   onSelectTab: (tab: any) => void;
 }
@@ -99,8 +102,13 @@ export const AutoContentNewsView: React.FC<AutoContentNewsViewProps> = ({
 
   const handleDispatchTelegram = () => {
     if (!generatedDraft || !onSendTelegramMessage) return;
-    onSendTelegramMessage('104', `[AutoContent Dispatch (${contentFormat.toUpperCase()})]:\n\n${generatedDraft.slice(0, 400)}...`);
-    setStatusNotice('Dispatched to Telegram #reach-growth (Thread 104)!');
+    // '104' was the Reach thread id, not a role. App resolves the thread
+    // from the role, so passing the id sent this to the orchestrator (101).
+    onSendTelegramMessage('reach', `[AutoContent Dispatch (${contentFormat.toUpperCase()})]:\n\n${generatedDraft.slice(0, 400)}...`);
+    // Nothing in this build contacts Telegram — App's handler appends the
+    // message to the in-app agent thread and asks a model to reply. Saying
+    // "Dispatched to Telegram" claimed an outbound send that never happened.
+    setStatusNotice('Queued to the in-app Reach thread. No Telegram transport is configured, so nothing was sent.');
     setTimeout(() => setStatusNotice(null), 3000);
   };
 

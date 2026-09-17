@@ -1069,7 +1069,7 @@ ${finalVideos.map((v, i) => `### ${i + 1}. ${v.title}
 - **SynthOS Relevance**: **${v.synthosRelevance}** — ${v.synthosRelevanceReason}
 
 **Key Takeaways**:
-${v.summaryBullets.map(b => `- ${b}`).join('\n')}
+${v.summaryBullets.map((b: string) => `- ${b}`).join('\n')}
 `).join('\n---\n\n')}
 
 ---
@@ -5678,7 +5678,8 @@ Rules for spokenSummary specifically:
       if (!result) {
         return res.status(404).json({ success: false, error: "Skill not found." });
       }
-      return res.json({ success: result.success, ...result });
+      // `result` carries its own `success`; it is the only source.
+      return res.json({ ...result });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to execute skill" });
     }
@@ -5731,7 +5732,9 @@ Rules for spokenSummary specifically:
       if (!result) {
         return res.status(404).json({ success: false, error: "Skill not found." });
       }
-      return res.json({ success: true, ...result });
+      // testSkill reports success: false for its NOT_IMPLEMENTED result; do
+      // not restate it as true above the spread.
+      return res.json({ ...result });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to test skill" });
     }
@@ -6062,7 +6065,9 @@ Rules for spokenSummary specifically:
       const resolved = resolveWorkspaceId(req.body?.workspaceId);
       if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
       const result = await cancelExternalExecution(resolved.workspaceId, req.params.id);
-      return res.json({ success: true, ...result });
+      // testSkill reports success: false for its NOT_IMPLEMENTED result; do
+      // not restate it as true above the spread.
+      return res.json({ ...result });
     } catch (err: any) {
       const code = err?.code === "NOT_FOUND" ? 404 : 500;
       return res.status(code).json({ success: false, error: err?.message || "Failed to cancel external execution" });
@@ -7341,7 +7346,9 @@ Rules for spokenSummary specifically:
         actorUserId, eventType: "BACKUP_RESTORE_STAGED", targetType: "backup", targetId: req.params.backupId,
         detail: { outcome: "STAGED", stagedAt: result.stagedAt },
       });
-      return res.json({ success: true, ...result });
+      // testSkill reports success: false for its NOT_IMPLEMENTED result; do
+      // not restate it as true above the spread.
+      return res.json({ ...result });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to stage restore" });
     }

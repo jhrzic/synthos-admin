@@ -1383,20 +1383,26 @@ export const INITIAL_JARVIS_SETTINGS: JarvisSettings = {
     promptInjectionDefense: true,
     maxTokenCap: 128000
   },
+  // Configuration this install does not have. The Settings form renders
+  // these as the current values, so each was a claim: a Telegram webhook and
+  // master chat id for a transport with no implementation, an Obsidian
+  // daemon socket and sync interval for a daemon that is not running, a
+  // vaultRoot that is NOT the real vault path, and a Tailscale hostname with
+  // `tunnelActive: true` asserting a live tunnel. Fields kept, values empty.
   telegramConfig: {
     botToken: '',
-    webhookUrl: 'https://api.hermes-agentos.internal/telegram/webhook',
-    masterChatId: '-100293848201'
+    webhookUrl: '',
+    masterChatId: ''
   },
   obsidianConfig: {
-    daemonSocket: 'ws://127.0.0.1:27124',
-    vaultRoot: '~/Documents/Obsidian/Hermes-Vault',
-    syncInterval: '15s'
+    daemonSocket: '',
+    vaultRoot: '',
+    syncInterval: ''
   },
   tailscaleConfig: {
-    nodeHostname: 'hermes-mission-control.ts.net',
+    nodeHostname: '',
     authKey: '',
-    tunnelActive: true
+    tunnelActive: false
   }
 };
 

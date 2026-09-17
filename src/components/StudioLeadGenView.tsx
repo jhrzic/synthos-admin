@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AgentInfo, AIModelInfo, KanbanTask } from '../types';
+import { AgentInfo, AgentRole, AIModelInfo, KanbanTask } from '../types';
 import { 
   Users, Target, Mail, ArrowRight, Sparkles, CheckCircle2, 
   Send, Database, Kanban, DollarSign, BarChart, FileText, 
@@ -11,7 +11,10 @@ interface StudioLeadGenViewProps {
   models: Record<string, AIModelInfo>;
   onAddTaskToKanban: (task: Omit<KanbanTask, 'id' | 'createdAt' | 'updatedAt'>) => void;
   onAddNoteToVault: (title: string, content: string, tags: string[], folder?: string) => void;
-  onSendTelegramMessage?: (channel: string, text: string) => void;
+  // Takes an AgentRole, not a free string. Typed as `channel: string` this
+  // accepted a Telegram thread id, and App's handler then resolved
+  // `agents['104']` to undefined and silently fell back to the orchestrator.
+  onSendTelegramMessage?: (role: AgentRole, text: string) => void;
   onSendQuery: (query: string, model: string) => Promise<string>;
   onSelectTab: (tab: any) => void;
 }

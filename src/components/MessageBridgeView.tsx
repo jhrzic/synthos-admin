@@ -9,7 +9,9 @@ import {
 
 interface MessageBridgeViewProps {
   models: Record<string, AIModelInfo>;
-  onSendQuery: (prompt: string, modelId?: string, systemPrompt?: string) => Promise<string>;
+  // `modelId` is required: the handler behind this prop takes a
+  // non-optional targetModel, and every call site here supplies one.
+  onSendQuery: (prompt: string, modelId: string, systemPrompt?: string) => Promise<string>;
   onLogEvent?: (level: 'info' | 'warn' | 'success' | 'agent' | 'error', source: string, message: string) => void;
 }
 

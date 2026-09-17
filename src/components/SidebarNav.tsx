@@ -90,13 +90,49 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
     }));
   };
 
+  /**
+   * One navigation entry. Declared explicitly rather than inferred, so the
+   * optional fields are part of the contract instead of an accident of which
+   * literal happened to set them. The render already guarded each with
+   * `item.x && ...`, so nothing crashed — but nothing typed them either, and
+   * a mistyped `statusTagg` would have been silently invisible on labels that
+   * report wiring truth.
+   *
+   * PRODUCT PRESERVATION: the statusTag chip is kept, not deleted. Nothing
+   * supplies one today, so it renders for no item — which is the honest
+   * state. The intended UX is a per-surface wiring indicator, and this is
+   * where real wiring state belongs when it exists.
+   */
+  interface NavItem {
+    id: ActiveTab;
+    label: string;
+    icon: React.ElementType;
+    color: string;
+    badge?: string;
+    statusTag?: 'LIVE' | 'PARTIAL' | 'NOT CONNECTED' | 'UNKNOWN';
+    hasSubMenu?: boolean;
+    navId?: string;
+  }
+
+  interface NavGroup {
+    category: string;
+    items: NavItem[];
+    /**
+     * Set on one group and read by nothing. Kept in the contract rather than
+     * dropped, because it records an intent (this group is the workspace
+     * switcher) that the render does not yet act on. Zero readers is not by
+     * itself grounds for removal.
+     */
+    isWorkspaces?: boolean;
+  }
+
   // Canonical Navigation Structure
-  const navigationGroups = [
+  const navigationGroups: NavGroup[] = [
     {
       category: 'OPERATIONS',
       items: [
         { id: 'overview' as ActiveTab, label: 'Overview', icon: LayoutDashboard, color: '#A5A2FF' },
-        { id: 'kanban' as ActiveTab, label: 'Kanban', icon: Kanban, badge: '6 Stg', color: '#00D26A' },
+        { id: 'kanban' as ActiveTab, label: 'Kanban', icon: Kanban, color: '#00D26A' },
         { id: 'graph-runs' as ActiveTab, label: 'Active Runs', icon: Activity, color: '#EC4899' },
         { id: 'agent-fleet' as ActiveTab, label: 'Agent Fleet', icon: Bot, color: '#EAB308' },
         { id: 'guardian-aegis' as ActiveTab, label: 'Approvals', icon: ShieldCheck, color: '#F59E0B' },

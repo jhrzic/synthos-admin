@@ -9,7 +9,9 @@ import {
 
 interface ClaudeArtifactsViewProps {
   models: Record<string, AIModelInfo>;
-  onSendQuery: (prompt: string, modelId?: string, systemPrompt?: string) => Promise<string>;
+  // `modelId` is required: the handler behind this prop takes a
+  // non-optional targetModel, and every call site here supplies one.
+  onSendQuery: (prompt: string, modelId: string, systemPrompt?: string) => Promise<string>;
   /** Required to scope artifacts to the caller's workspace. */
   activeWorkspaceId?: string;
 }

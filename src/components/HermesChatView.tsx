@@ -190,6 +190,13 @@ export const HermesChatView: React.FC<HermesChatViewProps> = ({
 User Query: "${query}"
 Respond with high technical precision, structured markdown, and clear agent execution steps.`;
 
+      // `onSendQuery` is an optional prop. Invoking it unguarded threw a
+      // TypeError that fell into the catch below and was then reported as a
+      // failed model request — a real error, but attributed to the wrong
+      // cause. Name the actual reason instead.
+      if (!onSendQuery) {
+        throw new Error('No query handler is wired to this chat view, so no model can be contacted.');
+      }
       const responseText = await onSendQuery(prompt, selectedModel);
 
       // Create Assistant Message with verified Guardian receipt

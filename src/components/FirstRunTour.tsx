@@ -113,7 +113,7 @@ export const FirstRunTour: React.FC<FirstRunTourProps> = ({ isOpen, onClose, onN
     if (currentStep < TOUR_STEPS.length - 1) {
       const nextStep = currentStep + 1;
       setCurrentStep(nextStep);
-      onNavigateTab(TOUR_STEPS[nextStep].tab);
+      navigate(TOUR_STEPS[nextStep].tab);
     } else {
       handleComplete();
     }
@@ -123,7 +123,7 @@ export const FirstRunTour: React.FC<FirstRunTourProps> = ({ isOpen, onClose, onN
     if (currentStep > 0) {
       const prevStep = currentStep - 1;
       setCurrentStep(prevStep);
-      onNavigateTab(TOUR_STEPS[prevStep].tab);
+      navigate(TOUR_STEPS[prevStep].tab);
     }
   };
 

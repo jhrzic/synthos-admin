@@ -413,9 +413,15 @@ export async function refreshExternalExecutionStatus(workspaceId: string, id: st
   const previousStatus = existing.status;
   const runtime: ExternalRuntime = isExternalRuntime(existing.runtime) ? existing.runtime : 'windmill';
   const ctx = createExecutionContext({ workspaceId });
+  // Bound to a local after the guard above so the non-null narrowing survives
+  // into the closures below. TypeScript drops narrowing on a mutable property
+  // access captured by a callback, which is why one branch previously carried
+  // a bare `!`. The guard is real either way; this makes the compiler agree
+  // without an assertion.
+  const remoteJobId: string = existing.remote_job_id;
   const statusResult = runtime === 'antigravity'
-    ? await ctx.invoke('runtime.antigravity', () => antigravityClient.getInteractionStatus(existing.remote_job_id!))
-    : await ctx.invoke('windmill.job', () => windmillClient.getJobStatus(existing.remote_job_id));
+    ? await ctx.invoke('runtime.antigravity', () => antigravityClient.getInteractionStatus(remoteJobId))
+    : await ctx.invoke('windmill.job', () => windmillClient.getJobStatus(remoteJobId));
   const now = new Date().toISOString();
 
   if (!statusResult.ok) {
@@ -499,6 +505,9 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
   const runtime: ExternalRuntime = isExternalRuntime(existing.runtime) ? existing.runtime : 'windmill';
   const runtimeLabel = RUNTIME_LABEL[runtime];
   const ctx = createExecutionContext({ workspaceId });
+  // See the note in refreshExternalExecutionStatus: bound to a local so the
+  // guard's narrowing holds inside the callbacks below, without a `!`.
+  const remoteJobId: string = existing.remote_job_id;
 
   let resultText: string;
   let resultTruncated = false;
@@ -506,7 +515,7 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
   let runtimeEvidence: Record<string, unknown> = {};
 
   if (runtime === 'antigravity') {
-    const interaction = await ctx.invoke('runtime.antigravity', () => antigravityClient.getInteractionResult(existing.remote_job_id!));
+    const interaction = await ctx.invoke('runtime.antigravity', () => antigravityClient.getInteractionResult(remoteJobId));
     if (!interaction.ok) {
       throw Object.assign(new Error(sanitizeError(interaction.error)), { code: 'RESULT_FETCH_FAILED' });
     }
@@ -525,7 +534,7 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
       environmentId: interaction.environmentId,
     };
   } else {
-    const resultCall = await ctx.invoke('windmill.job', () => windmillClient.getJobResult(existing.remote_job_id));
+    const resultCall = await ctx.invoke('windmill.job', () => windmillClient.getJobResult(remoteJobId));
     if (!resultCall.ok) {
       throw Object.assign(new Error(sanitizeError(resultCall.error)), { code: 'RESULT_FETCH_FAILED' });
     }
@@ -696,7 +705,10 @@ export async function cancelExternalExecution(workspaceId: string, id: string): 
 
   const previousStatus = existing.status;
   const ctx = createExecutionContext({ workspaceId });
-  const result = await ctx.invoke('windmill.job', () => windmillClient.cancelJob(existing.remote_job_id));
+  // Same reason as above — the guard is real, the narrowing is not inherited
+  // by the closure.
+  const remoteJobId: string = existing.remote_job_id;
+  const result = await ctx.invoke('windmill.job', () => windmillClient.cancelJob(remoteJobId));
   if (!result.ok) {
     return { execution: existing, confirmed: false, error: sanitizeError(result.error) };
   }

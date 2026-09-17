@@ -253,8 +253,11 @@ export function readManifestFromArchive(backupId: string): BackupManifest | null
   tar.list({
     file: archivePath,
     sync: true,
-    filter: (entryPath) => entryPath === 'manifest.json',
-    onReadEntry: (entry) => {
+    // Annotated explicitly: the options object carries an `as any` below
+    // because the tar typings do not describe this call shape, and that cast
+    // also stops TypeScript inferring these callback parameters.
+    filter: (entryPath: string) => entryPath === 'manifest.json',
+    onReadEntry: (entry: NodeJS.EventEmitter) => {
       const chunks: Buffer[] = [];
       entry.on('data', (c: Buffer) => chunks.push(c));
       entry.on('end', () => { manifestText = Buffer.concat(chunks).toString('utf8'); });

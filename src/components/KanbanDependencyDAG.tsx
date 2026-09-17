@@ -846,7 +846,13 @@ export const KanbanDependencyDAG: React.FC<KanbanDependencyDAGProps> = ({
 // OVERLAY COMPONENT: Draws directed SVG lines directly across Kanban columns/cards
 interface KanbanDAGOverlayProps {
   tasks: KanbanTask[];
-  containerRef: React.RefObject<HTMLDivElement>;
+  // React 19 types `useRef<HTMLDivElement>(null)` as
+  // RefObject<HTMLDivElement | null>, which is accurate: the ref is null
+  // until the element mounts. The consumer already handles that (it reads
+  // `containerRef.current` and bails when absent), so the prop states the
+  // nullable truth rather than requiring a non-null ref the caller cannot
+  // provide.
+  containerRef: React.RefObject<HTMLDivElement | null>;
   highlightedTaskId?: string | null;
   highlightCriticalOnly?: boolean;
 }
