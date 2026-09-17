@@ -114,9 +114,39 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
       });
     });
 
-    // 2. AI Model Synapses
-    Object.entries(models).forEach(([key, model], i) => {
-      const angle = (i / Object.keys(models).length) * Math.PI * 2;
+    // 2. AI Model Synapses — ONLY models a real note actually came from.
+    //
+    // THE TRUTH DEFECT THIS FIXES, visible in the live Admin before the change:
+    // this loop ran over the WHOLE model registry unconditionally, so a Brain
+    // holding one note rendered twelve model nodes around it — ElevenLabs,
+    // Perplexity, Cursor, Codex, OpenClaw and others, most of which this build
+    // cannot execute at all. The graph looked populated while the knowledge in
+    // it was a single note, which is exactly the "rich graphics, fake data"
+    // failure the non-demo rule exists to prevent.
+    //
+    // A model now earns a node by being named in a note's own frontmatter
+    // `model:` field — a canonical provenance relationship, recorded by
+    // whichever run produced the note. Not a substring guess, and not the
+    // roster. With no notes attributed to a model, there are no model nodes,
+    // and the graph is honestly sparse.
+    const referencedModelKeys = new Set<string>();
+    notes.forEach((n) => {
+      const noteModel = (n as { model?: string }).model;
+      if (!noteModel) return;
+      const wanted = String(noteModel).toLowerCase();
+      // Match a registry entry by its key or its display name, so a note
+      // recording "gpt-5.6-terra" links to the OpenAI entry it really used.
+      Object.entries(models).forEach(([key, model]) => {
+        const name = String(model?.name || '').toLowerCase();
+        if (wanted === key.toLowerCase() || wanted.includes(key.toLowerCase()) || (name && wanted.includes(name))) {
+          referencedModelKeys.add(key);
+        }
+      });
+    });
+
+    const referencedModels = Object.entries(models).filter(([key]) => referencedModelKeys.has(key));
+    referencedModels.forEach(([key, model], i) => {
+      const angle = (i / Math.max(1, referencedModels.length)) * Math.PI * 2;
       const dist = 240;
       nodeMap.set(`model-${key}`, {
         id: `model-${key}`,
@@ -166,16 +196,28 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
         color: 'rgba(97, 94, 255, 0.15)',
       });
 
-      // Link to models if referenced
-      Object.keys(models).forEach(mKey => {
-        if (n.content.toLowerCase().includes(mKey) || n.title.toLowerCase().includes(mKey) || n.tags.includes(mKey)) {
-          linkList.push({
-            source: `model-${mKey}`,
-            target: n.id,
-            color: 'rgba(234, 179, 8, 0.25)',
-          });
-        }
-      });
+      // Link to the model that actually PRODUCED this note.
+      //
+      // Previously this drew an edge whenever a note's body happened to
+      // contain a model key as a substring — so a note merely discussing
+      // "claude" acquired a provenance edge to Claude. That is inference
+      // dressed as provenance, and the canonical answer was already in the
+      // note: its frontmatter `model:` field, written by the run itself.
+      const producedBy = (n as { model?: string }).model;
+      if (producedBy) {
+        const wanted = String(producedBy).toLowerCase();
+        Object.entries(models).forEach(([mKey, m]) => {
+          if (!referencedModelKeys.has(mKey)) return;
+          const name = String(m?.name || '').toLowerCase();
+          if (wanted === mKey.toLowerCase() || wanted.includes(mKey.toLowerCase()) || (name && wanted.includes(name))) {
+            linkList.push({
+              source: `model-${mKey}`,
+              target: n.id,
+              color: 'rgba(234, 179, 8, 0.25)',
+            });
+          }
+        });
+      }
     });
 
     // 4. Wikilinks Connections between notes
