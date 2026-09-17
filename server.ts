@@ -79,6 +79,15 @@ import { listWorkspaceGmailSendAttempts } from "./lib/gmail-send-ledger";
 import { getOrchestratorHealth, runOrchestrationTick } from "./lib/fabric/orchestrator";
 import { resolveAutonomyLevel, AUTONOMY_LEVELS } from "./lib/autonomy";
 import {
+  summarizeExternalSources,
+  indexExternalVaultSources,
+  buildExternalSourceGraph,
+  searchBrainAndSources,
+  resolveRetrievalScope,
+  EXTERNAL_TRUST_NOTE,
+  CANONICAL_TRUST_NOTE,
+} from "./lib/brain-sources";
+import {
   listOrchestratorEligibleTasks,
   listTasksAwaitingApproval,
   listStrandedOrchestrationTasks,
@@ -1763,6 +1772,77 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to read approval" });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // BRAIN SOURCES — the vault boundary, exposed for the Brain UI.
+  //
+  // Returns the external index and its wikilink graph so the restored
+  // ObsidianGraphMind can render source notes as a VISUALLY DISTINCT layer.
+  //
+  // Every record is labelled EXTERNAL_SOURCE / UNADMITTED. This route has no
+  // write, no promote, and no admit operation: admission happens through the
+  // existing KIL gate on real work, never by looking at a screen.
+  // -------------------------------------------------------------------------
+  app.get("/api/brain/sources", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const workspaceId = authorizedWorkspaceId(req);
+      if (!workspaceId) return res.status(403).json({ success: false, error: "No authorized workspace on this request." });
+
+      const summary = summarizeExternalSources();
+      const graph = buildExternalSourceGraph();
+      const limit = Math.min(Number(req.query?.limit) || 250, 1000);
+
+      return res.json({
+        success: true,
+        boundary: {
+          managedBrainScope: "SynthOS/**",
+          externalSourceScope: "everything else in the configured vault",
+          admissionModel: "external vault content -> observed source -> reviewed/admitted -> Brain knowledge",
+          retrievalScope: resolveRetrievalScope(),
+          canonicalTrustNote: CANONICAL_TRUST_NOTE,
+          externalTrustNote: EXTERNAL_TRUST_NOTE,
+        },
+        summary,
+        // Bounded projection. No bodies — a source list must not ship 154
+        // note bodies to a browser that only needs to draw nodes.
+        sources: indexExternalVaultSources(process.env, limit).map((r) => ({
+          vaultRelativePath: r.vaultRelativePath,
+          folder: r.folder,
+          title: r.title,
+          classification: r.classification,
+          admission: r.admission,
+          sizeBytes: r.sizeBytes,
+          modifiedAt: r.modifiedAt,
+          contentHash: r.contentHash,
+          hasFrontmatter: r.hasFrontmatter,
+          wikilinks: r.wikilinks,
+          observedFields: r.observedFields,
+        })),
+        graph: { nodeCount: graph.nodes.length, edges: graph.edges, droppedDanglingLinks: graph.droppedDanglingLinks },
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to index external vault sources" });
+    }
+  });
+
+  app.get("/api/brain/search", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const workspaceId = authorizedWorkspaceId(req);
+      if (!workspaceId) return res.status(403).json({ success: false, error: "No authorized workspace on this request." });
+      const query = String(req.query?.q || req.query?.query || "").trim();
+      if (!query) return res.status(400).json({ success: false, error: "A query is required." });
+
+      const requested = String(req.query?.scope || "").toUpperCase();
+      const scope = requested === "BRAIN_ONLY" || requested === "EXTERNAL_ONLY" || requested === "ALL"
+        ? (requested as "BRAIN_ONLY" | "EXTERNAL_ONLY" | "ALL")
+        : resolveRetrievalScope();
+
+      const found = searchBrainAndSources({ workspaceId, query, scope, limit: Math.min(Number(req.query?.limit) || 25, 100) });
+      return res.json({ success: true, ...found });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Brain search failed" });
     }
   });
 

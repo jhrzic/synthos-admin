@@ -72,23 +72,29 @@ export const HermesChatView: React.FC<HermesChatViewProps> = ({
 }) => {
   const addTaskHandler = onAddTaskToKanban || onAddKanbanTask;
   // Session State
+  // The opening session keeps its command reference — that is real, useful
+  // UX and the commands exist. What it must not do is assert a runtime
+  // state: it used to open with "Nous Hermes 3 Swarm Controller online",
+  // attribute itself to `Nous Hermes 3 (405B)` and carry a fixed 14:20
+  // timestamp, on a build where HERMES_LOCAL_ENABLED is false and no swarm
+  // controller is running. The greeting now describes the interface and says
+  // nothing about what is online.
   const [sessions, setSessions] = useState<HermesSession[]>([
     {
       id: 'sess-1',
-      title: 'Hermes 3 Swarm Orchestration',
-      createdAt: 'Today, 14:20',
+      title: 'New session',
+      createdAt: 'Not started',
       model: 'hermes',
       messages: [
         {
           id: 'msg-init',
           sender: 'assistant',
           agentRole: 'orchestrator',
-          modelUsed: 'Nous Hermes 3 (405B)',
-          text: `**Nous Hermes 3 Swarm Controller online.**\n\nI am the autonomous fleet master coordinated via \`board.db\` and the Telegram thread mesh.\n\n### Available Slash Commands:\n- \`/run <objective>\` — Launch full-stack multi-agent research & execution loop\n- \`/model <id>\` — Switch active model router\n- \`/agent <role>\` — Direct prompt to specific specialist (scout, dev, scribe, reach, analytics)\n- \`/status\` — Display real-time swarm telemetry and token metrics\n- \`/tools\` — Inspect active MCPs and sandboxed tools\n- \`/vault\` — Query or sync to Obsidian knowledge graph\n- \`/approve\` — Grant authorization for pending guardian gates`,
-          timestamp: '14:20'
-        }
-      ]
-    }
+          text: `**Command reference**\n\nThis session has not contacted a model yet. Runtime and model availability are shown on the Runtime screen, not here.\n\n### Slash commands:\n- \`/run <objective>\` — Launch a multi-agent research and execution loop\n- \`/model <id>\` — Switch the active model router\n- \`/agent <role>\` — Direct a prompt to one specialist (scout, dev, scribe, reach, analytics)\n- \`/status\` — Show runtime and token telemetry\n- \`/tools\` — Inspect active MCPs and sandboxed tools\n- \`/vault\` — Query or sync the Brain\n- \`/approve\` — Grant authorization for a pending guardian gate`,
+          timestamp: '—',
+        },
+      ],
+    },
   ]);
 
   const [activeSessionId, setActiveSessionId] = useState<string>('sess-1');
@@ -227,12 +233,17 @@ Respond with high technical precision, structured markdown, and clear agent exec
         }
       }
     } catch (err: any) {
+      // The request FAILED. This used to answer with "Executed local fallback
+      // response ... Directive logged to board.db ... Task queued for
+      // background worker" — attributed to a "Local Fallback Core" that does
+      // not exist, describing a queue write that never happened. A failure
+      // that reads as completed work is the single most expensive bug shape
+      // in this project; the error is now reported as an error.
       const errorMsg: HermesChatMessage = {
         id: `msg-err-${Date.now()}`,
         sender: 'assistant',
         agentRole: 'orchestrator',
-        modelUsed: 'Local Fallback Core',
-        text: `**Executed local fallback response for [${activeFocusedAgent.toUpperCase()}]:**\n\nDirective logged to \`board.db\` Kanban state machine. Task queued for background worker.`,
+        text: `**Request failed.** ${err?.message || 'The model could not be reached.'}\n\nNothing was executed, queued or written. Check the Runtime screen for provider state and retry.`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       };
 
@@ -351,8 +362,7 @@ Respond with high technical precision, structured markdown, and clear agent exec
           id: `init-${Date.now()}`,
           sender: 'assistant',
           agentRole: 'orchestrator',
-          modelUsed: 'Nous Hermes 3',
-          text: `Hermes Session initialized. Ready for swarm orchestration directives.`,
+          text: `Session created. No model has been contacted yet.`,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         }
       ]

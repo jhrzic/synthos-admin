@@ -159,6 +159,20 @@ export const TOOL_PACK_1: readonly ToolDefinition[] = Object.freeze([
     summary: 'Read one approved knowledge note. Confined to the SynthOS/ subtree and to the caller’s own workspace.',
   },
   {
+    capability: 'brain.read_source',
+    displayName: 'Brain — Read External Source',
+    category: 'brain',
+    effectClass: 'READ_ONLY',
+    brainWriteback: 'NONE',
+    riskTier: 'LOW',
+    workspaceScope: 'member',
+    approvalPolicy: 'NONE',
+    guardianEnforced: false,
+    runtime: 'obsidian-vault',
+    reference: 'lib/brain-sources.ts::readExternalSource',
+    summary: 'Read one note from the vault OUTSIDE the SynthOS/ subtree. Read-only source material, labelled EXTERNAL_SOURCE / UNADMITTED \u2014 never admitted knowledge.',
+  },
+  {
     capability: 'brain.write_session_note',
     displayName: 'Brain — Write Session Note',
     category: 'brain',
@@ -454,7 +468,8 @@ export function resolveToolReadiness(
   switch (capability) {
     // --- Brain: needs a reachable vault -----------------------------------
     case 'brain.search':
-    case 'brain.read': {
+    case 'brain.read':
+    case 'brain.read_source': {
       const status = getVaultStatus(env);
       const ok = !!status.root && status.mode !== 'UNAVAILABLE';
       return {

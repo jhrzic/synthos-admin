@@ -19,19 +19,26 @@ export const MessageBridgeView: React.FC<MessageBridgeViewProps> = ({
   onLogEvent,
 }) => {
   // Config State
+  // Nothing here is configured until someone configures it. This screen used
+  // to open with both channels enabled, a paired WhatsApp session
+  // (`whatsappQrCodeStatus: 'connected'`) and credential-shaped literals in
+  // every secret field — a bridge password, a webhook secret named
+  // `whsec_imsg_live_...`, a phone number id, a business account id and an
+  // API token. They were invented, but the screen offers a one-click copy of
+  // them as a .env block, so they read as this install's real configuration.
   const [config, setConfig] = useState<MessageBridgeConfig>({
-    imessageEnabled: true,
-    whatsappEnabled: true,
-    imessageBridgeUrl: 'https://mac-mini-bridge.loca.lt',
-    imessageBridgePassword: 'hermes_sec_auth_9948271',
-    imessageWebhookSecret: 'whsec_imsg_live_772183',
+    imessageEnabled: false,
+    whatsappEnabled: false,
+    imessageBridgeUrl: '',
+    imessageBridgePassword: '',
+    imessageWebhookSecret: '',
     whatsappMode: 'headless-baileys-qr',
-    whatsappPhoneNumberId: '109876543210987',
-    whatsappBusinessAccountId: '98765432109876',
-    whatsappApiToken: 'EAAxxxxxxxxxxxxxxxxxxxxx',
-    whatsappVerifyToken: 'hermes_wa_verify_2026',
-    whatsappPersonalNumber: '+1 646 941 9454',
-    whatsappQrCodeStatus: 'connected',
+    whatsappPhoneNumberId: '',
+    whatsappBusinessAccountId: '',
+    whatsappApiToken: '',
+    whatsappVerifyToken: '',
+    whatsappPersonalNumber: '',
+    whatsappQrCodeStatus: 'unpaired',
     botOptInRequired: true,
     rateLimitPerMinute: 20,
     cooldownSeconds: 3,
@@ -40,69 +47,19 @@ export const MessageBridgeView: React.FC<MessageBridgeViewProps> = ({
 
   const [activeSubTab, setActiveSubTab] = useState<'overview' | 'whatsapp' | 'imessage' | 'simulator' | 'router-rules'>('overview');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
-  const [qrScanning, setQrScanning] = useState(false);
+  const [pairNotice, setPairNotice] = useState<string | null>(null);
 
   // Live Messages Feed in Bridge
-  const [messages, setMessages] = useState<BridgeMessage[]>([
-    {
-      id: 'msg-wa-1',
-      channel: 'whatsapp',
-      senderId: '+1 646 941 9454',
-      senderName: 'Personal Device (646-941-9454)',
-      recipientId: 'Hermes Bot Mode',
-      direction: 'inbound',
-      messageText: 'Hey Hermes, summarize today\'s top 3 trending AI repos on GitHub.',
-      timestamp: '21:30:12',
-      status: 'replied',
-      assignedAgent: 'scout',
-      modelUsed: 'Nous Hermes 3',
-      tokensCount: 420,
-    },
-    {
-      id: 'msg-wa-2',
-      channel: 'whatsapp',
-      senderId: 'Hermes Bot Mode',
-      recipientId: '+1 646 941 9454',
-      direction: 'outbound',
-      messageText: '🤖 [Hermes Scout]: 1. NousResearch/Hermes-3 (+1.2k stars) 2. e2b-dev/fragments (Claude Artifacts) 3. WhiskeySockets/Baileys (Headless WA). Synchronized full analysis into Obsidian [[Repo-Intel-Today]].',
-      timestamp: '21:30:15',
-      status: 'delivered',
-      assignedAgent: 'scout',
-      modelUsed: 'Nous Hermes 3',
-      tokensCount: 840,
-    },
-    {
-      id: 'msg-imsg-1',
-      channel: 'imessage',
-      senderId: 'alex.founder@icloud.com',
-      senderName: 'Alex (Investor)',
-      recipientId: 'Hermes Bot Mode',
-      direction: 'inbound',
-      messageText: 'Can you send over the latest investment thesis on decentralized agent swarms?',
-      timestamp: '21:18:45',
-      status: 'replied',
-      assignedAgent: 'scribe',
-      modelUsed: 'Claude Code 3.7',
-      tokensCount: 512,
-    },
-    {
-      id: 'msg-imsg-2',
-      channel: 'imessage',
-      senderId: 'Hermes Bot Mode',
-      recipientId: 'alex.founder@icloud.com',
-      direction: 'outbound',
-      messageText: '📄 Dispatched: [[Startup-Theses/Decentralized-AgentOS.md]]. Includes TAM calculations ($4.2B), token unit economics ($0.0014/loop), and multi-agent DAG schemas.',
-      timestamp: '21:18:48',
-      status: 'delivered',
-      assignedAgent: 'scribe',
-      modelUsed: 'Claude Code 3.7',
-      tokensCount: 960,
-    },
-  ]);
+  // Four invented messages presenting a WhatsApp and an iMessage
+  // conversation as history: a real phone number, a named third party, token
+  // counts (420/840/512/960) and models ('Claude Code 3.7') that answered
+  // nothing, all marked `delivered`. No bridge is connected, so no message
+  // has ever passed through this screen.
+  const [messages, setMessages] = useState<BridgeMessage[]>([]);
 
   // Simulator Input State
   const [simChannel, setSimChannel] = useState<'whatsapp' | 'imessage'>('whatsapp');
-  const [simSender, setSimSender] = useState('+1 646 941 9454');
+  const [simSender, setSimSender] = useState('');
   const [simText, setSimText] = useState('Run TAM calculation on autonomous lead generation engines');
   const [isSimulating, setIsSimulating] = useState(false);
 
@@ -124,7 +81,7 @@ export const MessageBridgeView: React.FC<MessageBridgeViewProps> = ({
       id: inboundId,
       channel: simChannel,
       senderId: simSender,
-      senderName: simSender === '+1 646 941 9454' ? 'Personal WhatsApp (+1 646-941-9454)' : simSender,
+      senderName: simSender,
       recipientId: 'Hermes Bot Mode',
       direction: 'inbound',
       messageText: simText,
@@ -151,10 +108,15 @@ export const MessageBridgeView: React.FC<MessageBridgeViewProps> = ({
         direction: 'outbound',
         messageText: reply || `⚡ [Hermes ${config.autoRoutingAgentRole.toUpperCase()}]: Processed request for "${simText}". Synced state to board.db and Obsidian vault.`,
         timestamp: outTimeStr,
-        status: 'delivered',
+        // `simulated`, not `delivered` — this reply was produced in-process
+        // and never sent to WhatsApp or iMessage.
+        status: 'simulated',
         assignedAgent: config.autoRoutingAgentRole,
-        modelUsed: 'Nous Hermes 3',
-        tokensCount: Math.floor(Math.random() * 400 + 400),
+        // The model actually asked, not a fixed label. `tokensCount` is
+        // omitted: this screen is not given a usage figure, and it used to
+        // fill the gap with Math.random() * 400 + 400 and render the result
+        // as a token count.
+        modelUsed: models['hermes']?.name || 'hermes',
       };
 
       setMessages(prev => [
@@ -163,7 +125,11 @@ export const MessageBridgeView: React.FC<MessageBridgeViewProps> = ({
       ]);
 
       if (onLogEvent) {
-        onLogEvent('success', 'MessageBridge', `Dispatched ${simChannel} auto-reply to ${simSender}`);
+        onLogEvent(
+          'info',
+          'MessageBridge',
+          `Simulated ${simChannel} exchange locally — no bridge connected, nothing was sent to ${simSender || 'any recipient'}.`,
+        );
       }
     } catch (err) {
       console.error(err);
@@ -174,20 +140,22 @@ export const MessageBridgeView: React.FC<MessageBridgeViewProps> = ({
     }
   };
 
+  // This waited 1.8 seconds and then declared the account PAIRED: it set
+  // `whatsappQrCodeStatus: 'connected'`, wrote a hardcoded phone number into
+  // the config and logged "Paired successfully ... via Baileys WebSocket" to
+  // the real event log at level `success`. No WebSocket, no Baileys, no
+  // network call of any kind. A green CONNECTED badge on a channel that is
+  // not connected is the worst version of this bug: the whole point of the
+  // badge is to be trusted.
   const handlePairWhatsAppQR = () => {
-    setQrScanning(true);
-    setConfig(prev => ({ ...prev, whatsappQrCodeStatus: 'scanning' }));
-    setTimeout(() => {
-      setQrScanning(false);
-      setConfig(prev => ({ 
-        ...prev, 
-        whatsappQrCodeStatus: 'connected',
-        whatsappPersonalNumber: '+1 646 941 9454'
-      }));
-      if (onLogEvent) {
-        onLogEvent('success', 'WhatsApp-Baileys', 'Paired successfully with personal phone +1 (646) 941-9454 via Baileys WebSocket!');
-      }
-    }, 1800);
+    setPairNotice(
+      'NOT_CONFIGURED — no WhatsApp gateway is connected to this build. Pairing needs a Baileys or Meta '
+      + 'Cloud API backend, and neither is wired up, so no pairing session can be opened and no QR code '
+      + 'can be issued.',
+    );
+    if (onLogEvent) {
+      onLogEvent('warn', 'WhatsApp', 'Pairing requested — refused: no WhatsApp gateway configured.');
+    }
   };
 
   return (
@@ -493,11 +461,27 @@ WHATSAPP_VERIFY_TOKEN="${config.whatsappVerifyToken}"`}
           <div className="bg-[#090B18] border border-[#1A1D34] rounded-2xl p-6 space-y-4">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
-                <Radio className="w-4 h-4 text-[#00D26A] animate-pulse" />
-                Live Inbound / Outbound Message Stream
+                <Radio className={`w-4 h-4 ${messages.length > 0 ? 'text-[#00D26A]' : 'text-[#7E8BB5]'}`} />
+                Inbound / Outbound Message Stream
               </h2>
               <span className="text-[11px] text-[#6A7196] font-mono">{messages.length} messages logged</span>
             </div>
+
+            {messages.length === 0 && (
+              <div
+                data-testid="bridge-stream-empty-state"
+                className="rounded-xl border border-dashed border-[#1A1D34] bg-[#05060C] px-5 py-8 text-center"
+              >
+                <p className="text-xs font-bold uppercase tracking-wider text-[#7E8BB5]">
+                  No messages — UNKNOWN
+                </p>
+                <p className="mx-auto mt-2 max-w-md text-[11px] leading-relaxed text-[#6A7196]">
+                  No iMessage or WhatsApp bridge is connected, so nothing has passed through this screen.
+                  The simulator below composes a local exchange for testing; it is marked
+                  <strong className="text-[#C9CCE4]"> SIMULATED</strong> and sends nothing.
+                </p>
+              </div>
+            )}
 
             <div className="space-y-3">
               {messages.map((msg) => (
@@ -525,7 +509,11 @@ WHATSAPP_VERIFY_TOKEN="${config.whatsappVerifyToken}"`}
                     <div className="flex items-center gap-2 text-[10px] text-[#6A7196]">
                       <span>{msg.timestamp}</span>
                       <span className={`px-1.5 py-0.5 rounded ${
-                        msg.status === 'delivered' || msg.status === 'replied' ? 'text-[#00D26A] bg-[#00D26A]/10' : 'text-[#F59E0B] bg-[#F59E0B]/10'
+                        msg.status === 'simulated'
+                          ? 'text-[#7E8BB5] bg-[#7E8BB5]/10'
+                          : msg.status === 'delivered' || msg.status === 'replied'
+                            ? 'text-[#00D26A] bg-[#00D26A]/10'
+                            : 'text-[#F59E0B] bg-[#F59E0B]/10'
                       }`}>
                         {msg.status.toUpperCase()}
                       </span>
@@ -553,20 +541,30 @@ WHATSAPP_VERIFY_TOKEN="${config.whatsappVerifyToken}"`}
       {/* SECTION 2: WHATSAPP (PERSONAL NUMBER QR & META CLOUD API) */}
       {activeSubTab === 'whatsapp' && (
         <div className="space-y-6">
-          {/* Personal Number QR Pairing Highlight (Specifically for 646 941 9454) */}
+          {pairNotice && (
+            <div
+              data-testid="whatsapp-pair-notice"
+              className="flex items-start gap-3 rounded-2xl border border-[#7E8BB5]/25 bg-[#7E8BB5]/[0.06] px-4 py-3 text-[11px] leading-relaxed text-[#9C97B4]"
+            >
+              <Shield className="mt-0.5 h-4 w-4 shrink-0 text-[#7E8BB5]" />
+              <span>{pairNotice}</span>
+            </div>
+          )}
+          {/* Personal Number QR Pairing */}
           <div className="bg-[#090B18] border border-[#1A1D34] rounded-2xl p-6 space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
                 <div className="inline-flex items-center gap-2 mb-1">
-                  <span className="bg-[#00D26A]/20 text-[#00D26A] text-[10px] font-bold px-2.5 py-0.5 rounded-full border border-[#00D26A]/40">
-                    HEADLESS WEB GATEWAY · BAILEYS / EVOLUTION API
+                  <span className="bg-[#7E8BB5]/20 text-[#7E8BB5] text-[10px] font-bold px-2.5 py-0.5 rounded-full border border-[#7E8BB5]/40">
+                    HEADLESS WEB GATEWAY · NOT CONFIGURED
                   </span>
                 </div>
                 <h2 className="text-lg font-bold text-white">
                   Personal Number WhatsApp QR Pairing
                 </h2>
                 <p className="text-xs text-[#8E94B8]">
-                  Pair personal numbers (like <span className="text-[#00D26A] font-bold">+1 646 941 9454</span>) without requiring a Meta Business API account.
+                  Pair a personal number without requiring a Meta Business API account. No gateway is
+                  connected to this build, so pairing is unavailable.
                 </p>
               </div>
 
@@ -584,56 +582,25 @@ WHATSAPP_VERIFY_TOKEN="${config.whatsappVerifyToken}"`}
               {/* QR Code Canvas */}
               <div className="md:col-span-4 flex flex-col items-center justify-center p-6 bg-[#05060C] rounded-2xl border border-[#1A1D34] text-center space-y-4">
                 <div className="relative p-3 bg-white rounded-2xl shadow-xl">
-                  {/* Stylized QR Code SVG */}
-                  <svg className="w-44 h-44" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <rect width="100" height="100" fill="white" />
-                    {/* Corners */}
-                    <rect x="10" y="10" width="25" height="25" fill="#000000" />
-                    <rect x="15" y="15" width="15" height="15" fill="#FFFFFF" />
-                    <rect x="18" y="18" width="9" height="9" fill="#000000" />
-
-                    <rect x="65" y="10" width="25" height="25" fill="#000000" />
-                    <rect x="70" y="15" width="15" height="15" fill="#FFFFFF" />
-                    <rect x="73" y="18" width="9" height="9" fill="#000000" />
-
-                    <rect x="10" y="65" width="25" height="25" fill="#000000" />
-                    <rect x="15" y="70" width="15" height="15" fill="#FFFFFF" />
-                    <rect x="18" y="73" width="9" height="9" fill="#000000" />
-
-                    {/* Data Points */}
-                    <rect x="40" y="12" width="6" height="6" fill="#000000" />
-                    <rect x="50" y="15" width="6" height="6" fill="#000000" />
-                    <rect x="42" y="24" width="8" height="6" fill="#000000" />
-                    <rect x="54" y="28" width="6" height="6" fill="#000000" />
-
-                    <rect x="12" y="42" width="6" height="8" fill="#000000" />
-                    <rect x="22" y="48" width="8" height="6" fill="#000000" />
-                    <rect x="34" y="42" width="8" height="8" fill="#000000" />
-                    <rect x="46" y="46" width="12" height="6" fill="#000000" />
-                    <rect x="62" y="42" width="8" height="8" fill="#000000" />
-                    <rect x="74" y="46" width="14" height="6" fill="#000000" />
-
-                    <rect x="42" y="64" width="8" height="8" fill="#000000" />
-                    <rect x="54" y="68" width="8" height="8" fill="#000000" />
-                    <rect x="66" y="64" width="12" height="6" fill="#000000" />
-                    <rect x="80" y="72" width="8" height="12" fill="#000000" />
-                    <rect x="46" y="80" width="16" height="8" fill="#000000" />
-                    <rect x="68" y="82" width="8" height="8" fill="#000000" />
-
-                    {/* Center Brand Icon */}
-                    <circle cx="50" cy="50" r="8" fill="#00D26A" />
-                  </svg>
-
-                  {qrScanning && (
-                    <div className="absolute inset-0 bg-black/60 rounded-2xl flex flex-col items-center justify-center text-white text-xs font-bold gap-2 backdrop-blur-xs">
-                      <RefreshCw className="w-6 h-6 animate-spin text-[#00D26A]" />
-                      <span>Pairing Session...</span>
-                    </div>
-                  )}
+                  {/* There is no pairing session, so there is no QR code. This
+                      used to draw a hand-built SVG that looked exactly like a
+                      scannable WhatsApp pairing code and encoded nothing. */}
+                  <div
+                    data-testid="whatsapp-qr-unavailable"
+                    className="flex h-44 w-44 flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[#C9CCE4] bg-[#F4F4F8] px-4 text-center"
+                  >
+                    <QrCode className="h-8 w-8 text-[#7E8BB5]" />
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#5A6180]">
+                      No pairing code
+                    </span>
+                    <span className="text-[9px] leading-snug text-[#7E8BB5]">
+                      No WhatsApp gateway configured
+                    </span>
+                  </div>
                 </div>
 
                 <div className="space-y-1">
-                  <div className="text-xs font-bold text-white">Scan with WhatsApp</div>
+                  <div className="text-xs font-bold text-[#7E8BB5]">Scan with WhatsApp — unavailable</div>
                   <p className="text-[10px] text-[#6A7196]">
                     Settings &gt; Linked Devices &gt; Link a Device
                   </p>
@@ -641,11 +608,10 @@ WHATSAPP_VERIFY_TOKEN="${config.whatsappVerifyToken}"`}
 
                 <button
                   onClick={handlePairWhatsAppQR}
-                  disabled={qrScanning}
                   className="w-full py-2 bg-[#00D26A] hover:bg-[#00B85C] text-black font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 ${qrScanning ? 'animate-spin' : ''}`} />
-                  <span>{qrScanning ? 'Refreshing QR...' : 'Re-Generate Pairing QR'}</span>
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Re-Generate Pairing QR</span>
                 </button>
               </div>
 
@@ -660,11 +626,14 @@ WHATSAPP_VERIFY_TOKEN="${config.whatsappVerifyToken}"`}
                       type="text"
                       value={config.whatsappPersonalNumber}
                       onChange={(e) => setConfig(p => ({ ...p, whatsappPersonalNumber: e.target.value }))}
-                      placeholder="+1 646 941 9454"
+                      placeholder="No number configured"
                       className="flex-1 bg-[#090B18] border border-[#222744] text-white px-3 py-2 rounded-xl text-sm font-mono focus:outline-hidden focus:border-[#00D26A]"
                     />
                     <button
-                      onClick={() => alert(`Saved phone number ${config.whatsappPersonalNumber} for WhatsApp Baileys routing.`)}
+                      onClick={() => setPairNotice(
+                        'NOT_SAVED — this build has no WhatsApp gateway and no store for bridge settings, so '
+                        + 'the number is held in this page only and is lost on reload.',
+                      )}
                       className="px-4 py-2 bg-[#14172B] hover:bg-[#1E2240] text-white rounded-xl text-xs font-bold border border-[#2B3158] transition"
                     >
                       Save Number

@@ -10,7 +10,12 @@ import {
 interface GraphNode {
   id: string;
   name: string;
-  type: 'note' | 'model' | 'tag' | 'vault';
+  // 'source' is an EXTERNAL vault note: read-only material the operator wrote,
+  // outside the SynthOS/ subtree, and NOT admitted Brain knowledge. Kept as a
+  // distinct type rather than a flag on 'note' so that every place which
+  // switches on type has to decide what to do with it — a boolean would have
+  // been silently ignored by the draw code and rendered identical to knowledge.
+  type: 'note' | 'model' | 'tag' | 'vault' | 'source';
   color: string;
   radius: number;
   x: number;
@@ -36,10 +41,29 @@ interface Particle {
   color: string;
 }
 
+/** An external vault note, as /api/brain/sources projects it. */
+export interface ExternalSourceNodeInput {
+  vaultRelativePath: string;
+  title: string;
+  folder: string;
+  wikilinks: string[];
+}
+
+/** A source-authored [[wikilink]] edge. The only external relationship drawn. */
+export interface ExternalSourceEdgeInput {
+  source: string;
+  target: string;
+}
+
 interface ObsidianGraphMindProps {
   notes: ObsidianNote[];
   vaults: ObsidianVault[];
   models: Record<string, AIModelInfo>;
+  /** External source layer. Absent or empty renders exactly as before. */
+  externalSources?: ExternalSourceNodeInput[];
+  externalEdges?: ExternalSourceEdgeInput[];
+  /** Selecting an external source node. Separate from onSelectNote by design. */
+  onSelectSource?: (vaultRelativePath: string) => void;
   selectedNoteId?: string;
   onSelectNote?: (noteId: string) => void;
   onOpenNote?: (noteId: string) => void;
@@ -50,6 +74,9 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
   notes,
   vaults,
   models,
+  externalSources = [],
+  externalEdges = [],
+  onSelectSource,
   selectedNoteId,
   onSelectNote,
   onOpenNote,
@@ -220,6 +247,48 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
       }
     });
 
+    // 3b. EXTERNAL SOURCE NODES — visually distinct, never mixed with knowledge.
+    //
+    // Steel (#7E8BB5) and a smaller radius, deliberately: the palette already
+    // means "inert / unknown / no data" with that colour, which is the right
+    // register for material SynthOS has observed but not admitted. Canonical
+    // knowledge keeps its violet/accent treatment, so the two classes are
+    // distinguishable at a glance rather than by clicking each node.
+    //
+    // No relationship is invented here. Edges come only from externalEdges,
+    // which lib/brain-sources.ts builds from [[wikilinks]] the AUTHOR wrote.
+    externalSources.forEach((src, i) => {
+      const ring = 320 + (i % 3) * 46;
+      const angle = (i / Math.max(1, externalSources.length)) * Math.PI * 2;
+      nodeMap.set(`source-${src.vaultRelativePath}`, {
+        id: `source-${src.vaultRelativePath}`,
+        name: src.title,
+        type: 'source',
+        color: '#7E8BB5',
+        radius: 5 + Math.min(4, (src.wikilinks?.length || 0)),
+        x: Math.cos(angle) * ring,
+        y: Math.sin(angle) * ring,
+        vx: 0,
+        vy: 0,
+        degree: 0,
+        data: { ...src, classification: 'EXTERNAL_SOURCE', admission: 'UNADMITTED' },
+      });
+    });
+
+    // 3c. Source-authored wikilink edges between external notes.
+    externalEdges.forEach((e) => {
+      const a = `source-${e.source}`;
+      const b = `source-${e.target}`;
+      if (!nodeMap.has(a) || !nodeMap.has(b)) return;
+      linkList.push({
+        source: a,
+        target: b,
+        // Dimmer than knowledge edges: a real relationship between
+        // unadmitted material.
+        color: 'rgba(126, 139, 181, 0.28)',
+      });
+    });
+
     // 4. Wikilinks Connections between notes
     notes.forEach(sourceNote => {
       if (!sourceNote.wikilinks) return;
@@ -249,7 +318,7 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
     });
 
     return { initialNodes: nodes, initialLinks: linkList };
-  }, [notes, vaults, models]);
+  }, [notes, vaults, models, externalSources, externalEdges]);
 
   // Keep node mutable array across frames
   const nodesRef = useRef<GraphNode[]>([]);
@@ -701,6 +770,12 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
       draggedNodeRef.current = null;
 
       // If clicked without large drag, select note
+      if (node.type === 'source' && onSelectSource) {
+        // Routed separately so a source can never be handed to a knowledge
+        // detail view that would present it as admitted.
+        onSelectSource(String((node.data as { vaultRelativePath?: string })?.vaultRelativePath || ''));
+        return;
+      }
       if (node.type === 'note' && onSelectNote) {
         onSelectNote(node.id);
       }
@@ -1005,11 +1080,29 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
             <span className="text-white font-bold">MIND GRAPH ACTIVE</span>
           </div>
           <span>•</span>
+          {/* Counts derived from the graph that is actually on screen.
+              A hardcoded engine total used to sit here — a literal that
+              reported the same figure whatever the registry held, and which
+              after model nodes were restricted to real provenance would have
+              reported it while drawing none. A number presented as a count
+              has to be counted. */}
           <span>{notes.length} Notes</span>
           <span>•</span>
           <span>{vaults.length} Vaults</span>
+          {externalSources.length > 0 && (
+            <>
+              <span>•</span>
+              <span style={{ color: '#7E8BB5' }}>{externalSources.length} External Sources</span>
+            </>
+          )}
+          {externalEdges.length > 0 && (
+            <>
+              <span>•</span>
+              <span style={{ color: '#7E8BB5' }}>{externalEdges.length} Wikilink Edges</span>
+            </>
+          )}
           <span>•</span>
-          <span>7 AI Engines</span>
+          <span>{initialNodes.filter((n) => n.type === 'model').length} Model Nodes</span>
         </div>
 
         <div className="bg-[#0B0D18]/90 backdrop-blur-md border border-[#232742] px-3 py-1.5 rounded-xl flex items-center gap-2 text-[10px] font-mono text-[#7E85A8] pointer-events-auto">

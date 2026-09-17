@@ -12,7 +12,7 @@ interface RegistryItem {
   category: 'agent' | 'platform' | 'integrations';
   currentVersion: string;
   latestVersion: string;
-  status: 'UP_TO_DATE' | 'UPDATE_AVAILABLE' | 'WATCHING' | 'CRITICAL';
+  status: 'NOT_CONFIGURED' | 'UP_TO_DATE' | 'UPDATE_AVAILABLE' | 'WATCHING' | 'CRITICAL';
   icon: React.ElementType;
   color: string;
   lastChecked: string;
@@ -31,12 +31,12 @@ export const UpstreamCapabilityRegistry: React.FC<{
       id: 'hermes',
       name: 'Nous Hermes Runtime Adapter',
       category: 'agent',
-      currentVersion: 'NOT_AVAILABLE',
-      latestVersion: 'NOT_AVAILABLE',
-      status: 'WATCHING',
+      currentVersion: 'UNKNOWN',
+      latestVersion: 'UNKNOWN',
+      status: 'NOT_CONFIGURED',
       icon: Crown,
       color: '#EC4899',
-      lastChecked: 'Just now (15s poll)',
+      lastChecked: 'NEVER',
       description: 'ADR-001 Hermes adapter governance layer with strict health check protocol (GET /synthos/health) and capability discovery.',
       capabilities: [
         'Hermes Runtime Health Check Protocol (GET /synthos/health)',
@@ -52,12 +52,12 @@ export const UpstreamCapabilityRegistry: React.FC<{
       id: 'claudecode',
       name: 'Claude Code Terminal',
       category: 'agent',
-      currentVersion: 'v3.7.1-beta',
-      latestVersion: 'v3.7.1-beta',
-      status: 'UP_TO_DATE',
+      currentVersion: 'UNKNOWN',
+      latestVersion: 'UNKNOWN',
+      status: 'NOT_CONFIGURED',
       icon: Terminal,
       color: '#D97706',
-      lastChecked: '4 mins ago',
+      lastChecked: 'NEVER',
       description: 'Autonomous repository editing tool, AST-grounded search parsing, and isolated compile validation pipelines.',
       capabilities: [
         'Interactive repository navigation & multi-file refactoring',
@@ -71,12 +71,12 @@ export const UpstreamCapabilityRegistry: React.FC<{
       id: 'codex',
       name: 'Codex WASM Sandbox',
       category: 'agent',
-      currentVersion: 'v1.4.2',
-      latestVersion: 'v1.4.2',
-      status: 'UP_TO_DATE',
+      currentVersion: 'UNKNOWN',
+      latestVersion: 'UNKNOWN',
+      status: 'NOT_CONFIGURED',
       icon: Code2,
       color: '#00D26A',
-      lastChecked: '1 day ago',
+      lastChecked: 'NEVER',
       description: 'WASM-isolated and containerized sandbox harness for executing test-driven development scripts.',
       capabilities: [
         'WASM-based execution of TypeScript/Python snippets',
@@ -90,12 +90,12 @@ export const UpstreamCapabilityRegistry: React.FC<{
       id: 'cursor',
       name: 'Cursor IDE Agent',
       category: 'agent',
-      currentVersion: 'v0.45.8',
-      latestVersion: 'v0.46.2',
-      status: 'UPDATE_AVAILABLE',
+      currentVersion: 'UNKNOWN',
+      latestVersion: 'UNKNOWN',
+      status: 'NOT_CONFIGURED',
       icon: Sliders,
       color: '#A855F7',
-      lastChecked: '1 hour ago',
+      lastChecked: 'NEVER',
       description: 'Language Server Protocol (LSP) AST codebase semantic indexer and whole-project git diff auto-fix loops.',
       capabilities: [
         'Grounded multi-file semantic search using tree-sitter indices',
@@ -112,12 +112,12 @@ export const UpstreamCapabilityRegistry: React.FC<{
       id: 'antigravity',
       name: 'Antigravity Kernel Node',
       category: 'agent',
-      currentVersion: 'v0.8.2',
-      latestVersion: 'v0.8.2',
-      status: 'UP_TO_DATE',
+      currentVersion: 'UNKNOWN',
+      latestVersion: 'UNKNOWN',
+      status: 'NOT_CONFIGURED',
       icon: Compass,
       color: '#8A5CF5',
-      lastChecked: 'Just now',
+      lastChecked: 'NEVER',
       description: 'Google DeepMind Autonomous meta-agent and self-healing workspace watchdog kernel.',
       capabilities: [
         'Continuous container health monitoring & watchdog state triggers',
@@ -131,12 +131,12 @@ export const UpstreamCapabilityRegistry: React.FC<{
       id: 'openclaw',
       name: 'OpenClaw Browser Agent',
       category: 'agent',
-      currentVersion: 'v1.1.0',
-      latestVersion: 'v1.2.5',
-      status: 'UPDATE_AVAILABLE',
+      currentVersion: 'UNKNOWN',
+      latestVersion: 'UNKNOWN',
+      status: 'NOT_CONFIGURED',
       icon: Globe,
       color: '#10B981',
-      lastChecked: '3 hours ago',
+      lastChecked: 'NEVER',
       description: 'Autonomous headless browser crawling, selector mapping, DOM node extraction, and anti-bot rate-limit bypassing.',
       capabilities: [
         'Headless chromium crawl with AST extraction loops',
@@ -152,12 +152,12 @@ export const UpstreamCapabilityRegistry: React.FC<{
       id: 'gemini',
       name: 'Google Gemini SDK Platform',
       category: 'platform',
-      currentVersion: 'v0.1.2 (@google/genai)',
-      latestVersion: 'v0.1.2 (@google/genai)',
-      status: 'UP_TO_DATE',
+      currentVersion: 'UNKNOWN',
+      latestVersion: 'UNKNOWN',
+      status: 'NOT_CONFIGURED',
       icon: Sparkles,
       color: '#615EFF',
-      lastChecked: '1 hour ago',
+      lastChecked: 'NEVER',
       description: 'Official unified @google/genai SDK wrapper for Gemini models, supporting audio, video, tool calls, and grounding.',
       capabilities: [
         'High-speed JSON Schema structured output constraint configurations',
@@ -171,12 +171,12 @@ export const UpstreamCapabilityRegistry: React.FC<{
       id: 'youtube-audit',
       name: 'Julian Goldie YouTube Audit',
       category: 'integrations',
-      currentVersion: 'v1.0.0',
-      latestVersion: 'v1.0.0',
-      status: 'UP_TO_DATE',
+      currentVersion: 'UNKNOWN',
+      latestVersion: 'UNKNOWN',
+      status: 'NOT_CONFIGURED',
       icon: Play,
       color: '#FF0000',
-      lastChecked: 'Just now',
+      lastChecked: 'NEVER',
       description: 'YouTube Channel video harvesting, transcription curation, and DeepSeek R1 SEO keyword analysis.',
       capabilities: [
         'RSS video discovery & automated transcription ingest pipelines',
@@ -191,6 +191,7 @@ export const UpstreamCapabilityRegistry: React.FC<{
   const [isScanning, setIsScanning] = useState(false);
   const [scanResult, setScanResult] = useState<string | null>(null);
   const [selectedItem, setSelectedItem] = useState<RegistryItem | null>(null);
+  const [lastScanAt, setLastScanAt] = useState<string | null>(null);
 
   // Trigger Gemini-grounded Search to scan ProductHunt/GitHub for real updates
   const handleTriggerUpstreamScan = async () => {
@@ -210,22 +211,18 @@ export const UpstreamCapabilityRegistry: React.FC<{
       
       setScanResult(reply);
       
-      // Pass X / Workstream F — a scan reply is free-text, not a structured
-      // per-item verdict, so it cannot honestly set any single item's
-      // status. Only `lastChecked` (a real fact: a scan genuinely just ran)
-      // updates here; a status change requires the user to actually read
-      // scanResult below, or would need a real per-item parse, not a coin
-      // flip (this used to randomly mark ~40% of items "UP_TO_DATE" with no
-      // connection to the scan's actual content).
-      setRegistryItems(prev => prev.map(item => ({
-        ...item,
-        lastChecked: 'Just now',
-      })));
+      // A scan reply is free-text from a model, not a structured per-item
+      // verdict — so it cannot set any item's status, AND it cannot set
+      // `lastChecked` either. `lastChecked` means "this registry polled
+      // upstream for a version"; nothing here does that. Stamping it after a
+      // model chat reported a version check that never happened. The advisory
+      // is shown as itself, in `scanResult` below, and attributed to a model.
+      setLastScanAt(new Date().toISOString());
 
       // Save a note of this capability audit to the vault
       onAddNoteToVault(
         `Upstream-Capability-Audit-${new Date().toISOString().slice(0, 10)}`,
-        `# Upstream Capability & API Change Audit\n\nGenerated on: ${new Date().toUTCString()}\n\n## Scanning Intelligence Feed:\n\n${reply}\n\n## Status Summary\n\nAll model configurations checked against OpenRouter APIs. Ready.`,
+        `# Upstream Capability & API Change Audit\n\nGenerated on: ${new Date().toUTCString()}\n\n## Model advisory (unverified)\n\n${reply}\n\n## Provenance\n\nSource: free-text advisory from model \`gemini-2.5-flash\`, unverified.\nThis build performs no upstream version check, so no per-item version or update status is asserted.`,
         ['audit', 'capability', 'upstream'],
         'System-Audits'
       );
@@ -250,7 +247,8 @@ export const UpstreamCapabilityRegistry: React.FC<{
             Upstream Agent Capability Registry
           </h1>
           <p className="text-xs text-[#7A82A6]">
-            Active compliance tracking of installed versus live upstream releases, ast changes, and breaking APIs.
+            Watch list of upstream projects this build depends on, with their documented capabilities and
+            breaking changes.
           </p>
         </div>
 
@@ -264,8 +262,36 @@ export const UpstreamCapabilityRegistry: React.FC<{
           }`}
         >
           <RefreshCw className={`w-4 h-4 ${isScanning ? 'animate-spin' : ''}`} />
-          {isScanning ? 'SCANNING UPSTREAM FEEDS...' : 'CHECK FOR LIVE UPSTREAM UPDATES'}
+          {isScanning ? 'REQUESTING MODEL ADVISORY...' : 'REQUEST MODEL ADVISORY'}
         </button>
+      </div>
+
+      {/* No upstream version source exists in this build. Saying so is the
+          difference between a registry that is honest about its gap and one
+          that reported eight projects "up to date" on no evidence. */}
+      <div
+        data-testid="upstream-version-source-notice"
+        className="flex items-start gap-3 rounded-xl border border-[#7E8BB5]/25 bg-[#7E8BB5]/[0.06] px-4 py-3"
+      >
+        <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#7E8BB5]" />
+        <div className="space-y-1 text-[11px] leading-relaxed text-[#9C97B4]">
+          <p className="font-bold uppercase tracking-wider text-[#7E8BB5]">
+            No upstream version source configured
+          </p>
+          <p>
+            This build queries no package index, GitHub release feed or upstream API, so installed and
+            latest versions read <strong className="text-[#C9CCE4]">UNKNOWN</strong> and every item is
+            <strong className="text-[#C9CCE4]"> NOT CONFIGURED</strong>. The capability and breaking-change
+            notes below are author-written documentation, not measurements.
+          </p>
+          <p>
+            Requesting a model advisory asks a language model what it knows about these projects. The reply
+            is unverified free text and updates no item&apos;s version or status.
+            {lastScanAt
+              ? ` Last advisory requested ${new Date(lastScanAt).toLocaleString()}.`
+              : ' No advisory requested this session.'}
+          </p>
+        </div>
       </div>
 
       {/* Main Grid */}
@@ -316,16 +342,26 @@ export const UpstreamCapabilityRegistry: React.FC<{
                       </p>
 
                       <div className="flex items-center gap-4 text-[10px] text-[#555C7F] font-mono pt-1">
-                        <span>Installed: <strong className="text-white">{item.currentVersion}</strong></span>
-                        <span>Latest: <strong className="text-white">{item.latestVersion}</strong></span>
-                        <span>Sync: <strong>{item.lastChecked}</strong></span>
+                        <span>Installed: <strong className="text-[#7E8BB5]">{item.currentVersion}</strong></span>
+                        <span>Latest upstream: <strong className="text-[#7E8BB5]">{item.latestVersion}</strong></span>
+                        <span>Version checked: <strong className="text-[#7E8BB5]">{item.lastChecked}</strong></span>
                       </div>
                     </div>
                   </div>
 
                   {/* Status Badges */}
                   <div className="flex items-center gap-2 self-end md:self-auto shrink-0">
-                    {item.status === 'UP_TO_DATE' ? (
+                    {item.status === 'NOT_CONFIGURED' ? (
+                      <span className="text-[10px] font-bold text-[#7E8BB5] bg-[#7E8BB5]/10 border border-[#7E8BB5]/30 px-2 py-0.5 rounded flex items-center gap-1">
+                        <Info className="w-3 h-3" />
+                        NOT CONFIGURED
+                      </span>
+                    ) : item.status === 'WATCHING' ? (
+                      <span className="text-[10px] font-bold text-[#7E8BB5] bg-[#7E8BB5]/10 border border-[#7E8BB5]/30 px-2 py-0.5 rounded flex items-center gap-1">
+                        <Compass className="w-3 h-3" />
+                        WATCHING
+                      </span>
+                    ) : item.status === 'UP_TO_DATE' ? (
                       <span className="text-[10px] font-bold text-[#00D26A] bg-[#00D26A]/10 border border-[#00D26A]/30 px-2 py-0.5 rounded flex items-center gap-1">
                         <CheckCircle2 className="w-3 h-3" />
                         UP TO DATE

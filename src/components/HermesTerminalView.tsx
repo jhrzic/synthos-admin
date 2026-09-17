@@ -50,14 +50,19 @@ export const HermesTerminalView: React.FC<HermesTerminalViewProps> = ({
   const [sessions, setSessions] = useState<TerminalSessionInfo[]>([
     {
       id: 'default',
-      name: 'Fleet Master Shell',
-      cwd: '/workspace',
-      history: ['node -v', 'pwd', 'ls -la'],
+      name: 'Local shell',
+      // `cwd` starts empty so the real working directory reported by
+      // /api/terminal/status is what gets displayed. It was '/workspace' — a
+      // path that does not exist on this machine — and because the session
+      // value takes precedence over the backend's, the header showed
+      // '/workspace' even when the backend had reported the true directory.
+      cwd: '',
+      // A command history of ['node -v', 'pwd', 'ls -la'] that nobody ran.
+      // Pressing Up recalled commands from a session that never happened.
+      history: [],
       lastActive: new Date().toISOString(),
-      env: {
-        HERMES_AGENT_ID: 'orchestrator',
-        BOARD_DB_PATH: '~/.hermes/state.db'
-      }
+      // Invented environment for the shell. Real env comes from the backend.
+      env: {}
     }
   ]);
   const [activeSessionId, setActiveSessionId] = useState('default');
@@ -145,7 +150,7 @@ export const HermesTerminalView: React.FC<HermesTerminalViewProps> = ({
     setHistoryIndex(null);
 
     const execId = `exec-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-    const currentCwd = activeSession?.cwd || backendMeta.cwd || '/workspace';
+    const currentCwd = activeSession?.cwd || backendMeta.cwd || '';
 
     // Optimistic queued record
     const newRecord: TerminalExecutionRecord = {
@@ -312,8 +317,8 @@ export const HermesTerminalView: React.FC<HermesTerminalViewProps> = ({
     const newSession: TerminalSessionInfo = {
       id: newId,
       name: `Session ${sessions.length + 1}`,
-      cwd: backendMeta.cwd || '/workspace',
-      history: ['pwd'],
+      cwd: backendMeta.cwd || '',
+      history: [],
       lastActive: new Date().toISOString(),
       env: {
         HERMES_AGENT_ID: 'dev',
@@ -487,7 +492,7 @@ ${record.stderr || '(no stderr output)'}
           <Folder className="w-3.5 h-3.5 text-[#38BDF8]" />
           <span className="text-gray-500">CWD:</span>
           <span className="text-white font-semibold bg-[#121528] px-2 py-0.5 rounded border border-[#1E2242]">
-            {activeSession?.cwd || backendMeta.cwd || '/workspace'}
+            {backendMeta.cwd || activeSession?.cwd || 'UNKNOWN'}
           </span>
           <button
             onClick={() => handleExecuteCommand('cd ~')}

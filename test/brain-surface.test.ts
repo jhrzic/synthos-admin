@@ -189,7 +189,34 @@ describe('the Admin surface renders the real vault, not fixtures', () => {
 
   it('the knowledge mesh is fed real vault notes', () => {
     expect(view).toContain('/api/knowledge/mesh');
-    expect(view).toMatch(/<ObsidianGraphMind[\s\S]{0,200}notes=\{brainNotes\}/);
+    // `brainNotes` is still the ONLY source of knowledge nodes. The expression
+    // gained a source-filter guard when the Brain/External boundary landed —
+    // `sourceFilter === 'EXTERNAL' ? [] : brainNotes` — so the match allows an
+    // expression around it while still requiring that brainNotes is what
+    // feeds the graph. Widened deliberately rather than deleted: the property
+    // this guard protects (real vault data, never the fixture prop) is
+    // unchanged and is re-asserted in the next test.
+    expect(view).toMatch(/<ObsidianGraphMind[\s\S]{0,260}notes=\{[^}]*brainNotes[^}]*\}/);
+  });
+
+  it('external sources reach the graph as their OWN layer, never as knowledge', () => {
+    // The boundary, asserted at the call site: external material is passed in
+    // a separate prop, so it cannot arrive inside `notes` and be drawn as
+    // admitted knowledge.
+    expect(view).toMatch(/externalSources=\{/);
+    expect(view).toMatch(/externalEdges=\{/);
+    // And it is fetched from the boundary route, not from the knowledge mesh.
+    expect(view).toContain('/api/brain/sources');
+    // Selecting a source is routed separately from selecting a note.
+    expect(view).toMatch(/onSelectSource=\{/);
+  });
+
+  it('the source filter offers Brain / External / All and defaults to Brain', () => {
+    // Defaulting to BRAIN means the Brain screen keeps showing only what
+    // SynthOS actually knows until the operator asks to see source material.
+    expect(view).toMatch(/useState<'BRAIN' \| 'EXTERNAL' \| 'ALL'>\('BRAIN'\)/);
+    expect(view).toContain('EXTERNAL SOURCES');
+    expect(view).toContain('external vault content → observed source → reviewed/admitted → Brain knowledge');
   });
 
   it('the graph is NOT fed the session-local fixture prop', () => {

@@ -3,7 +3,7 @@ import { SystemAuditCheck } from '../types';
 import { 
   Shield, CheckCircle2, AlertTriangle, XCircle, RefreshCw, 
   Activity, Zap, Server, Terminal, Radio, Eye, Check,
-  Cpu, Lock, Database, Search
+  Cpu, Lock, Database, Search, HelpCircle
 } from 'lucide-react';
 
 interface SystemAuditViewProps {
@@ -46,6 +46,16 @@ export const SystemAuditView: React.FC<SystemAuditViewProps> = ({
     return selectedCategory === 'all' || c.category === selectedCategory;
   });
 
+  // A check that has not run is not a passing check, and it is not a failing
+  // one either. The pass rate is computed over MEASURED checks only, and
+  // reads UNKNOWN when nothing has been measured.
+  const unknownCount = auditChecks.filter(c => c.status === 'unknown').length;
+  const passedCount = auditChecks.filter(c => c.status === 'passed').length;
+  const failedCount = auditChecks.filter(c => c.status === 'failed').length;
+  const warningCount = auditChecks.filter(c => c.status === 'warning').length;
+  const measuredCount = passedCount + failedCount + warningCount;
+  const latencySamples = auditChecks.filter(c => c.status !== 'unknown' && c.latencyMs > 0).map(c => c.latencyMs);
+
   const getStatusIcon = (status: SystemAuditCheck['status']) => {
     switch (status) {
       case 'passed':
@@ -54,8 +64,12 @@ export const SystemAuditView: React.FC<SystemAuditViewProps> = ({
         return <AlertTriangle className="w-4 h-4 text-[#EAB308]" />;
       case 'failed':
         return <XCircle className="w-4 h-4 text-[#FF5E8E]" />;
-      default:
+      case 'testing':
         return <RefreshCw className="w-4 h-4 text-[#615EFF] animate-spin" />;
+      default:
+        // `unknown` — recedes, never glows, and never spins as though a
+        // check were in flight.
+        return <HelpCircle className="w-4 h-4 text-[#7E8BB5]" />;
     }
   };
 
@@ -70,12 +84,21 @@ export const SystemAuditView: React.FC<SystemAuditViewProps> = ({
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-xl font-bold text-white tracking-tight">System Audit & Diagnostics</h1>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#00D26A]/15 text-[#00D26A] border border-[#00D26A]/30">
-                100% PASS RATE
+              <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
+                measuredCount === 0
+                  ? 'bg-[#7E8BB5]/15 text-[#7E8BB5] border-[#7E8BB5]/30'
+                  : failedCount > 0
+                    ? 'bg-[#FF5E8E]/15 text-[#FF5E8E] border-[#FF5E8E]/30'
+                    : 'bg-[#00D26A]/15 text-[#00D26A] border-[#00D26A]/30'
+              }`}>
+                {measuredCount === 0
+                  ? 'NOT MEASURED'
+                  : `${Math.round((passedCount / measuredCount) * 100)}% PASS RATE`}
               </span>
             </div>
             <p className="text-xs text-[#9AA2C6] mt-0.5">
-              Live telemetry, control validation, audio jitter buffer checks, and API pipeline health.
+              Subsystem health checks. No diagnostic runner is implemented in this build, so checks read
+              UNKNOWN until something real measures them.
             </p>
           </div>
         </div>
@@ -97,27 +120,51 @@ export const SystemAuditView: React.FC<SystemAuditViewProps> = ({
         </div>
       )}
 
-      {/* KPI Stats */}
+      {/* KPI Stats — every figure counted from `auditChecks`. These were four
+          literal text nodes: "100%", "6 of 6 checks passing", "46.5 ms",
+          "Sub-100ms SLA target met", "78 ms", "0 Defect" and "All buttons
+          verified live". None was derived, so the pass rate read 100% no
+          matter what the checks below said. */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <div className="bg-[#0D0E1A] border border-[#1E2238] p-4 rounded-xl">
           <div className="text-[11px] font-mono text-[#8E94B8] uppercase">Audit Pass Rate</div>
-          <div className="text-2xl font-bold text-[#00D26A] mt-1">100%</div>
-          <div className="text-[10px] text-[#8E94B8] mt-1">6 of 6 checks passing</div>
+          <div className={`text-2xl font-bold mt-1 ${measuredCount === 0 ? 'text-[#7E8BB5]' : 'text-[#00D26A]'}`}>
+            {measuredCount === 0 ? 'UNKNOWN' : `${Math.round((passedCount / measuredCount) * 100)}%`}
+          </div>
+          <div className="text-[10px] text-[#8E94B8] mt-1">
+            {measuredCount === 0
+              ? `0 of ${auditChecks.length} checks measured`
+              : `${passedCount} of ${measuredCount} measured checks passing`}
+          </div>
         </div>
         <div className="bg-[#0D0E1A] border border-[#1E2238] p-4 rounded-xl">
-          <div className="text-[11px] font-mono text-[#8E94B8] uppercase">Avg API Latency</div>
-          <div className="text-2xl font-bold text-[#38BDF8] mt-1">46.5 ms</div>
-          <div className="text-[10px] text-[#38BDF8] mt-1">Sub-100ms SLA target met</div>
+          <div className="text-[11px] font-mono text-[#8E94B8] uppercase">Avg Measured Latency</div>
+          <div className={`text-2xl font-bold mt-1 ${latencySamples.length === 0 ? 'text-[#7E8BB5]' : 'text-[#38BDF8]'}`}>
+            {latencySamples.length === 0
+              ? 'UNKNOWN'
+              : `${(latencySamples.reduce((a, b) => a + b, 0) / latencySamples.length).toFixed(1)} ms`}
+          </div>
+          <div className="text-[10px] text-[#8E94B8] mt-1">
+            {latencySamples.length === 0 ? 'No latency measured' : `${latencySamples.length} sample(s)`}
+          </div>
         </div>
         <div className="bg-[#0D0E1A] border border-[#1E2238] p-4 rounded-xl">
-          <div className="text-[11px] font-mono text-[#8E94B8] uppercase">Voice TTFA (Fish Audio)</div>
-          <div className="text-2xl font-bold text-[#EC4899] mt-1">78 ms</div>
-          <div className="text-[10px] text-[#EC4899] mt-1">Dual playback fallback ready</div>
+          <div className="text-[11px] font-mono text-[#8E94B8] uppercase">Checks Not Run</div>
+          <div className={`text-2xl font-bold mt-1 ${unknownCount > 0 ? 'text-[#7E8BB5]' : 'text-[#00D26A]'}`}>
+            {unknownCount}
+          </div>
+          <div className="text-[10px] text-[#8E94B8] mt-1">
+            {unknownCount === auditChecks.length ? 'No diagnostic runner implemented' : 'Awaiting a real check'}
+          </div>
         </div>
         <div className="bg-[#0D0E1A] border border-[#1E2238] p-4 rounded-xl">
-          <div className="text-[11px] font-mono text-[#8E94B8] uppercase">Control Integrity</div>
-          <div className="text-2xl font-bold text-[#A5A2FF] mt-1">0 Defect</div>
-          <div className="text-[10px] text-[#A5A2FF] mt-1">All buttons verified live</div>
+          <div className="text-[11px] font-mono text-[#8E94B8] uppercase">Failing</div>
+          <div className={`text-2xl font-bold mt-1 ${failedCount > 0 ? 'text-[#FF5E8E]' : 'text-[#7E8BB5]'}`}>
+            {measuredCount === 0 ? 'UNKNOWN' : failedCount}
+          </div>
+          <div className="text-[10px] text-[#8E94B8] mt-1">
+            {measuredCount === 0 ? 'Nothing measured' : `${warningCount} warning(s)`}
+          </div>
         </div>
       </div>
 
@@ -157,8 +204,10 @@ export const SystemAuditView: React.FC<SystemAuditViewProps> = ({
                       {getStatusIcon(check.status)}
                       <span className="text-xs font-bold text-white">{check.component}</span>
                     </div>
-                    <span className="text-[10px] font-mono text-[#00D26A] bg-[#00D26A]/10 px-2 py-0.5 rounded">
-                      {check.latencyMs} ms
+                    <span className={`text-[10px] font-mono px-2 py-0.5 rounded ${
+                      check.latencyMs > 0 ? 'text-[#00D26A] bg-[#00D26A]/10' : 'text-[#7E8BB5] bg-[#7E8BB5]/10'
+                    }`}>
+                      {check.latencyMs > 0 ? `${check.latencyMs} ms` : 'UNKNOWN'}
                     </span>
                   </div>
 
@@ -205,7 +254,9 @@ export const SystemAuditView: React.FC<SystemAuditViewProps> = ({
               <div className="grid grid-cols-2 gap-3 text-xs">
                 <div className="bg-[#121424] p-3 rounded-xl border border-[#1E2238]">
                   <div className="text-[10px] font-mono text-[#5F6589]">RESPONSE LATENCY</div>
-                  <div className="text-base font-bold text-white font-mono mt-0.5">{activeCheck.latencyMs} ms</div>
+                  <div className={`text-base font-bold font-mono mt-0.5 ${activeCheck.latencyMs > 0 ? 'text-white' : 'text-[#7E8BB5]'}`}>
+                    {activeCheck.latencyMs > 0 ? `${activeCheck.latencyMs} ms` : 'UNKNOWN'}
+                  </div>
                 </div>
                 <div className="bg-[#121424] p-3 rounded-xl border border-[#1E2238]">
                   <div className="text-[10px] font-mono text-[#5F6589]">SYSTEM HEALTH CATEGORY</div>

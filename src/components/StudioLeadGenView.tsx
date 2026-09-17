@@ -37,49 +37,22 @@ export const StudioLeadGenView: React.FC<StudioLeadGenViewProps> = ({
   onSendQuery,
   onSelectTab,
 }) => {
-  const [leads, setLeads] = useState<LeadTarget[]>([
-    {
-      id: 'lead-1',
-      companyName: 'Nexus Cloud Infrastructure',
-      industry: 'Enterprise DevOps & Kubernetes',
-      estimatedBudget: '$45,000 / mo',
-      leadScore: 94,
-      contactName: 'Sarah Jenkins',
-      role: 'VP of Engineering',
-      painPoint: 'LLM token inference waste and lack of persistent vector state sync across distributed engineer teams.',
-      status: 'Qualified'
-    },
-    {
-      id: 'lead-2',
-      companyName: 'AeroSynth BioAI Labs',
-      industry: 'Biotech & Genomics Research',
-      estimatedBudget: '$80,000 / project',
-      leadScore: 89,
-      contactName: 'Dr. Michael Chang',
-      role: 'Head of AI Research',
-      painPoint: 'Requires multi-agent arXiv preprint synthesis with strict citation validation and Obsidian knowledge graph export.',
-      status: 'Proposal Ready'
-    },
-    {
-      id: 'lead-3',
-      companyName: 'HyperScale Fintech',
-      industry: 'Algorithmic Trading & Settlement',
-      estimatedBudget: '$60,000 / mo',
-      leadScore: 92,
-      contactName: 'David Vance',
-      role: 'Chief Technology Officer',
-      painPoint: 'Needs sub-50ms deterministic model routing with Airbyte CDC and self-healing sandboxed test harnesses.',
-      status: 'Qualified'
-    }
-  ]);
+  // Three invented companies with invented contact people, budgets
+  // ($45,000/mo, $80,000/project, $60,000/mo), lead scores (94/89/92) and
+  // pipeline statuses, presented as a qualified enterprise pipeline. No lead
+  // source, CRM or scoring model feeds this screen. An empty pipeline is the
+  // true state, and the surface below now reads UNKNOWN rather than summing
+  // fabricated budgets into a headline figure.
+  const [leads, setLeads] = useState<LeadTarget[]>([]);
 
-  const [selectedLead, setSelectedLead] = useState<LeadTarget>(leads[0]);
+  const [selectedLead, setSelectedLead] = useState<LeadTarget | null>(null);
   const [proposalDraft, setProposalDraft] = useState<string>('');
   const [outreachSequence, setOutreachSequence] = useState<string>('');
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   const handleGenerateProposal = async () => {
+    if (!selectedLead) return;
     setIsGenerating(true);
     setNotice(`Reach and Orchestrator are formulating tailored proposal for ${selectedLead.companyName}...`);
     try {
@@ -98,6 +71,7 @@ export const StudioLeadGenView: React.FC<StudioLeadGenViewProps> = ({
   };
 
   const handlePushToKanban = () => {
+    if (!selectedLead) return;
     onAddTaskToKanban({
       title: `Client Deliverable: ${selectedLead.companyName} (${selectedLead.estimatedBudget})`,
       description: `Execute enterprise studio onboarding for ${selectedLead.contactName}. Scope: ${selectedLead.painPoint}`,
@@ -108,7 +82,7 @@ export const StudioLeadGenView: React.FC<StudioLeadGenViewProps> = ({
       tags: ['Client', 'Studio', 'LeadGen', selectedLead.industry.split(' ')[0]],
       obsidianWikilinks: [`[[Clients/${selectedLead.companyName.replace(/\s+/g, '-')}]]`],
       subtasks: [
-        { id: 'sub-1', title: 'Schedule Technical Architecture Review', completed: true },
+        { id: 'sub-1', title: 'Schedule Technical Architecture Review', completed: false },
         { id: 'sub-2', title: 'Deploy Sandbox Container in Dev Workspace', completed: false },
         { id: 'sub-3', title: 'Connect Obsidian Vault CDC Connector', completed: false }
       ]
@@ -118,7 +92,7 @@ export const StudioLeadGenView: React.FC<StudioLeadGenViewProps> = ({
   };
 
   const handleSaveToObsidian = () => {
-    if (!proposalDraft) return;
+    if (!proposalDraft || !selectedLead) return;
     const title = `Proposal-${selectedLead.companyName.replace(/\s+/g, '-')}`;
     onAddNoteToVault(title, proposalDraft, ['proposal', 'client', 'leadgen'], 'Client-Proposals');
     setNotice(`Saved proposal to Obsidian Vault /Client-Proposals!`);
@@ -134,16 +108,19 @@ export const StudioLeadGenView: React.FC<StudioLeadGenViewProps> = ({
             <span className="airbyte-badge">
               HERMES STUDIO & ENTERPRISE LEAD GEN
             </span>
-            <span className="text-xs font-mono text-[#00D26A] flex items-center gap-1">
+            <span className="text-xs font-mono text-[#7E8BB5] flex items-center gap-1">
               <Target className="w-3 h-3" />
-              PIPELINE VALUE: $185,000 / MO
+              {leads.length === 0
+                ? 'PIPELINE VALUE: UNKNOWN — NO LEAD SOURCE'
+                : `PIPELINE: ${leads.length} TARGET${leads.length === 1 ? '' : 'S'}`}
             </span>
           </div>
           <h1 className="text-2xl sm:text-4xl font-extrabold text-white tracking-tight font-['Space_Grotesk']">
             Studio Client & Lead Gen Engine
           </h1>
           <p className="text-xs sm:text-sm text-[#8E94B8] mt-1">
-            Automated enterprise lead qualification, bespoke SOW proposal generation, multi-stage cold outreach, and Kanban pipeline synchronization.
+            Lead qualification, SOW proposal drafting and Kanban pipeline sync. No lead source or scoring
+            model is connected to this build yet, so the pipeline starts empty.
           </p>
         </div>
 
@@ -174,12 +151,26 @@ export const StudioLeadGenView: React.FC<StudioLeadGenViewProps> = ({
               <Building2 className="w-4 h-4 text-[#615EFF]" />
               Enterprise Pipeline ({leads.length} Targets)
             </h2>
-            <span className="text-[10px] font-mono text-[#00D26A]">REACH AGENT ACTIVE</span>
+            <span className="text-[10px] font-mono text-[#7E8BB5]">NO LEAD SOURCE CONNECTED</span>
           </div>
 
           <div className="space-y-3 max-h-[640px] overflow-y-auto pr-1">
+            {leads.length === 0 && (
+              <div
+                data-testid="studio-pipeline-empty-state"
+                className="rounded-xl border border-dashed border-[#181B2E] bg-[#0B0D1B] px-4 py-8 text-center"
+              >
+                <p className="text-[11px] font-mono font-bold uppercase tracking-wider text-[#7E8BB5]">
+                  No lead targets — UNKNOWN
+                </p>
+                <p className="mx-auto mt-2 max-w-sm text-[11px] leading-relaxed text-[#6A7196]">
+                  No CRM, lead source or scoring model is connected, so this build holds no qualified
+                  targets. Budgets and lead scores stay unknown until one is.
+                </p>
+              </div>
+            )}
             {leads.map((lead) => {
-              const isSelected = lead.id === selectedLead.id;
+              const isSelected = lead.id === selectedLead?.id;
               return (
                 <div
                   key={lead.id}
@@ -226,14 +217,18 @@ export const StudioLeadGenView: React.FC<StudioLeadGenViewProps> = ({
                   Bespoke Studio Proposal & Scope Builder
                 </h3>
                 <p className="text-xs text-[#8E94B8] mt-0.5">
-                  Client: <strong className="text-white">{selectedLead.companyName}</strong> ({selectedLead.estimatedBudget})
+                  {selectedLead ? (
+                    <>Client: <strong className="text-white">{selectedLead.companyName}</strong> ({selectedLead.estimatedBudget})</>
+                  ) : (
+                    <span className="text-[#7E8BB5]">No lead selected — select a target to draft a proposal.</span>
+                  )}
                 </p>
               </div>
 
               <div className="flex items-center gap-2">
                 <button
                   onClick={handleGenerateProposal}
-                  disabled={isGenerating}
+                  disabled={isGenerating || !selectedLead}
                   className="airbyte-btn-primary px-3.5 py-1.5 text-xs font-bold flex items-center gap-1.5 shadow-lg shadow-[#615EFF]/25"
                 >
                   <Sparkles className="w-3.5 h-3.5" />
@@ -245,12 +240,16 @@ export const StudioLeadGenView: React.FC<StudioLeadGenViewProps> = ({
             {/* Action Bar */}
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="text-xs font-mono text-[#8E94B8]">
-                Lead Contact: <span className="text-white font-bold">{selectedLead.contactName}</span>
+                Lead Contact:{' '}
+                <span className={selectedLead ? 'text-white font-bold' : 'text-[#7E8BB5] font-bold'}>
+                  {selectedLead ? selectedLead.contactName : 'UNKNOWN'}
+                </span>
               </div>
 
               <div className="flex items-center gap-2">
                 <button
                   onClick={handlePushToKanban}
+                  disabled={!selectedLead}
                   className="p-2 rounded-lg bg-[#14172B] hover:bg-[#1E2342] text-xs text-[#A5A2FF] border border-[#252A4E] flex items-center gap-1.5 transition font-mono"
                 >
                   <Kanban className="w-3.5 h-3.5" />

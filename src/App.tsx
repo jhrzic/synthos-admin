@@ -1459,14 +1459,22 @@ Output your audit in markdown with your exact decision at the very top.`;
   // state or handlers needed here any more.
 
   // System Audit & Diagnostics Handlers
+  // "Run Audit" used to wait 600ms and then mark every check `passed`, with a
+  // latency invented as Math.floor(18 + Math.random() * 32) and a trace log
+  // reading "Status: 200 OK | SLA Target: Met | Jitter Buffer: Nominal (0
+  // packet drop)". No component was contacted. The one screen whose entire
+  // job is to report system health reported perfect health unconditionally.
+  //
+  // There is no diagnostic runner in this build, so this reports that
+  // instead of inventing a result. Checks stay UNKNOWN until something real
+  // measures them.
   const handleRunAudit = async (): Promise<void> => {
-    await new Promise(r => setTimeout(r, 600));
     setSystemAuditChecks(prev => prev.map(c => ({
       ...c,
-      status: 'passed',
-      latencyMs: Math.floor(18 + Math.random() * 32),
-      lastTested: 'Just now',
-      traceLog: `[DIAGNOSTIC TRACE OK] Component ${c.component} verified.\nStatus: 200 OK | SLA Target: Met\nJitter Buffer: Nominal (0 packet drop)`
+      status: 'unknown',
+      latencyMs: 0,
+      lastTested: 'NEVER',
+      traceLog: 'No diagnostic runner is implemented for this component. Nothing was executed, so no result is reported.',
     })));
   };
 

@@ -35,54 +35,17 @@ export const AutoContentNewsView: React.FC<AutoContentNewsViewProps> = ({
   onSendQuery,
   onSelectTab,
 }) => {
-  const [newsFeed, setNewsFeed] = useState<NewsItem[]>([
-    {
-      id: 'news-1',
-      source: 'arXiv',
-      title: 'Hermes-AgentOS: Dynamic Model Routing and Multi-Agent State Synchronization',
-      url: 'https://arxiv.org/abs/2502.14920',
-      summary: 'Research demonstrating an 84% reduction in redundant inference tokens by decomposing macro goals across dedicated micro-agent personas and persistent wikilink graphs.',
-      timeAgo: '18 mins ago',
-      category: 'Agentic AI Architecture',
-      upvotes: 412,
-      tags: ['MultiAgent', 'Hermes', 'StateSync', 'LLM']
-    },
-    {
-      id: 'news-2',
-      source: 'ProductHunt',
-      title: 'Agentic Browser OS: Autonomous Web Sandboxes for Developer Teams',
-      url: 'https://producthunt.com/posts/agentic-browser-os',
-      summary: 'Headless browser runtime that orchestrates distributed browser nodes with deterministic DOM state tracking and automated session playback.',
-      timeAgo: '42 mins ago',
-      category: 'Developer Tools',
-      upvotes: 890,
-      tags: ['BrowserAutomation', 'DevTools', 'WASM']
-    },
-    {
-      id: 'news-3',
-      source: 'HackerNews',
-      title: 'Show HN: Inotify-Obsidian CDC Engine for Continuous Vault Ingestion',
-      url: 'https://news.ycombinator.com/item?id=39811200',
-      summary: 'Open-source bidirectional daemon capturing live local markdown vault edits with sub-15ms sync latency and automated embedding vectors.',
-      timeAgo: '1 hour ago',
-      category: 'Knowledge Graph',
-      upvotes: 524,
-      tags: ['Obsidian', 'CDC', 'VectorDB', 'Inotify']
-    },
-    {
-      id: 'news-4',
-      source: 'GitHub Trending',
-      title: 'nousresearch/hermes-agent: Autonomous Multi-Agent Swarm Framework',
-      url: 'https://github.com/nousresearch/hermes-agent',
-      summary: 'Flagship open-weights agent framework supporting dynamic tool routing, local memory files, and telegram thread multiplexing.',
-      timeAgo: '2 hours ago',
-      category: 'Open Source AI',
-      upvotes: 1840,
-      tags: ['NousResearch', 'Hermes3', 'Python']
-    }
-  ]);
+  // Four invented stories, each with a plausible but fabricated citation —
+  // an arXiv abstract id, a HackerNews item id, a Product Hunt slug and a
+  // GitHub repo — plus invented upvote counts and "18 mins ago" timestamps.
+  // No feed, crawler or search provider is connected to this build, so none
+  // of it was harvested. Fabricated citations are the worst case of this bug
+  // class: they are indistinguishable from real sources by eye, and this
+  // screen feeds the selected item into a real model call whose output is
+  // saved to the Brain.
+  const [newsFeed, setNewsFeed] = useState<NewsItem[]>([]);
 
-  const [selectedNews, setSelectedNews] = useState<NewsItem>(newsFeed[0]);
+  const [selectedNews, setSelectedNews] = useState<NewsItem | null>(null);
   const [contentFormat, setContentFormat] = useState<'substack' | 'twitter' | 'linkedin' | 'obsidian'>('substack');
   const [targetModel, setTargetModel] = useState<string>('claude');
   const [generatedDraft, setGeneratedDraft] = useState<string>('');
@@ -91,6 +54,7 @@ export const AutoContentNewsView: React.FC<AutoContentNewsViewProps> = ({
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
 
   const handleGenerateContent = async () => {
+    if (!selectedNews) return;
     setIsGenerating(true);
     setStatusNotice(`Scout and Scribe are synthesizing ${contentFormat.toUpperCase()} with ${targetModel.toUpperCase()}...`);
     try {
@@ -126,7 +90,7 @@ export const AutoContentNewsView: React.FC<AutoContentNewsViewProps> = ({
   };
 
   const handleSaveToObsidian = () => {
-    if (!generatedDraft) return;
+    if (!generatedDraft || !selectedNews) return;
     const title = `AutoContent-${selectedNews.source}-${new Date().toISOString().slice(0, 10)}`;
     onAddNoteToVault(title, generatedDraft, ['autocontent', selectedNews.source.toLowerCase(), contentFormat], 'Content-Drafts');
     setStatusNotice('Saved directly to Obsidian Vault /Content-Drafts!');
@@ -149,24 +113,32 @@ export const AutoContentNewsView: React.FC<AutoContentNewsViewProps> = ({
             <span className="airbyte-badge">
               HERMES AUTO-CONTENT & NEWS PIPELINE
             </span>
-            <span className="text-xs font-mono text-[#00D26A] flex items-center gap-1">
-              <Radio className="w-3 h-3 animate-pulse" />
-              LIVE HARVESTING ACTIVE
+            <span className="text-xs font-mono text-[#7E8BB5] flex items-center gap-1">
+              <Radio className="w-3 h-3" />
+              NO FEED CONNECTED
             </span>
           </div>
           <h1 className="text-2xl sm:text-4xl font-extrabold text-white tracking-tight font-['Space_Grotesk']">
             Auto-Content & Breaking Tech Harvester
           </h1>
           <p className="text-xs sm:text-sm text-[#8E94B8] mt-1">
-            Automated intelligence harvesting across arXiv, Product Hunt, HackerNews, and GitHub trending. One-click synthesis into Substack essays, viral threads, and Obsidian notes.
+            Intelligence harvesting across arXiv, Product Hunt, HackerNews and GitHub trending, with
+            one-click synthesis into Substack essays, threads and Brain notes. No feed is connected to this
+            build yet, so no signals have been harvested.
           </p>
         </div>
 
         <div className="flex items-center gap-3">
           <button
             onClick={() => {
-              setStatusNotice('Refreshing live news feeds from Perplexity & Scout...');
-              setTimeout(() => setStatusNotice('4 new breaking stories ingested.'), 1000);
+              // This used to wait a second and report "4 new breaking stories
+              // ingested" — a fixed number, with no feed contacted and no
+              // story added.
+              setStatusNotice(
+                'NOT_CONFIGURED — no news source is connected. arXiv, Product Hunt, HackerNews and GitHub '
+                + 'trending are not wired to this build, so there is nothing to refresh and no story was '
+                + 'ingested.',
+              );
             }}
             className="airbyte-btn-secondary px-4 py-2.5 text-xs font-semibold flex items-center gap-2"
           >
@@ -192,12 +164,27 @@ export const AutoContentNewsView: React.FC<AutoContentNewsViewProps> = ({
               <Flame className="w-4 h-4 text-[#FF5E8E]" />
               Harvested Intelligence Signals ({newsFeed.length})
             </h2>
-            <span className="text-[10px] font-mono text-[#00D26A]">SCOUT HARVESTER ACTIVE</span>
+            <span className="text-[10px] font-mono text-[#7E8BB5]">HARVESTER NOT CONFIGURED</span>
           </div>
 
           <div className="space-y-3 max-h-[640px] overflow-y-auto pr-1">
+            {newsFeed.length === 0 && (
+              <div
+                data-testid="news-feed-empty-state"
+                className="rounded-xl border border-dashed border-[#181B2E] bg-[#0B0D1B] px-4 py-8 text-center"
+              >
+                <p className="text-[11px] font-mono font-bold uppercase tracking-wider text-[#7E8BB5]">
+                  No signals harvested — UNKNOWN
+                </p>
+                <p className="mx-auto mt-2 max-w-sm text-[11px] leading-relaxed text-[#6A7196]">
+                  No news feed, crawler or search provider is connected to this build. Sources, upvote
+                  counts and publication times stay unknown until one is, rather than being filled with
+                  example stories.
+                </p>
+              </div>
+            )}
             {newsFeed.map((item) => {
-              const isSelected = item.id === selectedNews.id;
+              const isSelected = item.id === selectedNews?.id;
               return (
                 <div
                   key={item.id}
@@ -247,7 +234,11 @@ export const AutoContentNewsView: React.FC<AutoContentNewsViewProps> = ({
                   Multi-Format Content Synthesizer
                 </h3>
                 <p className="text-xs text-[#8E94B8] mt-0.5">
-                  Transforming: <strong className="text-white">{selectedNews.title}</strong>
+                  {selectedNews ? (
+                    <>Transforming: <strong className="text-white">{selectedNews.title}</strong></>
+                  ) : (
+                    <span className="text-[#7E8BB5]">No signal selected — nothing to transform.</span>
+                  )}
                 </p>
               </div>
 
@@ -288,7 +279,7 @@ export const AutoContentNewsView: React.FC<AutoContentNewsViewProps> = ({
 
               <button
                 onClick={handleGenerateContent}
-                disabled={isGenerating}
+                disabled={isGenerating || !selectedNews}
                 className="airbyte-btn-primary px-4 py-2 text-xs font-bold flex items-center gap-2 shadow-lg shadow-[#615EFF]/25"
               >
                 <Sparkles className="w-4 h-4" />

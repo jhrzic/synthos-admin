@@ -497,7 +497,10 @@ export interface SystemAuditCheck {
   id: string;
   component: string;
   category: 'api_routing' | 'audio_pipeline' | 'control_integrity' | 'memory_vault' | 'model_latency';
-  status: 'passed' | 'warning' | 'failed' | 'testing';
+  // `unknown` is the state of a check that has not run. Without it, a check
+  // nobody has executed had to claim one of pass/warn/fail.
+  status: 'unknown' | 'passed' | 'warning' | 'failed' | 'testing';
+  // 0 means "not measured" — the UI renders it as UNKNOWN, not as 0 ms.
   latencyMs: number;
   message: string;
   lastTested: string;
@@ -714,7 +717,10 @@ export interface BridgeMessage {
   messageText: string;
   mediaUrl?: string;
   timestamp: string;
-  status: 'delivered' | 'processing' | 'replied' | 'failed';
+  // `simulated` is the honest status for the local simulator: a message that
+  // was composed and answered in-process and never reached WhatsApp or
+  // iMessage. Without it the simulator had to claim `delivered`.
+  status: 'simulated' | 'delivered' | 'processing' | 'replied' | 'failed';
   assignedAgent?: AgentRole;
   modelUsed?: string;
   tokensCount?: number;

@@ -64,6 +64,15 @@ import { runHermesLocalTask, isHermesLocalConfigured, isHermesLocalEnabled, getH
 // boundary module; none of them is a second execution path.
 import { findToolDefinition, type BrainWritebackPolicy } from './tool-pack';
 import {
+  searchBrainAndSources,
+  summarizeExternalSources,
+  readExternalSource,
+  resolveRetrievalScope,
+  ExternalSourceAccessError,
+  EXTERNAL_TRUST_NOTE,
+  type RetrievalScope,
+} from '../brain-sources';
+import {
   searchWorkspaceKnowledge,
   readWorkspaceKnowledgeNote,
   writeKnowledgeNote,
@@ -543,6 +552,8 @@ async function dispatchToExecutor(
       return executeBrainSearch(input);
     case 'brain.read':
       return executeBrainRead(input);
+    case 'brain.read_source':
+      return executeBrainReadSource(input);
     case 'brain.write_session_note':
       return executeBrainWriteSessionNote(input);
     case 'github.search':
@@ -1298,20 +1309,61 @@ async function executeBrainSearch(input: ExecutionEnvelopeInput): Promise<Execut
     return { outcome: 'FAILED', capability: 'brain.search', reason: 'A search query is required.' };
   }
   const limit = toolNumber(input, 'limit', 20, 100);
-  // workspaceId is the envelope's server-resolved scope — never a parameter.
-  // A `workspaceId` in input.parameters is ignored here, which is what makes
-  // cross-workspace search impossible rather than merely discouraged.
-  const matches = searchWorkspaceKnowledge(input.workspaceId, query, process.env, limit);
+
+  // ---------------------------------------------------------------------
+  // SCOPE, and why the default is what it is.
+  //
+  // BRAIN_ONLY is the default so this capability's existing behaviour is
+  // unchanged for every caller that does not ask for more. A search that
+  // silently started returning 154 of the operator's own notes would have
+  // been the one-line "just widen it" change this whole boundary exists to
+  // avoid — retrieval is not admission, and changing what a tool returns by
+  // default is how the two quietly become one.
+  //
+  // A caller opts in with scope: 'ALL' or 'EXTERNAL_ONLY'. Either way every
+  // result carries its classification, admission status and a trust note, so
+  // external material can never arrive looking like admitted knowledge.
+  // ---------------------------------------------------------------------
+  const requestedScope = toolParam(input, 'scope').toUpperCase();
+  const scope: RetrievalScope =
+    requestedScope === 'ALL' || requestedScope === 'EXTERNAL_ONLY' || requestedScope === 'BRAIN_ONLY'
+      ? (requestedScope as RetrievalScope)
+      : 'BRAIN_ONLY';
+
+  const found = searchBrainAndSources({ workspaceId: input.workspaceId, query, scope, limit });
+
+  // The legacy `matches` shape is preserved for callers that read it, so this
+  // is additive rather than a breaking change to the tool's contract.
+  const canonicalMatches = scope === 'EXTERNAL_ONLY'
+    ? []
+    : searchWorkspaceKnowledge(input.workspaceId, query, process.env, limit);
 
   return {
     outcome: 'READ_OK',
     capability: 'brain.search',
-    reason: matches.length > 0
-      ? `${matches.length} knowledge note(s) in this workspace match "${query}".`
-      : `No knowledge notes in this workspace match "${query}".`,
-    data: { query, limit, matchCount: matches.length, matches },
+    reason: found.results.length > 0
+      ? `${found.canonicalCount} canonical knowledge note(s) and ${found.externalCount} external source(s) match "${query}" (scope ${scope}).`
+      : `Nothing matches "${query}" in scope ${scope}.`,
+    data: {
+      query,
+      limit,
+      scope,
+      matchCount: canonicalMatches.length,
+      matches: canonicalMatches,
+      // The classified view. Each item states what it is and how much weight
+      // it may carry.
+      classified: found.results,
+      counts: { canonical: found.canonicalCount, external: found.externalCount },
+    },
     brainWriteback: writebackFor('brain.search'),
-    provenance: { source: 'synthos-knowledge-vault', workspaceScoped: true, scopedTo: input.workspaceId },
+    provenance: {
+      source: 'synthos-knowledge-vault',
+      workspaceScoped: true,
+      scopedTo: input.workspaceId,
+      retrievalScope: scope,
+      // External material is never admitted by being retrieved.
+      externalAdmission: 'UNADMITTED',
+    },
   };
 }
 
@@ -2802,5 +2854,55 @@ async function executeGmailSend(input: ExecutionEnvelopeInput): Promise<Executio
       data: { sent: false, account: conn.account, attemptId: claim.claim.attemptId, errorCategory: category },
       provenance: { source: 'gmail-api', sendState: 'FAILED', errorCategory: category, attemptId: claim.claim.attemptId },
     };
+  }
+}
+
+/**
+ * Read one EXTERNAL vault source.
+ *
+ * A separate capability from brain.read on purpose. brain.read enforces
+ * workspace attribution from a note's own frontmatter, which external notes do
+ * not have and should not be expected to — they predate SynthOS and belong to
+ * the operator. Overloading one capability to mean both "read admitted
+ * knowledge, workspace-scoped" and "read unadmitted source material,
+ * vault-scoped" would have made its contract impossible to state in a sentence.
+ *
+ * The result is labelled UNADMITTED and carries the external trust note, so a
+ * model receiving it is told, in the payload, that it is source material and
+ * not knowledge.
+ */
+async function executeBrainReadSource(input: ExecutionEnvelopeInput): Promise<ExecutionEnvelopeResult> {
+  const sourcePath = toolParam(input, 'path') || toolParam(input, 'vaultRelativePath');
+  if (!sourcePath) {
+    return { outcome: 'FAILED', capability: 'brain.read_source', reason: 'A vault-relative source path is required (parameter "path").' };
+  }
+  try {
+    const record = readExternalSource(sourcePath);
+    return {
+      outcome: 'READ_OK',
+      capability: 'brain.read_source',
+      reason: `Read external source "${record.vaultRelativePath}" (${record.sizeBytes} bytes${record.bodyTruncated ? ', truncated' : ''}). NOT admitted knowledge.`,
+      data: {
+        ...record,
+        // Stated in the payload, not just in a doc comment.
+        trustNote: EXTERNAL_TRUST_NOTE,
+      },
+      brainWriteback: writebackFor('brain.read_source'),
+      provenance: {
+        source: 'external-vault',
+        vaultRelativePath: record.vaultRelativePath,
+        contentHash: record.contentHash,
+        classification: 'EXTERNAL_SOURCE',
+        admission: 'UNADMITTED',
+        contentTrust: 'UNTRUSTED_EXTERNAL',
+        readOnly: true,
+      },
+    };
+  } catch (err: any) {
+    if (err instanceof ExternalSourceAccessError) {
+      const blocked = err.code === 'BAD_PATH' || err.code === 'IN_MANAGED_SUBTREE';
+      return { outcome: blocked ? 'BLOCKED' : 'FAILED', capability: 'brain.read_source', reason: err.message };
+    }
+    return { outcome: 'FAILED', capability: 'brain.read_source', reason: err?.message || String(err) };
   }
 }

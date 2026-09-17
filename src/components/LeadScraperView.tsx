@@ -22,103 +22,36 @@ export const LeadScraperView: React.FC<LeadScraperViewProps> = ({
   const [city, setCity] = useState('New York');
   const [state, setState] = useState('NY');
   const [keyword, setKeyword] = useState('plant nursery boutique');
-  const [isScraping, setIsScraping] = useState(false);
   const [syncedLeadIds, setSyncedLeadIds] = useState<Set<string>>(new Set());
 
   // Scraped Leads State
-  const [leads, setLeads] = useState<ScrapedNurseryLead[]>([
-    {
-      id: 'lead-1',
-      name: 'Urban Garden Center NYC',
-      website: 'https://urbangardennyc.com',
-      phone: '(646) 941-9454',
-      address: '1640 Park Ave, New York, NY 10035',
-      city: 'New York',
-      state: 'NY',
-      instagramHandle: '@urbangardennyc',
-      email: 'contact@urbangardennyc.com',
-      rating: 4.8,
-      reviewsCount: 342,
-      specialty: 'Rare Aroids, Terrariums & Tropical Foliage',
-      syncedToObsidian: true,
-      syncedToKanban: true,
-    },
-    {
-      id: 'lead-2',
-      name: 'Dahing Plants Chinatown',
-      website: 'https://dahingplants.com',
-      phone: '(212) 226-9078',
-      address: '289 Grand St, New York, NY 10002',
-      city: 'New York',
-      state: 'NY',
-      instagramHandle: '@dahingplants',
-      email: 'hello@dahingplants.com',
-      rating: 4.9,
-      reviewsCount: 512,
-      specialty: 'Bonsai Trees, Monsteras, Exotic Succulents',
-      syncedToObsidian: true,
-      syncedToKanban: false,
-    },
-    {
-      id: 'lead-3',
-      name: 'The Sill Upper West Side',
-      website: 'https://thesill.com',
-      phone: '(646) 895-9292',
-      address: '448 Amsterdam Ave, New York, NY 10024',
-      city: 'New York',
-      state: 'NY',
-      instagramHandle: '@thesill',
-      email: 'care@thesill.com',
-      rating: 4.7,
-      reviewsCount: 890,
-      specialty: 'Direct-to-Consumer Potted Houseplants & Workshops',
-      syncedToObsidian: false,
-      syncedToKanban: false,
-    },
-    {
-      id: 'lead-4',
-      name: 'Greenery Unlimited Brooklyn',
-      website: 'https://greeneryunlimited.co',
-      phone: '(718) 782-0108',
-      address: '91 Franklin St, Brooklyn, NY 11222',
-      city: 'Brooklyn',
-      state: 'NY',
-      instagramHandle: '@greeneryunlimited',
-      email: 'design@greeneryunlimited.co',
-      rating: 4.9,
-      reviewsCount: 280,
-      specialty: 'Biophilic Design, Living Walls & Botanical Art',
-      syncedToObsidian: false,
-      syncedToKanban: false,
-    },
-  ]);
+  // No scraper backend exists in this build, so nothing has been harvested.
+  // This list was seeded with four real businesses — real phone numbers,
+  // addresses and emails — carrying invented ratings, review counts and sync
+  // flags, presented as scraper output. An empty list is the true state.
+  const [leads, setLeads] = useState<ScrapedNurseryLead[]>([]);
+  const [scraperNotice, setScraperNotice] = useState<string | null>(null);
 
+  // This used to wait 1.5s and invent a lead — a fabricated business name
+  // built from the city field, a hardcoded phone number, a rating of 4.9 and
+  // 178 reviews — then log "Harvested new lead" to the real event log at
+  // level `success`. No crawler, no Playwright, no network call. The file it
+  // claims to run (scripts/nurseryScraper.ts) has never existed in this repo.
+  //
+  // A button that cannot do its job says so.
   const handleRunPlaywrightScraper = () => {
-    setIsScraping(true);
-    setTimeout(() => {
-      const newLead: ScrapedNurseryLead = {
-        id: `lead-${Date.now()}`,
-        name: `${city} Botanics & Flora Co.`,
-        website: `https://${city.toLowerCase().replace(/\s+/g, '')}botanics.com`,
-        phone: '(646) 941-9454',
-        address: `120 Broadway Suite 400, ${city}, ${state}`,
-        city: city,
-        state: state,
-        instagramHandle: `@${city.toLowerCase().replace(/\s+/g, '')}plants`,
-        email: `info@${city.toLowerCase().replace(/\s+/g, '')}botanics.com`,
-        rating: 4.9,
-        reviewsCount: 178,
-        specialty: 'Custom Botanical Installations & Rare Cultivars',
-        syncedToObsidian: false,
-        syncedToKanban: false,
-      };
-
-      setLeads(prev => [newLead, ...prev]);
-      setIsScraping(false);
-      if (onLogEvent) {
-        onLogEvent('success', 'Playwright-Scraper', `Harvested new lead: ${newLead.name} in ${city}, ${state}`);
-      }
-    }, 1500);
+    setScraperNotice(
+      'NOT_CONFIGURED — no scraper backend is connected to this build. No crawler, directory API or '
+      + 'enrichment provider is configured, so no leads can be harvested. Nothing was run and no lead '
+      + 'was recorded.',
+    );
+    if (onLogEvent) {
+      onLogEvent(
+        'warn',
+        'Lead-Scraper',
+        `Scrape requested for "${keyword}" in ${city}, ${state} — refused: no scraper backend configured.`,
+      );
+    }
   };
 
   const handleSyncToObsidian = (lead: ScrapedNurseryLead) => {
@@ -177,28 +110,38 @@ export const LeadScraperView: React.FC<LeadScraperViewProps> = ({
             Web Scraping &amp; Local Lead Enrichment
           </h1>
           <p className="text-xs sm:text-sm text-[#8E94B8] mt-1 font-sans">
-            Automated Google Maps crawler parsing botanical nurseries, contact phone numbers (<span className="text-[#38BDF8] font-bold">646-941-9454</span>), and syncing into Obsidian &amp; Kanban.
+            Directory lead capture, enrichment and sync into the Brain and Kanban. No crawler or directory
+            provider is connected to this build yet.
           </p>
         </div>
 
         <button
           onClick={handleRunPlaywrightScraper}
-          disabled={isScraping}
-          className="px-5 py-2.5 bg-[#20B2AA] hover:bg-[#1CA29A] text-black font-bold rounded-xl text-xs flex items-center gap-2 transition shadow-lg shadow-[#20B2AA]/20 disabled:opacity-50"
+          className="px-5 py-2.5 bg-[#20B2AA] hover:bg-[#1CA29A] text-black font-bold rounded-xl text-xs flex items-center gap-2 transition shadow-lg shadow-[#20B2AA]/20"
         >
-          <RefreshCw className={`w-3.5 h-3.5 ${isScraping ? 'animate-spin' : ''}`} />
-          <span>{isScraping ? 'Crawling Maps...' : 'Execute Scraper Pipeline'}</span>
+          <RefreshCw className="w-3.5 h-3.5" />
+          <span>Execute Scraper Pipeline</span>
         </button>
       </div>
+
+      {scraperNotice && (
+        <div
+          data-testid="scraper-not-configured-notice"
+          className="flex items-start gap-3 rounded-2xl border border-[#7E8BB5]/25 bg-[#7E8BB5]/[0.06] px-4 py-3 text-[11px] leading-relaxed text-[#9C97B4]"
+        >
+          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-[#7E8BB5]" />
+          <span>{scraperNotice}</span>
+        </div>
+      )}
 
       {/* Scraper Query & Parameters Bar */}
       <div className="bg-[#090B18] border border-[#1A1D34] rounded-2xl p-5 space-y-4">
         <div className="flex items-center justify-between">
           <span className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2">
             <Search className="w-3.5 h-3.5 text-[#20B2AA]" />
-            Scraper Targeting Parameters (scripts/nurseryScraper.ts)
+            Scraper Targeting Parameters
           </span>
-          <span className="text-[10px] text-[#6A7196]">Headless Chromium Driver</span>
+          <span className="text-[10px] font-bold text-[#7E8BB5]">NO SCRAPER BACKEND CONFIGURED</span>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -240,10 +183,23 @@ export const LeadScraperView: React.FC<LeadScraperViewProps> = ({
           <h2 className="text-sm font-bold text-white uppercase tracking-wider">
             Enriched Directory Leads ({leads.length})
           </h2>
-          <span className="text-xs text-[#00D26A] bg-[#00D26A]/10 px-2.5 py-0.5 rounded-full border border-[#00D26A]/30">
-            AUTO-ENRICHED
+          <span className="text-xs font-bold text-[#7E8BB5] bg-[#7E8BB5]/10 px-2.5 py-0.5 rounded-full border border-[#7E8BB5]/30">
+            {leads.length > 0 ? 'MANUALLY ENTERED' : 'NO SOURCE CONNECTED'}
           </span>
         </div>
+
+        {leads.length === 0 && (
+          <div
+            data-testid="leads-empty-state"
+            className="rounded-2xl border border-dashed border-[#1A1D34] bg-[#05060C] px-5 py-8 text-center"
+          >
+            <p className="text-xs font-bold uppercase tracking-wider text-[#7E8BB5]">No leads — UNKNOWN</p>
+            <p className="mx-auto mt-2 max-w-md text-[11px] leading-relaxed text-[#6A7196]">
+              No crawler, directory API or enrichment provider is connected, so this build has harvested
+              nothing. This table stays empty until a real source is configured.
+            </p>
+          </div>
+        )}
 
         <div className="space-y-3">
           {leads.map((lead) => (

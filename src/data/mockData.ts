@@ -254,6 +254,12 @@ export const INITIAL_MODELS: Record<string, AIModelInfo> = {
   }
 };
 
+// The nine agent definitions are real product design — roster, authority,
+// capabilities and system prompts. Their TELEMETRY was not: every agent
+// shipped `status: 'active'` or `'busy'`, with an activeTasksCount, a
+// completedTasksCount in the dozens-to-hundreds, `lastActive: 'Just now'`
+// and a memoryFileSize in KB. Nothing had run. Definitions kept; every
+// measured field now starts at its true value — standby, zero, Never.
 export const INITIAL_AGENTS: Record<string, AgentInfo> = {
   'orchestrator': {
     id: 'agent-orchestrator',
@@ -266,11 +272,11 @@ export const INITIAL_AGENTS: Record<string, AgentInfo> = {
     iconName: 'Crown',
     assignedModel: 'hermes',
     secondaryModel: 'chatgpt',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 101,
     telegramChannelName: '#orchestrator-bridge',
     workspacePath: '/agents/orchestrator/workspace',
-    memoryFileSize: '42.8 KB (SOPS.md, memory.md, rules.md)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: 0, y: 0, z: 0 },
     systemPrompt: `You are the Orchestrator (Fleet Commander) in the Hermes AgentOS multi-agent operating system. 
@@ -282,9 +288,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Permanent Operating Rules Enforcement',
       'Executive Briefing & QA Sign-off'
     ],
-    activeTasksCount: 4,
-    completedTasksCount: 82,
-    lastActive: 'Just now'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'scout': {
     id: 'agent-scout',
@@ -297,11 +303,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'Search',
     assignedModel: 'perplexity',
     secondaryModel: 'kimi',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 102,
     telegramChannelName: '#scout-intel',
     workspacePath: '/agents/scout/workspace',
-    memoryFileSize: '36.2 KB (scrapers.json, sources.md)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: -2, y: 1, z: 0 },
     systemPrompt: `You are Scout in Hermes AgentOS. Your specialty is deep web scraping, market whitespace identification, startup trend analysis, arXiv research paper extraction, and fact triangulation.`,
@@ -312,9 +318,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Startup Whitespace & Market Signal Detection',
       'Fact-checking & Citation Verification'
     ],
-    activeTasksCount: 4,
-    completedTasksCount: 114,
-    lastActive: '2 mins ago'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'scribe': {
     id: 'agent-scribe',
@@ -327,11 +333,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'PenTool',
     assignedModel: 'claudecode',
     secondaryModel: 'chatgpt',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 103,
     telegramChannelName: '#scribe-notes',
     workspacePath: '/agents/scribe/workspace',
-    memoryFileSize: '54.1 KB (templates.md, taxonomy.md)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: 2, y: 1, z: 0 },
     systemPrompt: `You are Scribe in Hermes AgentOS. Your duty is authoring pristine Obsidian notes, investment theses, documentation specs, and weekly changelogs with [[wikilinks]], YAML frontmatter, and categorized tags.`,
@@ -342,9 +348,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Technical Documentation & RFCs',
       'Release Changelog Compilation'
     ],
-    activeTasksCount: 3,
-    completedTasksCount: 168,
-    lastActive: '1 min ago'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'reach': {
     id: 'agent-reach',
@@ -357,11 +363,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'Share2',
     assignedModel: 'chatgpt',
     secondaryModel: 'gemini',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 104,
     telegramChannelName: '#reach-growth',
     workspacePath: '/agents/reach/workspace',
-    memoryFileSize: '28.4 KB (icp-matrix.md, channels.md)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: -2, y: -1, z: 0 },
     systemPrompt: `You are Reach in Hermes AgentOS. You are the growth and distribution engine. You craft go-to-market strategies, viral hooks, landing page value propositions, and customer outreach sequences.`,
@@ -372,9 +378,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Competitor Positioning Analysis',
       'Community Growth & Feedback Loops'
     ],
-    activeTasksCount: 3,
-    completedTasksCount: 92,
-    lastActive: '4 mins ago'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'dev': {
     id: 'agent-dev',
@@ -387,11 +393,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'Code2',
     assignedModel: 'claudecode',
     secondaryModel: 'codex',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 105,
     telegramChannelName: '#dev-terminal',
     workspacePath: '/agents/dev/workspace',
-    memoryFileSize: '71.9 KB (sandboxes.json, git-repos.md)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: 2, y: -1, z: 0 },
     systemPrompt: `You are Dev in Hermes AgentOS. You write pristine TypeScript, Python, and shell code. You architect POCs, validate sandbox builds, and fix regressions.`,
@@ -402,9 +408,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Self-Healing Code Patches',
       'API Integration & SDK Construction'
     ],
-    activeTasksCount: 5,
-    completedTasksCount: 142,
-    lastActive: 'Just now'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'analytics': {
     id: 'agent-analytics',
@@ -417,11 +423,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'BarChart3',
     assignedModel: 'deepseek',
     secondaryModel: 'gemini',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 106,
     telegramChannelName: '#analytics-metrics',
     workspacePath: '/agents/analytics/workspace',
-    memoryFileSize: '44.0 KB (telemetry.db, metrics.json)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: 0, y: -2, z: 0 },
     systemPrompt: `You are Analytics in Hermes AgentOS. You analyze token economy metrics, model latencies, database throughput (board.db), and pipeline health.`,
@@ -432,9 +438,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Pipeline Throughput Auditing',
       'Vector Compression Profiling'
     ],
-    activeTasksCount: 2,
-    completedTasksCount: 96,
-    lastActive: '3 mins ago'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'claude': {
     id: 'agent-claude',
@@ -447,11 +453,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'Sparkles',
     assignedModel: 'claude',
     secondaryModel: 'claudecode',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 107,
     telegramChannelName: '#claude-reasoning',
     workspacePath: '/agents/claude/workspace',
-    memoryFileSize: '38.5 KB (architecture-specs.md)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: 1, y: 2, z: 0 },
     systemPrompt: `You are Claude 3.7 in Hermes AgentOS. You specialize in hybrid reasoning, enterprise system design, and rigorous analytical evaluation.`,
@@ -462,9 +468,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Domain Expert Synthesis',
       'Bi-directional Obsidian Integration'
     ],
-    activeTasksCount: 2,
-    completedTasksCount: 78,
-    lastActive: 'Just now'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'claudecode': {
     id: 'agent-claudecode',
@@ -477,11 +483,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'Terminal',
     assignedModel: 'claudecode',
     secondaryModel: 'cursor',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 108,
     telegramChannelName: '#claude-code-terminal',
     workspacePath: '/agents/claudecode/workspace',
-    memoryFileSize: '62.1 KB (repo-index.json)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: 2, y: 0, z: 0 },
     systemPrompt: `You are Claude Code in Hermes AgentOS. You operate directly on terminal workflows, git commands, multi-file code surgery, and test validations.`,
@@ -492,9 +498,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Automated Git Commit & Diff Review',
       'TypeScript/Python Compilation Verification'
     ],
-    activeTasksCount: 3,
-    completedTasksCount: 110,
-    lastActive: 'Just now'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'kimi3': {
     id: 'agent-kimi3',
@@ -507,11 +513,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'Layers',
     assignedModel: 'kimi3',
     secondaryModel: 'perplexity',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 109,
     telegramChannelName: '#kimi-longcontext',
     workspacePath: '/agents/kimi3/workspace',
-    memoryFileSize: '85.4 KB (document-cache.json)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: -1, y: 2, z: 0 },
     systemPrompt: `You are Kimi 3 in Hermes AgentOS. You ingest up to 2.0 million tokens of context, performing comprehensive document extraction, arXiv paper synthesis, and multilingual translation.`,
@@ -522,9 +528,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Multi-vault Obsidian Synthesis',
       'Deep Academic Research Sweeps'
     ],
-    activeTasksCount: 1,
-    completedTasksCount: 64,
-    lastActive: '4 mins ago'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'deepseek': {
     id: 'agent-deepseek',
@@ -537,11 +543,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'Brain',
     assignedModel: 'deepseek',
     secondaryModel: 'codex',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 110,
     telegramChannelName: '#deepseek-math',
     workspacePath: '/agents/deepseek/workspace',
-    memoryFileSize: '49.2 KB (proofs.md, benchmarks.json)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: -2, y: 0, z: 0 },
     systemPrompt: `You are DeepSeek R1 in Hermes AgentOS. You provide transparent deep reasoning, formal math proofs, algorithmic efficiency analysis, and token economy calculations.`,
@@ -552,9 +558,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Low-Cost Token Inference Modeling',
       'Security & Cryptographic Review'
     ],
-    activeTasksCount: 2,
-    completedTasksCount: 88,
-    lastActive: '1 min ago'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'chatgpt': {
     id: 'agent-chatgpt',
@@ -567,11 +573,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'MessageSquare',
     assignedModel: 'chatgpt',
     secondaryModel: 'gemini',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 111,
     telegramChannelName: '#chatgpt-strategy',
     workspacePath: '/agents/chatgpt/workspace',
-    memoryFileSize: '33.8 KB (personas.json, strategy.md)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: 0, y: 1, z: 0 },
     systemPrompt: `You are ChatGPT o3 in Hermes AgentOS. You synthesize high-level strategic plans, executive communications, prompt architectures, and conversational flows.`,
@@ -582,9 +588,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Product Positioning & Value Propositions',
       'Conversational Flow Modeling'
     ],
-    activeTasksCount: 3,
-    completedTasksCount: 135,
-    lastActive: 'Just now'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'codex': {
     id: 'agent-codex',
@@ -597,11 +603,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'Code2',
     assignedModel: 'codex',
     secondaryModel: 'cursor',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 112,
     telegramChannelName: '#codex-sandbox',
     workspacePath: '/agents/codex/workspace',
-    memoryFileSize: '52.0 KB (test-results.json)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: 3, y: -1, z: 0 },
     systemPrompt: `You are Codex Sandbox in Hermes AgentOS. You execute code in isolated test harnesses, evaluate performance, and generate automated test suites.`,
@@ -612,9 +618,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Syntax Tree (AST) Validation',
       'Runtime Error Interception'
     ],
-    activeTasksCount: 2,
-    completedTasksCount: 94,
-    lastActive: '5 mins ago'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'cursor': {
     id: 'agent-cursor',
@@ -627,11 +633,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'Terminal',
     assignedModel: 'cursor',
     secondaryModel: 'claudecode',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 113,
     telegramChannelName: '#cursor-workspace',
     workspacePath: '/agents/cursor/workspace',
-    memoryFileSize: '68.4 KB (lsp-cache.json)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: 3, y: 1, z: 0 },
     systemPrompt: `You are Cursor IDE Agent in Hermes AgentOS. You specialize in full-codebase context navigation, multi-file edits, LSP symbol lookups, and compiler error fixes.`,
@@ -642,9 +648,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Compiler Error Auto-Fix Loop',
       'Code Refactoring & Type Safety Optimization'
     ],
-    activeTasksCount: 4,
-    completedTasksCount: 122,
-    lastActive: 'Just now'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'antigravity': {
     id: 'agent-antigravity',
@@ -657,11 +663,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'Compass',
     assignedModel: 'antigravity',
     secondaryModel: 'hermes',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 114,
     telegramChannelName: '#antigravity-meta',
     workspacePath: '/agents/antigravity/workspace',
-    memoryFileSize: '57.9 KB (kernel-state.json)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: 0, y: 3, z: 0 },
     systemPrompt: `You are Google Antigravity Agent in Hermes AgentOS. You supervise background tasks, compile verification routines, self-heal system failures, and coordinate meta-workflows.`,
@@ -672,9 +678,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Background Task Management & Watchdogs',
       'Automated Workspace State Rollbacks'
     ],
-    activeTasksCount: 2,
-    completedTasksCount: 104,
-    lastActive: 'Just now'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'perplexity': {
     id: 'agent-perplexity',
@@ -687,11 +693,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'Globe',
     assignedModel: 'perplexity',
     secondaryModel: 'scout',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 115,
     telegramChannelName: '#perplexity-research',
     workspacePath: '/agents/perplexity/workspace',
-    memoryFileSize: '41.3 KB (citations.json, search-cache.md)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: -3, y: 1, z: 0 },
     systemPrompt: `You are Perplexity Deep Research in Hermes AgentOS. You search the live web, extract authoritative citations, summarize breaking developments, and anchor claims with URLs.`,
@@ -702,9 +708,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Competitor Signal & Funding Tracking',
       'Obsidian Research Note Generation'
     ],
-    activeTasksCount: 3,
-    completedTasksCount: 147,
-    lastActive: '2 mins ago'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'elevenlabs': {
     id: 'agent-elevenlabs',
@@ -717,11 +723,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'Radio',
     assignedModel: 'elevenlabs',
     secondaryModel: 'gemini',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 116,
     telegramChannelName: '#elevenlabs-voice',
     workspacePath: '/agents/elevenlabs/workspace',
-    memoryFileSize: '22.4 KB (voice-profiles.json)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: -3, y: -1, z: 0 },
     systemPrompt: `You are ElevenLabs (EL Voice) in Hermes AgentOS. You synthesize expressive, low-latency audio responses for Jarvis, manage voice clones, and format spoken briefings.`,
@@ -732,9 +738,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Jarvis HUD Audio Interface Integration',
       'Voice-to-Text & Audio Briefing Generation'
     ],
-    activeTasksCount: 1,
-    completedTasksCount: 89,
-    lastActive: 'Just now'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'gemini': {
     id: 'agent-gemini',
@@ -747,11 +753,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'Sparkles',
     assignedModel: 'gemini',
     secondaryModel: 'chatgpt',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 117,
     telegramChannelName: '#gemini-multimodal',
     workspacePath: '/agents/gemini/workspace',
-    memoryFileSize: '48.2 KB (multimodal-index.json)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: -1, y: -2, z: 0 },
     systemPrompt: `You are Google Gemini 3.1 in Hermes AgentOS. You specialize in multimodal analysis, search-grounded deep synthesis, and high-throughput real-time streaming.`,
@@ -762,9 +768,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Live WebSocket Streaming API Integration',
       'Fast Structured Output Parsing'
     ],
-    activeTasksCount: 3,
-    completedTasksCount: 128,
-    lastActive: 'Just now'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'openclaw': {
     id: 'agent-openclaw',
@@ -777,11 +783,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'Globe',
     assignedModel: 'openclaw',
     secondaryModel: 'perplexity',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 118,
     telegramChannelName: '#openclaw-crawler',
     workspacePath: '/agents/openclaw/workspace',
-    memoryFileSize: '39.6 KB (crawler-state.json)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: -2, y: -2, z: 0 },
     systemPrompt: `You are OpenClaw in Hermes AgentOS. You navigate complex web pages, extract dynamic JSON/DOM data, parse authentication gates, and feed clean structured research into the fleet.`,
@@ -792,9 +798,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Automated PDF & Asset Extraction',
       'Direct Obsidian Vault Synchronization'
     ],
-    activeTasksCount: 2,
-    completedTasksCount: 97,
-    lastActive: '3 mins ago'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   },
   'hermes': {
     id: 'agent-hermes',
@@ -807,11 +813,11 @@ You interview the user, install permanent operating rules, break down complex go
     iconName: 'Cpu',
     assignedModel: 'hermes',
     secondaryModel: 'deepseek',
-    status: 'active',
+    status: 'standby',
     telegramThreadId: 101,
     telegramChannelName: '#hermes-fleet',
     workspacePath: '/agents/hermes/workspace',
-    memoryFileSize: '64.8 KB (hermes-kernel.json)',
+    memoryFileSize: 'UNKNOWN',
     isolatedWorkspace: true,
     officeCoordinates: { x: 0, y: 0, z: 0 },
     systemPrompt: `You are Nous Hermes 3 in SynthOS. You serve as the core agent execution engine with specialized steering, tool calling, and structured output formatting.`,
@@ -822,9 +828,9 @@ You interview the user, install permanent operating rules, break down complex go
       'Autonomous Reasoning Loop Steering',
       'Full-Duplex Speech & CLI Bridge'
     ],
-    activeTasksCount: 6,
-    completedTasksCount: 245,
-    lastActive: 'Just now'
+    activeTasksCount: 0,
+    completedTasksCount: 0,
+    lastActive: 'Never'
   }
 };
 
@@ -1136,6 +1142,11 @@ export const INITIAL_TELEGRAM_MESSAGES: Record<string, TelegramMessage[]> = {
   ]
 };
 
+// These four schedule definitions are useful templates, but they were
+// presented as live cron: `status: 'running'`, `lastRun: '18 mins ago'`,
+// `nextRun: 'in 1h 42m'` and runCounts of 428 and 1420. None is registered
+// with the real scheduler (lib/fabric/scheduler.ts), so none has ever run.
+// They start disabled, with NEVER for both timestamps and a zero count.
 export const INITIAL_CRON_JOBS: CronScheduleJob[] = [
   {
     id: 'cron-1',
@@ -1144,10 +1155,10 @@ export const INITIAL_CRON_JOBS: CronScheduleJob[] = [
     agentRole: 'scout',
     model: 'Perplexity Sonar',
     targetOutput: 'Vault: Research-2026/Trend-Scrapes.md',
-    status: 'running',
-    lastRun: '18 mins ago',
-    nextRun: 'in 1h 42m',
-    runCount: 428,
+    status: 'disabled',
+    lastRun: 'NEVER',
+    nextRun: 'NEVER',
+    runCount: 0,
     description: 'Scrapes live Product Hunt launches, GitHub trending AI repositories, and arXiv papers into Obsidian markdown feeds.',
     category: 'scraping'
   },
@@ -1158,10 +1169,10 @@ export const INITIAL_CRON_JOBS: CronScheduleJob[] = [
     agentRole: 'scribe',
     model: 'Claude Code 3.7',
     targetOutput: 'Vault: Daily-Syntheses/{{date}}.md',
-    status: 'running',
-    lastRun: '14 mins ago',
-    nextRun: 'in 46 mins',
-    runCount: 1420,
+    status: 'disabled',
+    lastRun: 'NEVER',
+    nextRun: 'NEVER',
+    runCount: 0,
     description: 'Summarizes all active agent conversations, Kanban tasks, and code commits into the master Obsidian daily note with [[wikilinks]].',
     category: 'synthesis'
   },
@@ -1172,10 +1183,10 @@ export const INITIAL_CRON_JOBS: CronScheduleJob[] = [
     agentRole: 'dev',
     model: 'Claude Code 3.7',
     targetOutput: 'Vault: DevLogs/PR-Automations.md',
-    status: 'running',
-    lastRun: '2 mins ago',
-    nextRun: 'Listening...',
-    runCount: 312,
+    status: 'disabled',
+    lastRun: 'NEVER',
+    nextRun: 'NEVER',
+    runCount: 0,
     description: 'Monitors repository changes, runs test suites in isolated sandboxes, and logs self-healing patches.',
     category: 'dev'
   },
@@ -1186,10 +1197,10 @@ export const INITIAL_CRON_JOBS: CronScheduleJob[] = [
     agentRole: 'reach',
     model: 'ChatGPT o3',
     targetOutput: 'Vault: Intelligence/GTM-Signals.md',
-    status: 'running',
-    lastRun: '1 hour ago',
-    nextRun: 'in 5 hours',
-    runCount: 184,
+    status: 'disabled',
+    lastRun: 'NEVER',
+    nextRun: 'NEVER',
+    runCount: 0,
     description: 'Tracks tech social sentiment, ICP engagement spikes, and competitor positioning signals.',
     category: 'outreach'
   }
@@ -1243,96 +1254,23 @@ export const INITIAL_ROUTER_RULES: ModelRouterRule[] = [
   }
 ];
 
-export const INITIAL_VAULTS: ObsidianVault[] = [
-  {
-    id: 'vault-1',
-    name: 'Hermes-Knowledge-Mesh',
-    path: '/User/Obsidian/Hermes-Knowledge-Mesh',
-    notesCount: 146,
-    lastSynced: 'Just now',
-    status: 'synced',
-    size: '52.4 MB'
-  },
-  {
-    id: 'vault-2',
-    name: 'Startup-Theses-2026',
-    path: '/User/Obsidian/Startup-Theses-2026',
-    notesCount: 28,
-    lastSynced: '1 min ago',
-    status: 'synced',
-    size: '18.6 MB'
-  },
-  {
-    id: 'vault-3',
-    name: 'Research-2026-Syntheses',
-    path: '/User/Obsidian/Research-2026',
-    notesCount: 94,
-    lastSynced: '2 mins ago',
-    status: 'synced',
-    size: '114.2 MB'
-  },
-  {
-    id: 'vault-4',
-    name: 'Jarvis-Memory-Core',
-    path: '/User/Obsidian/Jarvis-Memory-Core',
-    notesCount: 320,
-    lastSynced: 'Active Stream',
-    status: 'synced',
-    size: '24.1 MB'
-  }
-];
+// Four vaults that are not on this machine: paths under '/User/Obsidian/'
+// (not even a valid macOS path shape), holding 146, 28, 94 and 320 notes
+// across 52.4 MB, 18.6 MB, 114.2 MB and 24.1 MB, all 'synced' "Just now" or
+// on an "Active Stream". There is one real vault, and the Brain screen reads
+// it through the real GET /api/vault routes. Claiming four mounted vaults
+// with sizes and sync times was a false statement about the filesystem.
+export const INITIAL_VAULTS: ObsidianVault[] = [];;
 
-export const INITIAL_NOTES: ObsidianNote[] = [
-  {
-    id: 'note-startup-thesis-1',
-    title: 'Autonomous Local Browser OS with Zero-Token Caching',
-    path: 'Startup-Theses/Agentic-Browser-OS.md',
-    folder: 'Startup-Theses',
-    content: `# Investment Thesis: Autonomous Local Browser OS\n\n**Curated by Hermes Multi-Agent Fleet (Scout, Dev, Reach, Scribe, Orchestrator)**\n\n## 1. Executive Summary\nTraditional web agents incur massive latency and cost by repeatedly passing raw DOM structures to frontier LLMs. Our thesis introduces a **Local Browser OS** combining headless Playwright workers with local DOM diff caching, cutting context usage by **78%**.\n\n## 2. Market Whitespace & Scraping Evidence\n- **Scout Signal**: 214 GitHub repos trending in agent tooling with >40% complaints regarding token burn.\n- **Product Hunt Trajectory**: Top 3 AI agent launches in Q3 2026 suffered from $0.45/session inference bills.\n\n## 3. Technical Architecture (Dev Specification)\n\`\`\`\n[ Local Playwright Sandbox ] ──► [ AST / DOM Diff Compressor ] ──► [ Gemini 2.5 Flash / DeepSeek R1 ]\n               │                                                    │\n               ▼                                                    ▼\n       [ SQLite State DB ] ◄─────────────────────────────── [ Action Verification ]\n\`\`\`\n\n## 4. Financial & Unit Economics (Analytics Report)\n- Target Price: $29 / user / month\n- Average Inference Cost: $3.80 / month (86.9% gross margin)\n- Break-even: 320 paid subscribers\n\n## 5. Go-To-Market & Viral Loops (Reach Strategy)\n- **Open-source Core CLI**: Free local browser recording tool.\n- **Video Hooks**: "I automated my entire SaaS sales demo in 14 seconds with 0 tokens".\n\n## Bidirectional Synapses\n- [[Hermes-Knowledge-Mesh]]\n- [[Token-Economy-Report]]\n- [[DevLogs/Architecture-POC]]\n- [[Protocols/GTM-Playbook]]\n\n#startup-thesis #agentic-browser #deep-research #scout #dev #reach #scribe #orchestrator`,
-    tags: ['startup-thesis', 'agentic-browser', 'deep-research', 'scout', 'dev', 'reach', 'scribe', 'orchestrator'],
-    wikilinks: ['Hermes-Knowledge-Mesh', 'Token-Economy-Report', 'DevLogs/Architecture-POC', 'Protocols/GTM-Playbook'],
-    updatedAt: '2026-08-24 16:45',
-    createdAt: '2026-08-24 08:30',
-    linkedAgent: 'orchestrator'
-  },
-  {
-    id: 'note-1',
-    title: 'Hermes Architecture & Obsidian Graph Bridge',
-    path: 'Architecture/Hermes-OS-Core.md',
-    folder: 'Architecture',
-    content: `# Hermes OS & Obsidian Bridge\n\nHermes operates as the central neural gateway routing between [[Obsidian-Knowledge-Graph]] and distributed model mesh nodes.\n\n## Active Synapses\n- [[Nous-Hermes-3]]: Agentic steering and function calling\n- [[ChatGPT-o3]]: Logical synthesis and cross-entropy validation\n- [[DeepSeek-R1]]: Mathematical reasoning and algorithm verification\n- [[Claude-Code-Agent]]: Multi-file filesystem orchestration\n- [[Gemini-2.5]]: High-speed server multimodal execution\n- [[Kimi-K1.5]]: 200k-2M long-context document analysis\n- [[Perplexity-Sonar]]: Real-time live web facts\n\n#hermes #architecture #obsidian #airbyte-mesh #ai-os #openrouter`,
-    tags: ['hermes', 'architecture', 'obsidian', 'ai-os', 'openrouter'],
-    wikilinks: ['Obsidian-Knowledge-Graph', 'Nous-Hermes-3', 'ChatGPT-o3', 'DeepSeek-R1', 'Claude-Code-Agent', 'Gemini-2.5', 'Kimi-K1.5', 'Perplexity-Sonar'],
-    updatedAt: '2026-08-24 14:10',
-    createdAt: '2026-08-20 10:00',
-    linkedModel: 'hermes'
-  },
-  {
-    id: 'note-2',
-    title: 'Jarvis Directive Protocols & Neural Memory',
-    path: 'Protocols/Jarvis-Directives.md',
-    folder: 'Protocols',
-    content: `# Jarvis Protocol Specifications\n\n## Directive 01: Zero Latency Memory Scribing\nAll interaction telemetry is transcribed directly into [[Jarvis-Memory-Core]] via Markdown frontmatter.\n\n## Directive 02: Model Arbitration via OpenRouter\nWhen arbitration mode is set to \`smart-auto\`, queries with reasoning depth > 8 are routed to [[DeepSeek-R1]] or [[ChatGPT-o3]]. Code tasks route directly to [[Claude-Code-Agent]] or [[OpenAI-Codex]]. Long PDFs route to [[Kimi-K1.5]].\n\n#jarvis #directives #memory #openrouter`,
-    tags: ['jarvis', 'directives', 'memory', 'openrouter'],
-    wikilinks: ['Jarvis-Memory-Core', 'DeepSeek-R1', 'ChatGPT-o3', 'Claude-Code-Agent', 'OpenAI-Codex', 'Kimi-K1.5'],
-    updatedAt: '2026-08-24 12:45',
-    createdAt: '2026-08-21 14:20',
-    linkedModel: 'jarvis'
-  },
-  {
-    id: 'note-3',
-    title: 'Airbyte Data Pipeline & Vector Connectors',
-    path: 'Pipelines/Airbyte-ELT-Sync.md',
-    folder: 'Pipelines',
-    content: `# Airbyte Data Replication for Hermes\n\nAirbyte acts as the unified ELT engine feeding continuous unstructured and structured streams into Obsidian markdown vaults:\n- Sources: GitHub Repos, Postgres, Notion, Slack, Linear\n- Destination: Local Markdown / Vector Embeddings\n- Schedule: Every 15 minutes (Bot Mode active)\n\n#airbyte #elt #data-mesh #obsidian`,
-    tags: ['airbyte', 'elt', 'data-mesh'],
-    wikilinks: ['Hermes-Knowledge-Mesh', 'Obsidian-Knowledge-Graph'],
-    updatedAt: '2026-08-24 11:15',
-    createdAt: '2026-08-22 09:30',
-    linkedModel: 'antigravity'
-  }
-];
+// Four notes presented as files in the vault, each with a path, a body,
+// wikilinks and created/updated timestamps. None exists on disk. Real notes
+// come from the vault API; a note that is not in the vault must not be
+// rendered as one.
+export const INITIAL_NOTES: ObsidianNote[] = [];;
 
+// Task definitions kept; their live claims removed. All four shipped
+// `status: 'running'` with lastRun/nextRun times and actionsCount of 1420,
+// 834 and similar. No bot loop runs them.
 export const INITIAL_BOT_TASKS: BotTask[] = [
   {
     id: 'task-1',
@@ -1340,10 +1278,10 @@ export const INITIAL_BOT_TASKS: BotTask[] = [
     cron: '0 0 * * * (Midnight Daily)',
     model: 'Gemini 2.5 Flash',
     targetVaultNote: 'Daily-Syntheses/{{date}}.md',
-    status: 'running',
-    lastRun: '14 mins ago',
-    nextRun: 'in 46 mins',
-    actionsCount: 1420,
+    status: 'paused',
+    lastRun: 'NEVER',
+    nextRun: 'NEVER',
+    actionsCount: 0,
     description: 'Summarizes all active chat threads from ChatGPT, DeepSeek, Claude, and Kimi into Obsidian daily notes with bidirectional [[wikilinks]].'
   },
   {
@@ -1352,10 +1290,10 @@ export const INITIAL_BOT_TASKS: BotTask[] = [
     cron: '*/30 * * * * (Every 30m)',
     model: 'DeepSeek R1',
     targetVaultNote: 'Research-2026/arXiv-Trends.md',
-    status: 'running',
-    lastRun: '8 mins ago',
-    nextRun: 'in 22 mins',
-    actionsCount: 834,
+    status: 'paused',
+    lastRun: 'NEVER',
+    nextRun: 'NEVER',
+    actionsCount: 0,
     description: 'Fetches AI preprint papers, analyzes mathematical proofs, and writes structured synthesis notes with LaTeX formulas into Obsidian.'
   },
   {
@@ -1364,10 +1302,10 @@ export const INITIAL_BOT_TASKS: BotTask[] = [
     cron: 'on-git-push (Continuous Event)',
     model: 'Claude Code 3.7',
     targetVaultNote: 'DevLogs/PR-Automations.md',
-    status: 'running',
-    lastRun: '1 min ago',
-    nextRun: 'Listening...',
-    actionsCount: 294,
+    status: 'paused',
+    lastRun: 'NEVER',
+    nextRun: 'NEVER',
+    actionsCount: 0,
     description: 'Monitors repository changes, runs test harnesses, and logs diagnostics with resolution patches.'
   },
   {
@@ -1376,10 +1314,10 @@ export const INITIAL_BOT_TASKS: BotTask[] = [
     cron: '0 */4 * * * (Every 4h)',
     model: 'Perplexity Sonar',
     targetVaultNote: 'Intelligence/Market-Signals.md',
-    status: 'scheduled',
-    lastRun: '2 hours ago',
-    nextRun: 'in 2 hours',
-    actionsCount: 156,
+    status: 'paused',
+    lastRun: 'NEVER',
+    nextRun: 'NEVER',
+    actionsCount: 0,
     description: 'Crawls tech ecosystem news, verifies sources, and generates citation graphs for the Hermes knowledge graph.'
   }
 ];
@@ -2056,65 +1994,72 @@ export const INITIAL_IDEAS: IdeaItem[] = [
 // ==========================================
 // 4. SYSTEM AUDIT & DIAGNOSTICS INITIAL DATA
 // ==========================================
+// Six subsystems worth checking — the list is real and the product intent is
+// right. What was wrong is that every row shipped pre-answered: all six
+// `passed`, with invented latencies (78/112/12/45/24/8 ms) and invented HTTP
+// traces ("POST https://api.fish.audio/v1/tts HTTP/1.1 200 OK (78ms, 34.2KB
+// audio/mpeg)"), claims of "All 12 frontier models online", "0 orphan tasks,
+// 100% foreign key consistency", "28 notes indexed", "Parsed 142
+// bidirectional wikilinks ... clustering coefficient: 0.78" and "100%
+// interactive controls verified. Zero dead links". None of it was measured;
+// there is no diagnostic runner in this build. A diagnostics screen that
+// always reads green is worse than no diagnostics screen.
+//
+// The rows stay so the surface keeps its shape and a real runner has
+// somewhere to report into. Every one starts UNKNOWN.
 export const INITIAL_SYSTEM_AUDIT_CHECKS: SystemAuditCheck[] = [
   {
     id: 'audit-01',
     component: 'Fish Audio Neural TTS Voice Pipeline',
     category: 'audio_pipeline',
-    status: 'passed',
-    latencyMs: 78,
-    message: 'Voice ID 05b36da8574341d0803391491850db20 active with 150ms buffer and Web Audio fallback.',
-    lastTested: 'Just now',
-    traceLog: 'POST https://api.fish.audio/v1/tts HTTP/1.1 200 OK (78ms, 34.2KB audio/mpeg)'
+    status: 'unknown',
+    latencyMs: 0,
+    message: 'No automated check implemented. Voice pipeline health has not been measured.',
+    lastTested: 'NEVER',
   },
   {
     id: 'audit-02',
-    component: 'OpenRouter & Frontier Model Arbitration',
+    component: 'Model Provider Arbitration',
     category: 'model_latency',
-    status: 'passed',
-    latencyMs: 112,
-    message: 'All 12 frontier models online. Smart auto-routing active with sub-150ms handshake.',
-    lastTested: '1 min ago',
-    traceLog: 'Checked endpoints: nousresearch/hermes-3, anthropic/claude-3.7, deepseek/r1, google/gemini-3.7-flash'
+    status: 'unknown',
+    latencyMs: 0,
+    message: 'No automated check implemented. Provider state is reported on the Runtime screen, which reads real provider records.',
+    lastTested: 'NEVER',
   },
   {
     id: 'audit-03',
-    component: 'Kanban State Machine (board.db)',
+    component: 'Task State Machine',
     category: 'control_integrity',
-    status: 'passed',
-    latencyMs: 12,
-    message: 'All 6 lifecycle stages (Intake, Queued, In Progress, Review, Done, Blocked) synchronized.',
-    lastTested: 'Just now',
-    traceLog: 'board.db integrity check: 0 orphan tasks, 100% foreign key consistency on agent_roles'
+    status: 'unknown',
+    latencyMs: 0,
+    message: 'No automated check implemented. Task lifecycle integrity has not been measured.',
+    lastTested: 'NEVER',
   },
   {
     id: 'audit-04',
-    component: 'Telegram Thread Router Mesh (Channels 101-106)',
+    component: 'Telegram Thread Router',
     category: 'api_routing',
-    status: 'passed',
-    latencyMs: 45,
-    message: 'Zero routing crossover. All 6 specialist threads isolated and responding in sandbox.',
-    lastTested: '3 mins ago',
-    traceLog: 'Verified thread isolation: 101 (#orchestrator), 102 (#scout), 103 (#scribe), 104 (#reach), 105 (#dev), 106 (#analytics)'
+    status: 'unknown',
+    latencyMs: 0,
+    message: 'No automated check implemented, and no Telegram router is connected to this build.',
+    lastTested: 'NEVER',
   },
   {
     id: 'audit-05',
-    component: 'Obsidian Knowledge Graph & Wikilink Syncer',
+    component: 'Brain Index & Wikilink Graph',
     category: 'memory_vault',
-    status: 'passed',
-    latencyMs: 24,
-    message: '28 notes indexed across [[Startup-Theses]], [[Architecture]], and [[Financials]].',
-    lastTested: '5 mins ago',
-    traceLog: 'Parsed 142 bidirectional wikilinks. Graph diameter: 4 hops, average clustering coefficient: 0.78'
+    status: 'unknown',
+    latencyMs: 0,
+    message: 'No automated check implemented. Real note and edge counts are shown on the Brain screen.',
+    lastTested: 'NEVER',
   },
   {
     id: 'audit-06',
-    component: 'Interactive Controls & Button Integrity Monitor',
+    component: 'Interactive Control Integrity',
     category: 'control_integrity',
-    status: 'passed',
-    latencyMs: 8,
-    message: '100% interactive controls verified. Zero dead links, zero unhandled onClick promises.',
-    lastTested: 'Just now',
-    traceLog: 'Audited 48 buttons, 14 modal triggers, 8 filter chips, and 6 audio playback controls.'
+    status: 'unknown',
+    latencyMs: 0,
+    message: 'No automated check implemented. Control integrity is covered by the test suite, not by this screen.',
+    lastTested: 'NEVER',
   }
 ];

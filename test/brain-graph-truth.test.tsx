@@ -138,6 +138,51 @@ describe('the Brain graph renders rich graphics without inventing data', () => {
     expect(src).not.toMatch(/similarity|cosine|embedding/i);
   });
 
+  it('the footer counts what is on screen, never a hardcoded number', () => {
+    const src = fs.readFileSync(path.join(process.cwd(), 'src/components/ObsidianGraphMind.tsx'), 'utf8');
+    // No hardcoded engine total anywhere. The component's own comment about
+    // the removed literal is worded so as not to quote it — three earlier
+    // versions of this assertion failed against that documentation rather
+    // than against code, which is a test measuring prose.
+    expect(src).not.toMatch(/\d+ AI Engines/);
+    // Every footer figure is derived.
+    expect(src).toMatch(/\{notes\.length\} Notes/);
+    expect(src).toMatch(/\{vaults\.length\} Vaults/);
+    expect(src).toMatch(/initialNodes\.filter\(\(n\) => n\.type === 'model'\)\.length\} Model Nodes/);
+  });
+
+  it('renders the external source layer distinctly and counts it truthfully', async () => {
+    const sources = [
+      { vaultRelativePath: '10-context/voice.md', title: 'Voice', folder: '10-context', wikilinks: ['positioning'] },
+      { vaultRelativePath: '10-context/positioning.md', title: 'Positioning', folder: '10-context', wikilinks: [] },
+    ];
+    const edges = [{ source: '10-context/voice.md', target: '10-context/positioning.md' }];
+    render(
+      <ObsidianGraphMind
+        notes={ONE_REAL_NOTE}
+        vaults={VAULT}
+        models={MODELS}
+        externalSources={sources}
+        externalEdges={edges}
+        height={400}
+      />,
+    );
+    await waitFor(() => expect(document.querySelector('canvas')).toBeTruthy(), { timeout: 4000 });
+    const text = document.body.textContent || '';
+    // Counted, not asserted.
+    expect(text).toContain('2 External Sources');
+    expect(text).toContain('1 Wikilink Edges');
+    // And the knowledge count stays its own number.
+    expect(text).toContain('1 Notes');
+  });
+
+  it('with no external sources the layer is absent, not zero-padded', async () => {
+    render(<ObsidianGraphMind notes={ONE_REAL_NOTE} vaults={VAULT} models={MODELS} height={400} />);
+    await waitFor(() => expect(document.querySelector('canvas')).toBeTruthy(), { timeout: 4000 });
+    // Nothing claims "0 External Sources" — the layer simply is not there.
+    expect(document.body.textContent).not.toContain('External Sources');
+  });
+
   it('survives repeated mount/unmount without leaking an animation loop', async () => {
     for (let i = 0; i < 4; i += 1) {
       const { unmount } = render(<ObsidianGraphMind notes={ONE_REAL_NOTE} vaults={VAULT} models={MODELS} height={300} />);

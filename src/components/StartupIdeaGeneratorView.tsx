@@ -399,15 +399,20 @@ export const StartupIdeaGeneratorView: React.FC<StartupIdeaGeneratorViewProps> =
         title: newTitle,
         oneLineHook: `Autonomous multi-agent platform for ${keywordQuery.toLowerCase()} delivering 80%+ gross margins with local inference acceleration.`,
         domain: domainName,
-        viabilityScore: Math.floor(Math.random() * 8) + 91,
-        marketDemandScore: Math.floor(Math.random() * 6) + 93,
-        tokenEfficiencyScore: Math.floor(Math.random() * 8) + 91,
-        moatStrengthScore: Math.floor(Math.random() * 8) + 89,
-        tam: `$${(Math.random() * 4 + 3).toFixed(1)}B`,
-        sam: `$${(Math.random() * 400 + 600).toFixed(0)}M`,
-        som: `$${(Math.random() * 30 + 40).toFixed(0)}M`,
+        // These are template placeholders, and the surface says so in five
+        // places. They were RANDOMISED, which undercut that: a figure that
+        // changes on every generation reads as computed, and the ranges only
+        // ever produced flattering numbers (scores 89-99, margins 88-94%).
+        // Fixed placeholder values cannot be mistaken for a measurement.
+        viabilityScore: 0,
+        marketDemandScore: 0,
+        tokenEfficiencyScore: 0,
+        moatStrengthScore: 0,
+        tam: 'UNKNOWN',
+        sam: 'UNKNOWN',
+        som: 'UNKNOWN',
         pricing: '$49 - $249 / team / mo',
-        estimatedGrossMargin: `${(Math.random() * 6 + 88).toFixed(1)}%`,
+        estimatedGrossMargin: 'UNKNOWN',
         timeToMvp: '3-4 Weeks',
         summary: aiSynthesis ? aiSynthesis.slice(0, 350) + '...' : `Deep multi-agent scrape across Product Hunt, GitHub, and arXiv revealed high friction in ${keywordQuery.toLowerCase()}. By pairing local compute with Hermes model arbitration, teams can deploy resilient autonomous solutions without catastrophic cloud API expenses.`,
         problemStatement: `Enterprise teams and developers building in ${domainName} are blocked by high token burn, unstable cloud API latency, and lack of reproducible state persistence.`,
@@ -483,7 +488,7 @@ ${aiSynthesis || `Deep multi-agent scrape across Product Hunt, GitHub, and arXiv
 - **Competitor Landscape**: Incumbents lack lightweight local caching and deterministic state machines.
 
 ## 3. Financial Viability & Analytics Report
-- **TAM**: ${(Math.random() * 4 + 3).toFixed(1)} Billion
+- **TAM**: UNKNOWN (no market data source)
 - **Estimated Gross Margin**: 89%+
 - **Pricing Strategy**: $49 - $249 / team / mo
 - **Unit Economics**: Sub-$0.05 inference per unit with high capital efficiency.
@@ -938,10 +943,14 @@ ${aiSynthesis || `Deep multi-agent scrape across Product Hunt, GitHub, and arXiv
                   </div>
 
                   {/* Viability Badge */}
-                  <div className="flex items-center gap-1.5 bg-[#00D26A]/10 border border-[#00D26A]/40 px-3 py-1 rounded-xl">
-                    <TrendingUp className="w-3.5 h-3.5 text-[#00D26A]" />
-                    <span className="text-xs font-mono font-bold text-[#00D26A]">
-                      VIABILITY: {generatedIdea.viabilityScore}/100
+                  <div className={`flex items-center gap-1.5 px-3 py-1 rounded-xl border ${
+                    generatedIdea.viabilityScore > 0
+                      ? 'bg-[#00D26A]/10 border-[#00D26A]/40'
+                      : 'bg-[#7E8BB5]/10 border-[#7E8BB5]/40'
+                  }`}>
+                    <TrendingUp className={`w-3.5 h-3.5 ${generatedIdea.viabilityScore > 0 ? 'text-[#00D26A]' : 'text-[#7E8BB5]'}`} />
+                    <span className={`text-xs font-mono font-bold ${generatedIdea.viabilityScore > 0 ? 'text-[#00D26A]' : 'text-[#7E8BB5]'}`}>
+                      {generatedIdea.viabilityScore > 0 ? `VIABILITY: ${generatedIdea.viabilityScore}/100` : 'VIABILITY: UNKNOWN'}
                     </span>
                   </div>
                 </div>
@@ -959,18 +968,26 @@ ${aiSynthesis || `Deep multi-agent scrape across Product Hunt, GitHub, and arXiv
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 text-xs font-mono">
                   <div className="p-2.5 bg-[#05060C] border border-[#161828] rounded-xl">
                     <span className="text-[10px] text-[#6A7097] block">MARKET DEMAND</span>
-                    <span className="text-white font-bold text-sm">{generatedIdea.marketDemandScore}%</span>
-                    <div className="w-full bg-[#161828] h-1 rounded-full mt-1.5 overflow-hidden">
-                      <div className="bg-[#615EFF] h-full" style={{ width: `${generatedIdea.marketDemandScore}%` }} />
-                    </div>
+                    <span className={generatedIdea.marketDemandScore > 0 ? 'text-white font-bold text-sm' : 'text-[#7E8BB5] font-bold text-sm'}>
+                      {generatedIdea.marketDemandScore > 0 ? `${generatedIdea.marketDemandScore}%` : 'UNKNOWN'}
+                    </span>
+                    {generatedIdea.marketDemandScore > 0 && (
+                      <div className="w-full bg-[#161828] h-1 rounded-full mt-1.5 overflow-hidden">
+                        <div className="bg-[#615EFF] h-full" style={{ width: `${generatedIdea.marketDemandScore}%` }} />
+                      </div>
+                    )}
                   </div>
 
                   <div className="p-2.5 bg-[#05060C] border border-[#161828] rounded-xl">
                     <span className="text-[10px] text-[#6A7097] block">TOKEN EFFICIENCY</span>
-                    <span className="text-[#00D26A] font-bold text-sm">{generatedIdea.tokenEfficiencyScore}%</span>
-                    <div className="w-full bg-[#161828] h-1 rounded-full mt-1.5 overflow-hidden">
-                      <div className="bg-[#00D26A] h-full" style={{ width: `${generatedIdea.tokenEfficiencyScore}%` }} />
-                    </div>
+                    <span className={generatedIdea.tokenEfficiencyScore > 0 ? 'text-[#00D26A] font-bold text-sm' : 'text-[#7E8BB5] font-bold text-sm'}>
+                      {generatedIdea.tokenEfficiencyScore > 0 ? `${generatedIdea.tokenEfficiencyScore}%` : 'UNKNOWN'}
+                    </span>
+                    {generatedIdea.tokenEfficiencyScore > 0 && (
+                      <div className="w-full bg-[#161828] h-1 rounded-full mt-1.5 overflow-hidden">
+                        <div className="bg-[#00D26A] h-full" style={{ width: `${generatedIdea.tokenEfficiencyScore}%` }} />
+                      </div>
+                    )}
                   </div>
 
                   <div className="p-2.5 bg-[#05060C] border border-[#161828] rounded-xl">
@@ -1318,7 +1335,7 @@ ${aiSynthesis || `Deep multi-agent scrape across Product Hunt, GitHub, and arXiv
                   </h4>
                 </div>
                 <span className="text-[11px] font-mono text-[#00D26A] bg-[#00D26A]/10 px-2 py-0.5 rounded font-bold">
-                  {idea.viabilityScore}/100
+                  {idea.viabilityScore > 0 ? `${idea.viabilityScore}/100` : 'UNKNOWN'}
                 </span>
               </div>
 

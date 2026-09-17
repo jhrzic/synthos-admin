@@ -130,6 +130,32 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
 
   const [brainVault, setBrainVault] = useState<BrainVault | null>(null);
   const [brainNotesRaw, setBrainNotesRaw] = useState<BrainNote[]>([]);
+
+  // BRAIN SOURCES — the external vault layer. Fetched separately from the
+  // managed mesh, and kept in its own state, because the two are different
+  // CLASSES of thing: one is knowledge SynthOS wrote, the other is source
+  // material the operator wrote. Merging them into one array is precisely how
+  // "we retrieved it" would start to look like "we know it".
+  const [externalSources, setExternalSources] = useState<Array<{
+    vaultRelativePath: string; folder: string; title: string;
+    classification: string; admission: string; wikilinks: string[];
+    modifiedAt: string; sizeBytes: number; hasFrontmatter: boolean;
+    observedFields: Record<string, string>;
+  }> | null>(null);
+  const [externalEdges, setExternalEdges] = useState<Array<{ source: string; target: string }>>([]);
+  const [externalSummary, setExternalSummary] = useState<any>(null);
+  /**
+   * Whether the external index has been ASKED for yet.
+   *
+   * Without this, a null `externalSources` meant two different things — "we
+   * have not looked" and "we looked and could not read it" — and the filter
+   * label showed UNKNOWN for both. UNKNOWN is a claim about a failed read and
+   * must not be used for a read that never happened.
+   */
+  const [externalAttempted, setExternalAttempted] = useState(false);
+  const [selectedSourcePath, setSelectedSourcePath] = useState<string | null>(null);
+  /** Brain | External Sources | All. The smallest useful filter, per the brief. */
+  const [sourceFilter, setSourceFilter] = useState<'BRAIN' | 'EXTERNAL' | 'ALL'>('BRAIN');
   const [brainLoading, setBrainLoading] = useState(true);
   const [brainError, setBrainError] = useState<string | null>(null);
   const [selectedBrainPath, setSelectedBrainPath] = useState<string | null>(null);
@@ -159,6 +185,34 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
   }, [workspaceId]);
 
   useEffect(() => { fetchBrain(); }, [fetchBrain]);
+
+  /**
+   * Fetch the external source index.
+   *
+   * Only when the operator asks for it (filter is EXTERNAL or ALL). Indexing
+   * 154 notes is cheap, but fetching a layer nobody is looking at on every
+   * Brain mount is how a polling habit starts.
+   */
+  const fetchSources = useCallback(async () => {
+    if (sourceFilter === 'BRAIN') return;
+    setExternalAttempted(true);
+    try {
+      const res = await fetch(`/api/brain/sources?workspaceId=${encodeURIComponent(activeWorkspaceId || '')}&limit=400`);
+      const body = await res.json();
+      if (!res.ok || !body?.success) throw new Error(body?.error || `HTTP ${res.status}`);
+      setExternalSources(Array.isArray(body.sources) ? body.sources : []);
+      setExternalEdges(Array.isArray(body.graph?.edges) ? body.graph.edges : []);
+      setExternalSummary(body.summary ?? null);
+    } catch {
+      // UNKNOWN rather than an empty layer: "we could not read the vault" and
+      // "the vault has no external notes" are different facts.
+      setExternalSources(null);
+      setExternalEdges([]);
+      setExternalSummary(null);
+    }
+  }, [sourceFilter, activeWorkspaceId]);
+
+  useEffect(() => { fetchSources(); }, [fetchSources]);
 
   /** Real vault notes mapped onto the shape the graph already speaks. No field is invented. */
   const brainNotes = React.useMemo<ObsidianNote[]>(
@@ -350,6 +404,74 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
 
       {activeSection === 'mesh' && (
         <div className="space-y-6">
+          {/* BRAIN SOURCES / VAULT BOUNDARY.
+              The smallest useful filter, and it states the distinction rather
+              than hiding it behind a toggle label. Counts are real: the
+              external total comes from the live index, and the canonical count
+              from the managed mesh. */}
+          <div className="p-3 rounded-2xl border border-[#1E223D] bg-[#090A14] flex items-center gap-3 flex-wrap">
+            <span className="text-[9px] font-mono uppercase tracking-wider text-[#8E94B8]">SOURCE</span>
+            {([
+              ['BRAIN', 'BRAIN', `${brainNotesRaw.length}`, '#EC4899', 'Knowledge SynthOS wrote, under SynthOS/. Admitted.'],
+              ['EXTERNAL', 'EXTERNAL SOURCES', externalSources !== null ? `${externalSources.length}` : (externalAttempted ? 'UNKNOWN' : '—'), '#7E8BB5', 'Notes you wrote elsewhere in the vault. Read-only source material, NOT admitted knowledge.'],
+              ['ALL', 'ALL', externalSources !== null ? `${brainNotesRaw.length + externalSources.length}` : (externalAttempted ? 'UNKNOWN' : '—'), '#8C8AFF', 'Both classes, each visually distinct.'],
+            ] as const).map(([key, label, count, color, title]) => (
+              <button
+                key={key}
+                title={title}
+                onClick={() => setSourceFilter(key as 'BRAIN' | 'EXTERNAL' | 'ALL')}
+                className={`px-2.5 py-1.5 rounded-lg text-[9px] font-mono uppercase tracking-wider border transition-colors ${
+                  sourceFilter === key ? 'text-white' : 'text-[#8E94B8] hover:text-white'
+                }`}
+                style={sourceFilter === key
+                  ? { backgroundColor: `${color}22`, borderColor: `${color}66` }
+                  : { backgroundColor: '#0B0D1B', borderColor: '#1F2442' }}
+              >
+                {label} ({count})
+              </button>
+            ))}
+            <span className="text-[9px] font-mono text-[#665F85] ml-auto">
+              external vault content → observed source → reviewed/admitted → Brain knowledge
+            </span>
+          </div>
+
+          {sourceFilter !== 'BRAIN' && externalSummary && (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {([
+                ['External sources', externalSummary.total, '#7E8BB5'],
+                ['Wikilink edges', externalSummary.wikilinkEdges, '#8C8AFF'],
+                ['With frontmatter', externalSummary.withFrontmatter, '#7E8BB5'],
+                ['Auto-promoted', externalSummary.autoPromoted, '#00D26A'],
+              ] as const).map(([label, value, color]) => (
+                <div key={label} className="rounded-xl border border-[#1E223D] bg-[#090A14] px-3 py-2">
+                  <div className="text-[9px] font-mono uppercase tracking-wider text-[#8E94B8]">{label}</div>
+                  <div className="text-lg font-semibold mt-0.5" style={{ color }}>{value}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {sourceFilter !== 'BRAIN' && externalAttempted && externalSources === null && (
+            <div className="p-3 rounded-xl border border-[#EF4444]/30 bg-[#EF4444]/[.08] text-[11px] font-mono text-[#9C97B4]">
+              External vault sources could not be read — UNKNOWN. This is not the same as the vault having none.
+            </div>
+          )}
+
+          {selectedSourcePath && (
+            <div className="p-3 rounded-2xl border border-[#7E8BB5]/40 bg-[#7E8BB5]/[.06]">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="px-2 py-0.5 rounded-full text-[9px] font-mono uppercase tracking-wider text-[#7E8BB5] bg-[#7E8BB5]/15">
+                  EXTERNAL SOURCE · UNADMITTED
+                </span>
+                <span className="text-[11px] font-mono text-[#F1EFF9]">{selectedSourcePath}</span>
+                <button onClick={() => setSelectedSourcePath(null)} className="ml-auto text-[9px] font-mono uppercase tracking-wider text-[#8E94B8] hover:text-white">CLOSE</button>
+              </div>
+              <div className="text-[10px] font-mono text-[#8E94B8] mt-2 leading-relaxed">
+                Source material you wrote, read-only. SynthOS has observed it, not admitted it — it carries no
+                provenance SynthOS recorded and has not passed the KIL admission threshold. Informational, never authority.
+              </div>
+            </div>
+          )}
           {/* THE VAULT THE BRAIN IS ACTUALLY USING. Stated rather than
               implied: EXTERNAL is an Obsidian integration, LOCAL_FALLBACK is
               a development directory, and the difference decides whether any
@@ -444,9 +566,12 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
           ) : (
           /* Animated interactive wikilink graph — the restored design, real data */
           <ObsidianGraphMind
-            notes={brainNotes}
+            notes={sourceFilter === 'EXTERNAL' ? [] : brainNotes}
             vaults={brainVaults}
             models={models}
+            externalSources={sourceFilter === 'BRAIN' ? [] : (externalSources ?? [])}
+            externalEdges={sourceFilter === 'BRAIN' ? [] : externalEdges}
+            onSelectSource={(p) => setSelectedSourcePath(p)}
             selectedNoteId={selectedMeshNoteId || undefined}
             onSelectNote={(noteId) => setSelectedMeshNoteId(noteId)}
             onOpenNote={(noteId) => {
