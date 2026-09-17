@@ -25,13 +25,13 @@ export const TelegramChatView: React.FC<TelegramChatViewProps> = ({
   const [isSending, setIsSending] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
 
-  const channels: { role: AgentRole; name: string; threadId: number; icon: any; color: string; model: string }[] = [
-    { role: 'orchestrator', name: '#orchestrator-bridge', threadId: 101, icon: Crown, color: '#EC4899', model: 'Nous Hermes 3' },
-    { role: 'scout', name: '#scout-intel', threadId: 102, icon: Search, color: '#20B2AA', model: 'Perplexity Sonar' },
-    { role: 'scribe', name: '#scribe-notes', threadId: 103, icon: PenTool, color: '#8B5CF6', model: 'Claude Code 3.7' },
-    { role: 'reach', name: '#reach-growth', threadId: 104, icon: Share2, color: '#F59E0B', model: 'ChatGPT o3' },
-    { role: 'dev', name: '#dev-terminal', threadId: 105, icon: Code2, color: '#00D26A', model: 'Claude Code 3.7' },
-    { role: 'analytics', name: '#analytics-metrics', threadId: 106, icon: BarChart3, color: '#3B82F6', model: 'DeepSeek R1' },
+  const channels: { role: AgentRole; name: string; threadId: number; icon: any; color: string }[] = [
+    { role: 'orchestrator', name: '#orchestrator-bridge', threadId: 101, icon: Crown, color: '#EC4899' },
+    { role: 'scout', name: '#scout-intel', threadId: 102, icon: Search, color: '#20B2AA' },
+    { role: 'scribe', name: '#scribe-notes', threadId: 103, icon: PenTool, color: '#8B5CF6' },
+    { role: 'reach', name: '#reach-growth', threadId: 104, icon: Share2, color: '#F59E0B' },
+    { role: 'dev', name: '#dev-terminal', threadId: 105, icon: Code2, color: '#00D26A' },
+    { role: 'analytics', name: '#analytics-metrics', threadId: 106, icon: BarChart3, color: '#3B82F6' },
   ];
 
   const currentChannel = channels.find(c => c.role === activeRole) || channels[0];
@@ -56,8 +56,16 @@ export const TelegramChatView: React.FC<TelegramChatViewProps> = ({
     }
   };
 
+  // This asserted "Routing Plugin Verified ... securely isolated ... Zero
+  // cross-talk or Orchestrator bleeding detected" without performing a
+  // single check. There is no Telegram transport in this build and no
+  // routing plugin to verify, so there was nothing it could have tested.
   const handleRunRoutingTest = () => {
-    setTestResult(`Routing Plugin Verified: Thread ID ${currentChannel.threadId} securely isolated to [${currentAgent.name}]. Zero cross-talk or Orchestrator bleeding detected.`);
+    setTestResult(
+      'NOT_IMPLEMENTED — no Telegram transport is configured, so thread routing cannot be verified. '
+      + 'Nothing was tested and no isolation claim is made. These channels are in-app threads held in '
+      + 'this page; no message leaves SynthOS.',
+    );
   };
 
   return (
@@ -69,15 +77,17 @@ export const TelegramChatView: React.FC<TelegramChatViewProps> = ({
             <span className="airbyte-badge">
               HERMES TELEGRAM ROUTING MESH • PART 04
             </span>
-            <span className="text-[10px] font-mono text-[#00D26A] bg-[#00D26A]/10 px-2 py-0.5 rounded border border-[#00D26A]/30">
-              6 ISOLATED THREADS
+            <span className="text-[10px] font-mono text-[#7E8BB5] bg-[#7E8BB5]/10 px-2 py-0.5 rounded border border-[#7E8BB5]/30">
+              TELEGRAM NOT CONFIGURED
             </span>
           </div>
           <h2 className="text-2xl font-bold text-white font-['Space_Grotesk']">
             Telegram Swarm Bridge & Multi-Agent Router
           </h2>
           <p className="text-xs text-[#8E94B8]">
-            One dedicated Telegram thread per specialist agent. Messages routed dynamically based on thread_id with isolated workspaces and zero context bleeding.
+            One conversation per specialist agent, one intended Telegram thread each. No Telegram
+            transport is implemented in this build, so these are in-app threads only — nothing is routed
+            to Telegram and no message leaves SynthOS.
           </p>
         </div>
 
@@ -145,7 +155,7 @@ export const TelegramChatView: React.FC<TelegramChatViewProps> = ({
                       </div>
                       <div className="truncate">
                         <div className="font-semibold font-mono truncate text-white">{c.name}</div>
-                        <div className="text-[10px] text-[#5D6388] font-mono">{c.model}</div>
+                        <div className="text-[10px] text-[#5D6388] font-mono">{agents[c.role]?.assignedModel || 'UNKNOWN'}</div>
                       </div>
                     </div>
 
@@ -192,7 +202,7 @@ export const TelegramChatView: React.FC<TelegramChatViewProps> = ({
                   </span>
                 </div>
                 <p className="text-[11px] text-[#7B82A8]">
-                  Assigned Agent: <strong className="text-white">{currentAgent.name}</strong> • Engine: <span className="text-[#615EFF] font-mono">{currentChannel.model}</span>
+                  Assigned Agent: <strong className="text-white">{currentAgent.name}</strong> • Engine: <span className="text-[#615EFF] font-mono">{currentAgent?.assignedModel || 'UNKNOWN'}</span>
                 </p>
               </div>
             </div>
@@ -236,7 +246,8 @@ export const TelegramChatView: React.FC<TelegramChatViewProps> = ({
                       <span>{msg.timestamp}</span>
                       {msg.modelUsed && (
                         <span className="text-[#8E94B8] bg-[#121426] px-1.5 py-0.2 rounded border border-[#1F223B]">
-                          {msg.modelUsed} ({msg.tokensUsed || 180} tok)
+                          {msg.modelUsed}
+                          {typeof msg.tokensUsed === 'number' ? ` (${msg.tokensUsed} tok)` : ''}
                         </span>
                       )}
                     </div>
@@ -266,7 +277,7 @@ export const TelegramChatView: React.FC<TelegramChatViewProps> = ({
                 </div>
                 <div className="p-4 rounded-2xl text-xs font-mono bg-[#0E1020] border border-[#1D213E] text-[#615EFF] flex items-center gap-3">
                   <span className="w-2 h-2 rounded-full bg-[#615EFF] animate-ping" />
-                  <span>Synthesizing response via {currentChannel.model}...</span>
+                  <span>Synthesizing response via {currentAgent?.assignedModel || 'the assigned model'}...</span>
                 </div>
               </div>
             )}

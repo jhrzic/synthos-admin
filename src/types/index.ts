@@ -341,14 +341,25 @@ export interface KanbanSubtask {
   completed: boolean;
 }
 
-export type KanbanColumnId = 
-  | 'triage'
-  | 'todo'
-  | 'ready'
-  | 'running'
-  | 'blocked'
-  | 'review'
-  | 'done';
+/**
+ * The canonical board stages, as a runtime value. This is the single source
+ * of truth: `KanbanColumnId` is DERIVED from it, so the union and the list
+ * cannot drift apart, and anything that wants to state how many stages the
+ * board has counts this instead of hardcoding a number.
+ *
+ * The sidebar used to claim '6 Stg' while the board had seven.
+ */
+export const KANBAN_COLUMN_IDS = [
+  'triage',
+  'todo',
+  'ready',
+  'running',
+  'blocked',
+  'review',
+  'done',
+] as const;
+
+export type KanbanColumnId = typeof KANBAN_COLUMN_IDS[number];
 
 export interface KanbanTask {
   id: string;

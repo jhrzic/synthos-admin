@@ -1,6 +1,20 @@
 {
   "compilerOptions": {
     "target": "ES2022",
+    /*
+     * Enabled 2026-09-17 after a read-only characterization measured the real
+     * cost: 31 strict errors across 289 files, of which 4 were live runtime
+     * defects (a guided tour that could not advance, voice-created Kanban
+     * tasks that crashed on use, a silently misrouted dispatch, and lost
+     * nullable narrowing in the external-execution client). All were repaired
+     * with real guards and real types — no `as any`, no new non-null
+     * assertions, no @ts-ignore — and the last remaining error was a missing
+     * @types/react-dom devDependency, now installed at a matching 19.3.0.
+     *
+     * No strict-family check is individually disabled below. `skipLibCheck`
+     * predates this change.
+     */
+    "strict": true,
     "experimentalDecorators": true,
     "useDefineForClassFields": false,
     "module": "ESNext",

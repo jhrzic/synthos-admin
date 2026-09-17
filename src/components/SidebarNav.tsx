@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ActiveTab, AIModelInfo, AgentInfo } from '../types';
+import { ActiveTab, AIModelInfo, AgentInfo, KANBAN_COLUMN_IDS } from '../types';
 import { 
   LayoutDashboard, Layers, GitMerge, Database, Globe, Sliders, 
   ChevronLeft, ChevronRight, ChevronDown, Menu, Kanban, Activity, Bot, 
@@ -132,7 +132,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
       category: 'OPERATIONS',
       items: [
         { id: 'overview' as ActiveTab, label: 'Overview', icon: LayoutDashboard, color: '#A5A2FF' },
-        { id: 'kanban' as ActiveTab, label: 'Kanban', icon: Kanban, color: '#00D26A' },
+        { id: 'kanban' as ActiveTab, label: 'Kanban', icon: Kanban, badge: `${KANBAN_COLUMN_IDS.length} Stg`, color: '#00D26A' },
         { id: 'graph-runs' as ActiveTab, label: 'Active Runs', icon: Activity, color: '#EC4899' },
         { id: 'agent-fleet' as ActiveTab, label: 'Agent Fleet', icon: Bot, color: '#EAB308' },
         { id: 'guardian-aegis' as ActiveTab, label: 'Approvals', icon: ShieldCheck, color: '#F59E0B' },

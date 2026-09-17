@@ -148,3 +148,61 @@ describe('the Kanban task invariant holds for callers that omit subtasks', () =>
     }
   });
 });
+
+describe('no surface claims a Telegram transport this build does not have', () => {
+  // There is no Telegram transport anywhere in this build: nothing calls
+  // api.telegram.org, and App's handler appends to in-app agent threads and
+  // asks a model to reply. Three surfaces claimed otherwise.
+  it('the routing test refuses instead of reporting isolation it never checked', async () => {
+    const { TelegramChatView } = await import('../src/components/TelegramChatView');
+    render(
+      <TelegramChatView
+        agents={{ orchestrator: { name: 'Orchestrator', assignedModel: 'hermes' } } as any}
+        messages={{} as any}
+        onSendMessage={async () => {}}
+        onResetChannel={() => {}}
+      />,
+    );
+    // The header must not advertise live threads.
+    expect(document.body.textContent).toContain('TELEGRAM NOT CONFIGURED');
+    expect(document.body.textContent).not.toContain('6 ISOLATED THREADS');
+
+    fireEvent.click(screen.getByText('Verify Thread Routing'));
+    const text = document.body.textContent || '';
+    expect(text).toContain('NOT_IMPLEMENTED');
+    // It used to assert verified isolation with no check performed.
+    expect(text).not.toContain('Routing Plugin Verified');
+    expect(text).not.toContain('Zero cross-talk');
+  });
+
+  it('shows the engine the agent is actually assigned, not a per-channel label', async () => {
+    const { TelegramChatView } = await import('../src/components/TelegramChatView');
+    render(
+      <TelegramChatView
+        agents={{ orchestrator: { name: 'Orchestrator', assignedModel: 'hermes' } } as any}
+        messages={{} as any}
+        onSendMessage={async () => {}}
+        onResetChannel={() => {}}
+      />,
+    );
+    const text = document.body.textContent || '';
+    // Engines this build cannot dispatch were printed as each channel's model.
+    for (const fake of ['Perplexity Sonar', 'ChatGPT o3', 'DeepSeek R1', 'Claude Code 3.7']) {
+      expect(text, fake).not.toContain(fake);
+    }
+    // An agent with no assignment reads UNKNOWN rather than a borrowed label.
+    expect(text).toContain('UNKNOWN');
+  });
+});
+
+describe('the Kanban stage count is counted, not asserted', () => {
+  it('derives from the canonical column list', async () => {
+    const { KANBAN_COLUMN_IDS } = await import('../src/types');
+    const { KANBAN_COLUMNS } = await import('../src/components/KanbanView');
+    // One source of truth: the id union is derived from this list, and the
+    // board's own column definitions must cover exactly it. The sidebar
+    // claimed '6 Stg' while the board had seven.
+    expect(KANBAN_COLUMNS.map((c) => c.id).sort()).toEqual([...KANBAN_COLUMN_IDS].sort());
+    expect(KANBAN_COLUMN_IDS.length).toBe(7);
+  });
+});

@@ -585,7 +585,9 @@ ${aiSynthesis || `Deep multi-agent scrape across Product Hunt, GitHub, and arXiv
       `/metrics Illustrative unit-economics placeholders drafted for "${generatedIdea.title}": ${generatedIdea.estimatedGrossMargin} gross margin, ${generatedIdea.analyticsViability.ltvCac} LTV:CAC — template values, not validated data.`
     );
 
-    setKanbanSuccessToast(`Notified #scout-intel and #analytics-metrics Telegram threads!`);
+    // No Telegram transport exists in this build — App's handler appends to
+    // the in-app agent threads and asks a model to reply. Nothing is notified.
+    setKanbanSuccessToast('Queued to the in-app Scout and Analytics threads. No Telegram transport is configured, so nothing was sent.');
     setTimeout(() => setKanbanSuccessToast(null), 4000);
   };
 
