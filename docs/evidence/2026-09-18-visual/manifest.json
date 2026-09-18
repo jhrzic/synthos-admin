@@ -1,0 +1,561 @@
+{
+  "generatedAt": "2026-09-18T19:58:51.810Z",
+  "data": "SYNTHETIC",
+  "server": "server.ts (scheduler disabled, no provider credentials)",
+  "browser": "Google Chrome (headless) via playwright-core",
+  "results": [
+    {
+      "viewport": "desktop",
+      "screen": "tasks",
+      "file": "desktop-tasks.jpg",
+      "checks": {
+        "stages": 4,
+        "cards": 5,
+        "banner": "CONNECTED",
+        "railVisible": true
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "desktop",
+      "screen": "task-detail-reconciliation",
+      "file": "desktop-task-detail-reconciliation.jpg",
+      "checks": {
+        "guide": "2026-09-17T20:48:27.969Z → ~2026-09-17T20:50:00.000Z",
+        "submitDisabled": true
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "desktop",
+      "screen": "agents",
+      "file": "desktop-agents.jpg",
+      "checks": {
+        "agents": 3
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "desktop",
+      "screen": "agent-detail",
+      "file": "desktop-agent-detail.jpg",
+      "checks": {
+        "fields": true
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "desktop",
+      "screen": "skills",
+      "file": "desktop-skills.jpg",
+      "checks": {
+        "empty": "NONE_INSTALLED"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "desktop",
+      "screen": "model-registry",
+      "file": "desktop-model-registry.jpg",
+      "checks": {
+        "routes": 65,
+        "error": 0
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "desktop",
+      "screen": "router",
+      "file": "desktop-router.jpg",
+      "checks": {
+        "text": "CANONICAL MODEL ROUTER · QUALIFIED ROUTES ONLY · NO SILENT FALLBACKNO ROUTES QUA"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "desktop",
+      "screen": "vault",
+      "file": "desktop-vault.jpg",
+      "checks": {
+        "motion": "animating"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "desktop",
+      "screen": "vault-reduced-motion",
+      "file": "desktop-vault-reduced-motion.jpg",
+      "checks": {
+        "motion": "reduced-motion"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "desktop",
+      "screen": "diagnostics",
+      "file": "desktop-diagnostics.jpg",
+      "checks": {
+        "version": "deployment visual verification (synthetic data) · environment test"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "desktop",
+      "screen": "queue-review-reconciliation",
+      "file": "desktop-queue-review-reconciliation.jpg",
+      "checks": {
+        "form": 1,
+        "guide": "2026-09-17T20:48:27.969Z → ~2026-09-17T20:50:00.000Z"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "desktop",
+      "screen": "command-palette",
+      "file": "desktop-command-palette.jpg",
+      "checks": {
+        "models": 1
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "desktop",
+      "screen": "control-plane-unreachable",
+      "file": "desktop-control-plane-unreachable.jpg",
+      "checks": {
+        "panel": 1,
+        "banner": "CONTROL PLANE UNREACHABLE",
+        "taskCards": 0
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+      ],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "tablet",
+      "screen": "tasks",
+      "file": "tablet-tasks.jpg",
+      "checks": {
+        "stages": 4,
+        "cards": 5,
+        "banner": "CONNECTED",
+        "railVisible": true
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "tablet",
+      "screen": "task-detail-reconciliation",
+      "file": "tablet-task-detail-reconciliation.jpg",
+      "checks": {
+        "guide": "2026-09-17T20:48:27.969Z → ~2026-09-17T20:50:00.000Z",
+        "submitDisabled": true
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "tablet",
+      "screen": "agents",
+      "file": "tablet-agents.jpg",
+      "checks": {
+        "agents": 3
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "tablet",
+      "screen": "agent-detail",
+      "file": "tablet-agent-detail.jpg",
+      "checks": {
+        "fields": true
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "tablet",
+      "screen": "skills",
+      "file": "tablet-skills.jpg",
+      "checks": {
+        "empty": "NONE_INSTALLED"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "tablet",
+      "screen": "model-registry",
+      "file": "tablet-model-registry.jpg",
+      "checks": {
+        "routes": 65,
+        "error": 0
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "tablet",
+      "screen": "router",
+      "file": "tablet-router.jpg",
+      "checks": {
+        "text": "CANONICAL MODEL ROUTER · QUALIFIED ROUTES ONLY · NO SILENT FALLBACKCOUNTS UNKNOW"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "tablet",
+      "screen": "vault",
+      "file": "tablet-vault.jpg",
+      "checks": {
+        "motion": "animating"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "tablet",
+      "screen": "vault-reduced-motion",
+      "file": "tablet-vault-reduced-motion.jpg",
+      "checks": {
+        "motion": "reduced-motion"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "tablet",
+      "screen": "diagnostics",
+      "file": "tablet-diagnostics.jpg",
+      "checks": {
+        "version": "deployment visual verification (synthetic data) · environment test"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "tablet",
+      "screen": "queue-review-reconciliation",
+      "file": "tablet-queue-review-reconciliation.jpg",
+      "checks": {
+        "form": 1,
+        "guide": "2026-09-17T20:48:27.969Z → ~2026-09-17T20:50:00.000Z"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "tablet",
+      "screen": "command-palette",
+      "file": "tablet-command-palette.jpg",
+      "checks": {
+        "models": 1
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "tablet",
+      "screen": "mobile-drawer",
+      "file": "tablet-mobile-drawer.jpg",
+      "checks": {
+        "layout": {
+          "innerWidth": 834,
+          "scrollWidth": 834,
+          "visualScale": 1,
+          "widest": [
+            "div. right=834 w=834",
+            "div. right=834 w=834",
+            "div.fixed top-2 right-2 z-[999] max-w-[calc(100vw-1rem)] flex items-center right=826 w=482",
+            "span.text-white font-bold truncate min-w-0 right=447 w=90",
+            "span.text-[#5F6589] hidden sm:inline truncate min-w-0 right=665 w=210",
+            "span.px-1.5 py-0.5 rounded bg-[#615EFF]/20 text-[#A5A2FF] font-bold hidden  right=769 w=96",
+            "button.text-[#FF5E8E] hover:underline cursor-pointer right=813 w=36",
+            "div.min-h-screen bg-[#08090b] text-[#f7f8f8] flex flex-col selection:bg-[# right=834 w=834"
+          ]
+        },
+        "elementUnderButton": null,
+        "tapped": false,
+        "tapError": "\u001b[2m    2 × waiting for element to be visible, enabled and stable\u001b[22m | \u001b[2m      - element is not visible\u001b[22m | \u001b[2m    2 × waiting for element to be visible, enabled and stable\u001b[22m",
+        "drawerOnScreen": true,
+        "items": 38
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "tablet",
+      "screen": "control-plane-unreachable",
+      "file": "tablet-control-plane-unreachable.jpg",
+      "checks": {
+        "panel": 1,
+        "banner": "CONTROL PLANE UNREACHABLE",
+        "taskCards": 0
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+      ],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "mobile",
+      "screen": "tasks",
+      "file": "mobile-tasks.jpg",
+      "checks": {
+        "stages": 0,
+        "cards": 0,
+        "banner": "CHECKING",
+        "railVisible": false
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "mobile",
+      "screen": "task-detail-reconciliation",
+      "file": "mobile-task-detail-reconciliation.jpg",
+      "checks": {
+        "guide": "2026-09-17T20:48:27.969Z → ~2026-09-17T20:50:00.000Z",
+        "submitDisabled": true
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "mobile",
+      "screen": "agents",
+      "file": "mobile-agents.jpg",
+      "checks": {
+        "agents": 3
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "mobile",
+      "screen": "agent-detail",
+      "file": "mobile-agent-detail.jpg",
+      "checks": {
+        "fields": true
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "mobile",
+      "screen": "skills",
+      "file": "mobile-skills.jpg",
+      "checks": {
+        "empty": "NONE_INSTALLED"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "mobile",
+      "screen": "model-registry",
+      "file": "mobile-model-registry.jpg",
+      "checks": {
+        "routes": 65,
+        "error": 0
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "mobile",
+      "screen": "router",
+      "file": "mobile-router.jpg",
+      "checks": {
+        "text": "CANONICAL MODEL ROUTER · QUALIFIED ROUTES ONLY · NO SILENT FALLBACKNO ROUTES QUA"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "mobile",
+      "screen": "vault",
+      "file": "mobile-vault.jpg",
+      "checks": {
+        "motion": "animating"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "mobile",
+      "screen": "vault-reduced-motion",
+      "file": "mobile-vault-reduced-motion.jpg",
+      "checks": {
+        "motion": "reduced-motion"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "mobile",
+      "screen": "diagnostics",
+      "file": "mobile-diagnostics.jpg",
+      "checks": {
+        "version": "deployment visual verification (synthetic data) · environment test"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "mobile",
+      "screen": "queue-review-reconciliation",
+      "file": "mobile-queue-review-reconciliation.jpg",
+      "checks": {
+        "form": 1,
+        "guide": "2026-09-17T20:48:27.969Z → ~2026-09-17T20:50:00.000Z"
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "mobile",
+      "screen": "command-palette",
+      "file": "mobile-command-palette.jpg",
+      "checks": {
+        "models": 1
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "mobile",
+      "screen": "mobile-drawer",
+      "file": "mobile-mobile-drawer.jpg",
+      "checks": {
+        "layout": {
+          "innerWidth": 390,
+          "scrollWidth": 390,
+          "visualScale": 1,
+          "widest": [
+            "button.px-2.5 py-1 rounded-lg font-mono text-[10px] uppercase transition curs right=401 w=56"
+          ]
+        },
+        "elementUnderButton": "path.[object SVGAnimatedString]",
+        "tapped": true,
+        "tapError": null,
+        "drawerOnScreen": true,
+        "items": 38
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "externalOrigins": []
+    },
+    {
+      "viewport": "mobile",
+      "screen": "control-plane-unreachable",
+      "file": "mobile-control-plane-unreachable.jpg",
+      "checks": {
+        "panel": 1,
+        "banner": "CONTROL PLANE UNREACHABLE",
+        "taskCards": 0
+      },
+      "horizontalOverflow": false,
+      "consoleErrors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+      ],
+      "failedRequests": [],
+      "externalOrigins": []
+    }
+  ]
+}

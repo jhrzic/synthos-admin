@@ -34,7 +34,7 @@ describe('canonical navigation definition', () => {
       expect(found, `${label} → ${tab}`).toHaveLength(1);
       expect(found[0].label).toBe(label);
     }
-    expect(NESTED_ROUTES).toContainEqual(expect.objectContaining({ key: 'agent-detail', parentKey: 'agents', prefix: 'agent-' }));
+    expect(NESTED_ROUTES).toContainEqual(expect.objectContaining({ key: 'agent-detail', parentKey: 'agents', tab: 'agent-fleet', pathPrefix: 'agents/' }));
     expect(destinationForTab('agent-scout')?.key).toBe('agents');
     expect(NAV_DESTINATIONS.filter((d) => d.group === 'AGENTS').map((d) => d.label)).toEqual(['Agent Registry', 'Skills', 'Tools', 'Model Registry', 'Model Router']);
   });
@@ -78,9 +78,10 @@ describe('rendered tabs agree with App.tsx in both directions', () => {
     }
   });
 
-  it('agent detail deep links exist exactly for the agents that have a definition', () => {
-    const defined = Object.values(AGENT_DEFINITIONS).map((a) => a.tabKey).sort();
-    expect([...AGENT_DETAIL_TABS].sort()).toEqual(defined);
+  it('no hardcoded agent persona is navigable: agent detail is recorded facts at #/agents/<role>', () => {
+    expect([...AGENT_DETAIL_TABS]).toEqual([]);
+    for (const a of Object.values(AGENT_DEFINITIONS)) expect(RENDERED_TABS.has(a.tabKey), a.tabKey).toBe(false);
+    expect(NAV_DESTINATIONS.filter((d) => d.group === 'WORKSPACES').map((d) => d.key)).toEqual(['ws-hermes']);
   });
 });
 
@@ -88,7 +89,7 @@ describe('active state, deep links and compatibility', () => {
   const rail = (tab: string) => NAV_DESTINATIONS.filter((d) => isDestinationActive(d, tab)).map((d) => d.key);
   it('exactly one rail entry is active for nested and legacy tabs', () => {
     expect(rail('agent-scout')).toEqual(['agents']);
-    expect(rail('agent-claude')).toEqual(['ws-claude']);
+    expect(rail('agent-claude')).toEqual(['agents']); // legacy persona tab → redirected to Agent Registry
     expect(rail('hermes-agents')).toEqual(['agents']);
     expect(rail('hermes-skills')).toEqual(['skills']);
     expect(rail('hermes-logs')).toEqual(['activity']);
@@ -96,13 +97,15 @@ describe('active state, deep links and compatibility', () => {
     expect(rail('master-admin')).toEqual(['diagnostics']);
     expect(rail('model-registry')).toEqual(['models']);
     for (const t of RENDERED_TABS) expect(rail(t).length, t).toBeLessThanOrEqual(1);
+    expect(APP).toContain('if (tabForHash(window.location.hash, RENDERED_TABS) === activeTab) return;');
   });
 
   it('every destination round-trips through its hash; agent detail and raw tab ids resolve; unknown hashes do not', () => {
     for (const d of NAV_DESTINATIONS) expect(tabForHash(hashForTab(d.tabId), RENDERED_TABS)).toBe(d.tabId);
-    expect(hashForTab('agent-scout')).toBe('#/agents/scout');
-    expect(tabForHash('#/agents/scout', RENDERED_TABS)).toBe('agent-scout');
-    expect(tabForHash('#/agents/writer', RENDERED_TABS)).toBeNull(); // placeholder agent: not navigable
+    expect(tabForHash('#/agents/scribe', RENDERED_TABS)).toBe('agent-fleet'); // Agent Detail = registry + selected role
+    expect(tabForHash('#/agents/aeo-auditor', RENDERED_TABS)).toBe('agent-fleet');
+    expect(tabForHash('#/agents/..%2Fx', RENDERED_TABS)).toBeNull();
+    expect(tabForHash('#/agent-scout', RENDERED_TABS)).toBeNull(); // persona tab ids are no longer rendered
     expect(tabForHash('#/receipts', RENDERED_TABS)).toBe('receipts');
     expect(tabForHash('#/skill-registry', RENDERED_TABS)).toBe('skill-registry'); // raw tab id still works
     expect(tabForHash('#/no-such-page', RENDERED_TABS)).toBeNull();

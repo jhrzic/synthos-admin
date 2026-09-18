@@ -238,6 +238,7 @@ describe('Pass III API security: the explicit public allowlist (E2) — never ac
       '/api/auth/setup-token/:token', '/api/auth/setup-token/:token/complete',
       '/api/skills/discover',
       '/health', '/api/ready', // Pass VII — liveness/readiness, public by design (B1/B2): an orchestrator has no session
+      '/api/authority', // control-plane identity for the authority banner: no data, no paths, no secrets (lib/control-plane-authority.ts)
       // Business Conversation AI — the customer-facing surface. Public by
       // design (a business's customer has no SynthOS account) and covered by
       // its own dedicated test above, which asserts the narrower controls that
@@ -283,11 +284,14 @@ describe('Pass III: CSRF defense-in-depth is wired globally', () => {
 });
 
 describe('Pass III: session cookie security attributes', () => {
-  it('the session cookie is HttpOnly, SameSite=Lax, and Secure conditional on production', () => {
+  it('the session cookie is HttpOnly, SameSite=Lax, and Secure over TLS and in production (except direct loopback http)', () => {
     const cookieFn = serverContent.slice(serverContent.indexOf('function setSessionCookie'), serverContent.indexOf('function clearSessionCookie'));
     expect(cookieFn).toContain('httpOnly: true');
     expect(cookieFn).toContain('sameSite: "lax"');
-    expect(cookieFn).toContain('secure: isProdEnv');
+    expect(cookieFn).toContain('secure: cookieSecure(res.req)');
+    const rule = serverContent.slice(serverContent.indexOf('const cookieSecure ='), serverContent.indexOf('function setSessionCookie'));
+    expect(rule).toContain('if (req?.secure === true) return true;');
+    expect(rule).toContain('return isProdEnv && !loopbackHttp;');
   });
 });
 

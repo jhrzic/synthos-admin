@@ -7,6 +7,9 @@ import crypto from "node:crypto";
 import { exec, spawn } from "child_process";
 import { createServer as createViteServer } from "vite";
 import { devAssetGuard } from "./lib/http/dev-asset-guard";
+import { CONTROL_PLANE_AUTHORITY } from "./lib/control-plane-authority";
+import { listBoardTasks } from "./lib/task-board";
+import { listObservedAgents, NOT_RECORDED_FIELDS } from "./lib/agent-roster";
 import dotenv from "dotenv";
 import { 
   createInitialTask, 
@@ -435,18 +438,28 @@ async function startServer() {
   const isProdEnv = process.env.NODE_ENV === "production";
   const SESSION_COOKIE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 14; // 14 days, matches lib/auth.ts SESSION_TTL_MS
 
+  // Secure whenever the request arrived over TLS (the admin.getsynthos.com
+  // gateway; trust proxy makes req.secure reflect X-Forwarded-Proto), and in
+  // production except for direct plain-HTTP loopback access on the operator's
+  // machine (http://127.0.0.1), where a Secure cookie would not be stored.
+  const cookieSecure = (req: express.Request | undefined): boolean => {
+    if (req?.secure === true) return true;
+    const loopbackHttp = !!req && ["127.0.0.1", "localhost", "::1"].includes(req.hostname);
+    return isProdEnv && !loopbackHttp;
+  };
+
   function setSessionCookie(res: express.Response, rawToken: string) {
     res.cookie(SESSION_COOKIE_NAME, rawToken, {
       httpOnly: true,
       sameSite: "lax",
-      secure: isProdEnv,
+      secure: cookieSecure(res.req),
       maxAge: SESSION_COOKIE_MAX_AGE_MS,
       path: "/",
     });
   }
 
   function clearSessionCookie(res: express.Response) {
-    res.clearCookie(SESSION_COOKIE_NAME, { httpOnly: true, sameSite: "lax", secure: isProdEnv, path: "/" });
+    res.clearCookie(SESSION_COOKIE_NAME, { httpOnly: true, sameSite: "lax", secure: cookieSecure(res.req), path: "/" });
   }
 
   // ==========================================
@@ -6618,6 +6631,30 @@ Rules for spokenSummary specifically:
   // Reuses the same real getRuntimeStatus()/env-readiness evidence the
   // Master Admin Runtime tab and startup log use — one source of truth,
   // never a second hand-rolled check that could drift from it.
+  // AUTHORITY IDENTITY — which control plane this is and how the caller
+  // reached it. Public like /api/ready (no data, no paths, no secrets): the
+  // Admin's authority banner reads it, and the gateway page links to it.
+  app.get("/api/authority", (req, res) => {
+    const version = readBuildInfo();
+    const schema = runtimeVersionReport(getDatabase(), SCHEMA_VERSION).databaseSchema;
+    const viaGateway = typeof req.headers["x-synthos-gateway"] === "string" && req.headers["x-synthos-gateway"] !== "";
+    res.setHeader("Cache-Control", "no-store");
+    return res.json({
+      success: true,
+      authority: CONTROL_PLANE_AUTHORITY,
+      controlPlane: {
+        role: CONTROL_PLANE_AUTHORITY.role,
+        deployment: version.deployment,
+        environment: version.environment,
+        commit: version.commit,
+        tree: version.tree,
+        database: { name: path.basename(getDatabasePath()), schemaVersion: schema.version, supported: schema.supported, fingerprint: schema.fingerprint },
+      },
+      access: viaGateway ? { path: "GATEWAY", gateway: String(req.headers["x-synthos-gateway"]).slice(0, 80) } : { path: "DIRECT" },
+      verifiedAt: new Date().toISOString(),
+    });
+  });
+
   app.get("/api/ready", async (_req, res) => {
     try {
       const envReport = buildEnvReadinessReport();
@@ -7102,6 +7139,20 @@ Rules for spokenSummary specifically:
       providerResponseId: b.providerResponseId ?? null, usage: b.usage ?? null, correctsEventId: b.correctsEventId ?? null,
     });
     return res.status(r.ok ? 200 : 400).json(r.ok ? { success: true, ...r, trail: reconciliationTrail(taskId) } : { success: false, error: r.error });
+  });
+
+  // TASKS — the canonical task records for the Tasks board (read-only).
+  app.get("/api/tasks", requireWorkspaceMember(fromQuery), (req, res) => {
+    const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+    const r = listBoardTasks(workspaceId, { limit: Number(req.query.limit) || 500 });
+    return res.json({ success: true, workspaceId, authority: "CANONICAL", total: r.total, tasks: r.tasks });
+  });
+
+  // AGENTS — every role the canonical task record has assigned work to, with
+  // recorded facts only (lib/agent-roster.ts). There is no agent registry.
+  app.get("/api/agents", requireWorkspaceMember(fromQuery), (req, res) => {
+    const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+    return res.json({ success: true, workspaceId, source: "CANONICAL_TASK_RECORD", registry: "NONE", notRecorded: NOT_RECORDED_FIELDS, agents: listObservedAgents(workspaceId) });
   });
 
   // ACTIVITY LEDGER — the server's append-only activity_events for one
@@ -8349,7 +8400,16 @@ Rules for spokenSummary specifically:
   // process. Ticks call runDueSchedules(), which only ever dispatches
   // through executeEnvelope() — never a second execution pipeline. It also
   // drives the time-gated model catalog refresh.
-  startScheduler();
+  //
+  // SYNTHOS_SCHEDULER_DISABLED=1 starts NO scheduler: nothing dispatches on a
+  // timer from this process. For read-only verification copies and any
+  // non-canonical instance — there must be exactly one scheduler, the
+  // canonical control plane's (lib/control-plane-authority.ts).
+  if (process.env.SYNTHOS_SCHEDULER_DISABLED === "1") {
+    console.log("[Startup] SCHEDULER: DISABLED by SYNTHOS_SCHEDULER_DISABLED=1 — nothing dispatches on a timer from this process.");
+  } else {
+    startScheduler();
+  }
 
   // MODEL REGISTRY — install bundled provider plugins from local manifest
   // files. No network, no provider call, no inference. There is deliberately

@@ -36,7 +36,7 @@ export interface NavDestination {
   /** Other tab ids that are this destination (legacy ids, sub-views). */
   activeFor?: ActiveTab[];
   /** Dynamic count shown next to the label. */
-  badge?: 'notes' | 'kanbanStages';
+  badge?: 'notes';
   /** Stable DOM id for the rail entry (kept from earlier releases). */
   domId?: string;
 }
@@ -48,7 +48,7 @@ const d = (x: Omit<NavDestination, 'access'> & { access?: NavAccess }): NavDesti
 export const NAV_DESTINATIONS: readonly NavDestination[] = Object.freeze([
   // OPERATIONS
   d({ key: 'overview', tabId: 'overview', label: 'Overview', group: 'OPERATIONS', icon: LayoutDashboard, color: '#A5A2FF', keywords: ['mission control', 'dashboard', 'home'] }),
-  d({ key: 'tasks', tabId: 'kanban', label: 'Tasks', group: 'OPERATIONS', icon: Kanban, color: '#00D26A', badge: 'kanbanStages', keywords: ['kanban', 'tasks', 'board', 'task detail', 'reconcile'], activeFor: ['hermes-kanban'] }),
+  d({ key: 'tasks', tabId: 'kanban', label: 'Tasks', group: 'OPERATIONS', icon: Kanban, color: '#00D26A', keywords: ['kanban', 'tasks', 'board', 'task detail', 'reconcile'], activeFor: ['hermes-kanban'] }),
   d({ key: 'graph-runs', tabId: 'graph-runs', label: 'Graph Runs', group: 'OPERATIONS', icon: Activity, color: '#EC4899', keywords: ['runs', 'active runs', 'graph runtime', 'orchestration'] }),
   d({ key: 'approvals', tabId: 'approval-queue', label: 'Approvals', group: 'OPERATIONS', icon: ShieldCheck, color: '#F59E0B', keywords: ['approval queue', 'approve', 'pending'] }),
   d({ key: 'scheduler', tabId: 'scheduler', label: 'Scheduler', group: 'OPERATIONS', icon: Clock, color: '#EC4899', keywords: ['schedules', 'cron', 'loops'] }),
@@ -61,15 +61,10 @@ export const NAV_DESTINATIONS: readonly NavDestination[] = Object.freeze([
   d({ key: 'models', tabId: 'model-registry', label: 'Model Registry', group: 'AGENTS', icon: Boxes, color: '#38BDF8', keywords: ['models', 'model families', 'versions', 'providers', 'routes', 'pricing', 'qualification'] }),
   d({ key: 'router', tabId: 'model-router', label: 'Model Router', group: 'AGENTS', icon: Sliders, color: '#38BDF8', keywords: ['canonical router', 'routing', 'router preview', 'model router'] }),
 
-  // WORKSPACES (agent workspaces)
-  d({ key: 'ws-orchestrator', tabId: 'agent-orchestrator', label: 'Orchestrator', group: 'WORKSPACES', icon: Crown, color: '#EC4899', keywords: ['orchestrator'] }),
+  // WORKSPACES. The Orchestrator/Claude/Gemini/Codex/Cursor/Antigravity/
+  // OpenClaw entries rendered hardcoded agent personas with invented
+  // statistics and were removed from production navigation (2026-09-18).
   d({ key: 'ws-hermes', tabId: 'hermes-core', label: 'Hermes', group: 'WORKSPACES', icon: Cpu, color: '#615EFF', keywords: ['hermes'], activeFor: ['hermes', 'hermes-overview'] }),
-  d({ key: 'ws-claude', tabId: 'agent-claude', label: 'Claude', group: 'WORKSPACES', icon: Sparkles, color: '#F97316', keywords: ['claude workspace'] }),
-  d({ key: 'ws-gemini', tabId: 'agent-gemini', label: 'Gemini', group: 'WORKSPACES', icon: Sparkles, color: '#1A73E8', keywords: ['gemini workspace'] }),
-  d({ key: 'ws-codex', tabId: 'agent-codex', label: 'Codex', group: 'WORKSPACES', icon: Code2, color: '#00D26A', keywords: ['codex workspace'] }),
-  d({ key: 'ws-cursor', tabId: 'agent-cursor', label: 'Cursor', group: 'WORKSPACES', icon: Terminal, color: '#A855F7', keywords: ['cursor workspace'] }),
-  d({ key: 'ws-antigravity', tabId: 'agent-antigravity', label: 'Antigravity', group: 'WORKSPACES', icon: Compass, color: '#8A5CF5', keywords: ['antigravity workspace'] }),
-  d({ key: 'ws-openclaw', tabId: 'agent-openclaw', label: 'OpenClaw', group: 'WORKSPACES', icon: Globe, color: '#14B8A6', keywords: ['openclaw workspace'] }),
 
   // BUILD
   d({ key: 'development', tabId: 'development', label: 'Development', group: 'BUILD', icon: Code2, color: '#615EFF', keywords: ['development', 'dev tasks'] }),
@@ -140,15 +135,18 @@ export function navGroupsFor(viewer: NavViewer): Array<{ group: NavGroupName; it
  * Agent Registry unless the rail lists that agent itself (the WORKSPACES).
  */
 export const NESTED_ROUTES = Object.freeze([
-  { key: 'agent-detail', label: 'Agent Detail', parentKey: 'agents', prefix: 'agent-', except: ['agent-fleet', 'agent-memory'] as string[], pathPrefix: 'agents/' },
+  // Agent Detail: #/agents/<role> is the Agent Registry view with that agent
+  // selected (the view reads the role from the hash). Legacy agent-<role>
+  // tabs redirect there (App.tsx).
+  { key: 'agent-detail', label: 'Agent Detail', parentKey: 'agents', tab: 'agent-fleet' as ActiveTab, pathPrefix: 'agents/' },
 ]);
 
-/** The rail destination that owns a tab id: exact, then declared aliases, then nested route parent. */
+/** The rail destination that owns a tab id: exact, then declared aliases, then legacy agent-<role>. */
 export function destinationForTab(tab: string): NavDestination | null {
   const exact = NAV_DESTINATIONS.find((x) => x.tabId === tab) ?? NAV_DESTINATIONS.find((x) => x.activeFor?.includes(tab as ActiveTab));
   if (exact) return exact;
-  const nested = NESTED_ROUTES.find((n) => tab.startsWith(n.prefix) && !n.except.includes(tab));
-  return nested ? NAV_DESTINATIONS.find((x) => x.key === nested.parentKey) ?? null : null;
+  if (tab.startsWith('agent-') && tab !== 'agent-memory') return NAV_DESTINATIONS.find((x) => x.key === 'agents') ?? null;
+  return null;
 }
 
 /** Whether a rail entry is the active one for the current tab (nested views included). */
@@ -166,8 +164,6 @@ export function canonicalLabel(tab: string): string | null {
 export function hashForTab(tab: string): string {
   const dest = NAV_DESTINATIONS.find((x) => x.tabId === tab);
   if (dest) return `#/${dest.key}`;
-  const nested = NESTED_ROUTES.find((n) => tab.startsWith(n.prefix) && !n.except.includes(tab));
-  if (nested) return `#/${nested.pathPrefix}${tab.slice(nested.prefix.length)}`;
   return `#/${tab}`;
 }
 
@@ -178,14 +174,13 @@ export function tabForHash(hash: string, knownTabs: ReadonlySet<string>): Active
   const byKey = NAV_DESTINATIONS.find((x) => x.key === path);
   if (byKey) return byKey.tabId;
   for (const n of NESTED_ROUTES) {
-    if (path.startsWith(n.pathPrefix)) {
-      const tab = `${n.prefix}${path.slice(n.pathPrefix.length)}`;
-      if (knownTabs.has(tab)) return tab as ActiveTab;
-    }
+    if (path.startsWith(n.pathPrefix) && /^[A-Za-z0-9:._-]{1,80}$/.test(decodeURIComponentSafe(path.slice(n.pathPrefix.length)))) return n.tab;
   }
   if (knownTabs.has(path)) return path as ActiveTab;
   return null;
 }
+
+function decodeURIComponentSafe(s: string): string { try { return decodeURIComponent(s); } catch { return ''; } }
 
 /**
  * A workspace top bar may name its own home tab contextually ("Overview");

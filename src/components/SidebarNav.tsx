@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ActiveTab, AIModelInfo, AgentInfo, KANBAN_COLUMN_IDS } from '../types';
 import { navGroupsFor, isDestinationActive, NAV_DESTINATIONS } from '../navigation/canonical-nav';
 import { BuildIdentityFooter } from './BuildIdentityFooter';
+import { useAuthority } from '../authority/AuthorityContext';
 import { 
   LayoutDashboard, Layers, GitMerge, Database, Globe, Sliders, 
   ChevronLeft, ChevronRight, ChevronDown, Menu, Kanban, Activity, Bot, 
@@ -42,6 +43,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
   authorizedWorkspaces = [],
   platformRole = null,
 }) => {
+  const authority = useAuthority();
   // Collapsed rail state persisted locally, default to FALSE for clear navigation accessibility
   const [isCollapsed, setIsCollapsed] = useState<boolean>(() => {
     try {
@@ -142,7 +144,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
       label: dest.label,
       icon: dest.icon,
       color: dest.color,
-      badge: dest.badge === 'notes' ? `${notesCount}` : dest.badge === 'kanbanStages' ? `${KANBAN_COLUMN_IDS.length} Stg` : undefined,
+      badge: dest.badge === 'notes' ? `${notesCount}` : undefined,
       navId: dest.key,
     })),
   }));
@@ -150,9 +152,13 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
   return (
     <>
       {/* Mobile Drawer Button */}
-      <div className="md:hidden fixed bottom-4 left-4 z-40">
+      {/* Above the content column (which otherwise covered it on phones, so
+          the drawer could not be opened by touch), hidden while open. */}
+      <div className={`md:hidden fixed bottom-4 left-4 z-[60] ${isMobileOpen ? 'hidden' : ''}`}>
         <button
           onClick={() => setIsMobileOpen(true)}
+          data-testid="mobile-nav-open"
+          aria-label="Open navigation"
           className="p-3 bg-[#615EFF] text-white rounded-full shadow-2xl flex items-center justify-center cursor-pointer"
         >
           <Menu className="w-5 h-5" />
@@ -205,7 +211,10 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
               <span className="text-[9px] font-bold text-[#555A7E] uppercase block font-mono tracking-wider">
                 ENVIRONMENT
               </span>
-              <span className="text-[9px] font-mono text-[#00D26A] font-bold">● ONLINE</span>
+              {/* Real control-plane connection state (authority context), not a static claim. */}
+              <span className={`text-[9px] font-mono font-bold ${authority.status === 'CONNECTED' ? 'text-[#00D26A]' : authority.status === 'UNREACHABLE' ? 'text-[#FF6B6B]' : 'text-[#6C7293]'}`} data-testid="sidebar-connection">
+                {authority.status === 'CONNECTED' ? '● CONNECTED' : authority.status === 'UNREACHABLE' ? '● UNREACHABLE' : '○ CHECKING'}
+              </span>
             </div>
             {authorizedWorkspaces.length === 0 ? (
               <div className="w-full bg-[#05060D] text-[10px] text-[#555A7E] border border-[#1E2240] rounded-lg px-2 py-1.5 font-sans">

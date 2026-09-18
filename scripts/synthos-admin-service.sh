@@ -128,8 +128,15 @@ for line in ${(f)BUILD_LINES}; do
 done
 # Which deployment this is (shown next to the commit in the Admin footer and
 # diagnostics). The operator's Mac service, not the hosted Admin.
-export SYNTHOS_DEPLOYMENT_NAME="${SYNTHOS_DEPLOYMENT_NAME:-localhost (launchd com.synthos.admin)}"
-export SYNTHOS_ENVIRONMENT="${SYNTHOS_ENVIRONMENT:-local}"
+# This service IS the canonical control plane (lib/control-plane-authority.ts);
+# admin.getsynthos.com reaches it through the gateway tunnel.
+export SYNTHOS_DEPLOYMENT_NAME="${SYNTHOS_DEPLOYMENT_NAME:-canonical control plane (launchd com.synthos.admin)}"
+export SYNTHOS_ENVIRONMENT="${SYNTHOS_ENVIRONMENT:-production}"
+# Exactly one proxy hop can sit in front of this loopback listener: the
+# gateway tunnel (Caddy on GCE → SSH reverse tunnel → 127.0.0.1). Direct local
+# requests carry no X-Forwarded-For, so trusting one hop changes nothing for
+# them and lets req.secure/req.ip reflect the real client behind the gateway.
+export TRUST_PROXY_HOPS="${TRUST_PROXY_HOPS:-1}"
 say "version commit=${SYNTHOS_BUILD_SHA:-UNKNOWN} tree=${SYNTHOS_BUILD_TREE:-UNKNOWN} ref=${SYNTHOS_BUILD_REF:-UNKNOWN} deployment=${SYNTHOS_DEPLOYMENT_NAME} environment=${SYNTHOS_ENVIRONMENT}"
 
 if [[ "${MODE}" == "production" ]]; then

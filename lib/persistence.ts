@@ -2928,6 +2928,15 @@ export const REVOKED_RECEIPT_SIGNING_KEYS: readonly RevokedSigningKey[] = Object
     affectedCommits: ['0e09586', 'e2fd065', '7b07203'],
     scope: 'Development-era receipt-signing key, replaced before the first production receipt (2026-09-08). No production receipt uses it. Rejected for all receipts, in every workspace, permanently.',
   },
+  {
+    fingerprint: 'sha256:d210f8db5c25dbaa4cf31c47f204378b32ca1b5adf9b0f5180fcc2f7ddacb3f2',
+    algorithm: 'Ed25519',
+    status: 'REVOKED',
+    reason: 'Retired second signing authority: generated automatically by the separate SynthOS Admin instance on GCE synthos-core-01 (volume synthos-admin_synthos-data) when it ran as an independent control plane. It never signed a receipt. The canonical signing key is the operator control plane\'s; there is exactly one.',
+    discoveredAt: '2026-09-18',
+    affectedCommits: [],
+    scope: 'Never exposed and never used. Revoked so the archived instance can never issue receipts that verify, should it be started again.',
+  },
 ]);
 
 /** sha256:<hex> of the key's SPKI DER encoding, or null when it is not a parseable public key. */

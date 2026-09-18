@@ -265,7 +265,7 @@ export const AirbyteHeader: React.FC<AirbyteHeaderProps> = ({
         </div>
 
         {/* Right: Quick Triggers & Telemetry */}
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
           {/* Tour Button */}
           <button
             id="btn-restart-tour"
@@ -280,7 +280,7 @@ export const AirbyteHeader: React.FC<AirbyteHeaderProps> = ({
           {/* Clock */}
           <div className="hidden xl:flex items-center gap-1.5 bg-[#090B18] border border-[#1C2038] px-3 py-1.5 rounded-full text-xs font-mono text-[#8E94B8]">
             <span className="w-2 h-2 rounded-full bg-[#00D26A] animate-pulse" />
-            <span className="text-white font-bold">{currentTime || '12:27:20'}</span>
+            <span className="text-white font-bold">{currentTime || '--:--:--'}</span>
           </div>
 
           {/* Jarvis Voice Orb Trigger */}
@@ -297,11 +297,12 @@ export const AirbyteHeader: React.FC<AirbyteHeaderProps> = ({
           <button 
             id="header-search"
             onClick={onOpenQuickPrompt}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.025] hover:bg-white/[0.055] border border-white/[0.08] text-xs text-[#8a8f98] hover:text-white transition-colors font-mono cursor-pointer"
+            aria-label="Open command palette"
+            className="inline-flex items-center gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg bg-white/[0.025] hover:bg-white/[0.055] border border-white/[0.08] text-xs text-[#8a8f98] hover:text-white transition-colors font-mono cursor-pointer"
             title="Press Cmd+K for Command Palette"
           >
             <Zap className="w-3.5 h-3.5 text-[#615EFF]" />
-            <span>CMD+K</span>
+            <span className="hidden sm:inline">CMD+K</span>
           </button>
         </div>
       </div>

@@ -14,10 +14,21 @@ import { scrubSecrets as antigravityScrub } from '../lib/antigravity-client';
 // providers meet, which is the case neither file's own tests covered.
 // ---------------------------------------------------------------------------
 
+// A Google-key-SHAPED synthetic value, assembled at runtime so no literal
+// key-shaped string sits in source (GitHub secret scanning raised alert #1 on
+// the earlier literal fixture). Same shape the redactor must catch: "AIza" +
+// 35 key characters.
+const GOOGLE_KEY_SHAPE = ['AI', 'za'].join('') + 'Sy' + 'synthetic0redaction0fixture0xx'.padEnd(33, 'x');
+
 describe('credential shapes are redacted', () => {
+  it('the synthetic Google fixture has exactly the real key shape (so coverage is unchanged)', () => {
+    expect(GOOGLE_KEY_SHAPE).toMatch(/^AIza[0-9A-Za-z_-]{35}$/);
+    expect(scrubSecrets(`x ${GOOGLE_KEY_SHAPE} y`)).not.toContain(GOOGLE_KEY_SHAPE);
+  });
+
   const cases: Array<[string, string]> = [
     ['OpenAI key', 'error for sk-proj-abcdefghij1234567890ABCDEFGHIJ'],
-    ['Google key', 'failed with AIzaSyA1234567890abcdefghijklmnopqrstuv'],
+    ['Google key', `failed with ${GOOGLE_KEY_SHAPE}`],
     ['Slack token', 'posting failed: xoxb-1234567890-abcdefghijklmnop'],
     ['GitHub token', 'auth failed ghp_abcdefghij1234567890ABCDEFGHIJ12345'],
     ['Bearer header', 'upstream rejected Authorization: Bearer abcdef1234567890xyz'],

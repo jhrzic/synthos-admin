@@ -37,17 +37,16 @@ const SettingsView = lazy(() => import('./components/SettingsView').then((m) => 
 import { CommandPalette } from './components/CommandPalette';
 import { JarvisOverlayHUD } from './components/JarvisOverlayHUD';
 import { GlobalVoiceOverlay } from './components/GlobalVoiceOverlay';
-const KanbanView = lazy(() => import('./components/KanbanView').then((m) => ({ default: m.KanbanView })));
 import { ModelRouterView } from './components/ModelRouterView';
 import { hashForTab, tabForHash } from './navigation/canonical-nav';
+import { AuthorityBanner, RequireCanonical } from './authority/AuthorityContext';
+import { TaskBoardView } from './components/tasks/TaskBoardView';
+import { AgentRegistryView } from './components/agents/AgentRegistryView';
 import { RENDERED_TABS } from './navigation/rendered-tabs';
-import { AgentView } from './components/AgentView';
 import { OverviewOfficeView } from './components/OverviewOfficeView';
 import { TelegramChatView } from './components/TelegramChatView';
 import { ContentLibraryView } from './components/ContentLibraryView';
 import { ScheduleCronView } from './components/ScheduleCronView';
-import { AgentDrawer } from './components/AgentDrawer';
-import { AgentFleetView } from './components/AgentFleetView';
 const StartupIdeaGeneratorView = lazy(() => import('./components/StartupIdeaGeneratorView').then((m) => ({ default: m.StartupIdeaGeneratorView })));
 import { HermesOracleView } from './components/HermesOracleView';
 import { AutoContentNewsView } from './components/AutoContentNewsView';
@@ -110,9 +109,20 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
   });
   useEffect(() => {
     try {
+      // A nested deep link that already resolves to this tab (#/agents/<role>) is kept.
+      if (tabForHash(window.location.hash, RENDERED_TABS) === activeTab) return;
       const want = hashForTab(activeTab);
       if (window.location.hash !== want) window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}${want}`);
     } catch { /* no history API (tests) */ }
+  }, [activeTab]);
+  // The hardcoded agent persona pages (agent-<role>) are no longer rendered:
+  // anything that still navigates there lands on that agent's recorded facts.
+  useEffect(() => {
+    if (activeTab.startsWith('agent-') && activeTab !== 'agent-fleet' && activeTab !== 'agent-memory') {
+      const role = activeTab.slice('agent-'.length);
+      try { window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}#/agents/${encodeURIComponent(role)}`); } catch { /* no history */ }
+      setActiveTab('agent-fleet');
+    }
   }, [activeTab]);
   useEffect(() => {
     const onHash = () => { const t = tabForHash(window.location.hash, RENDERED_TABS); if (t) setActiveTab(t); };
@@ -498,7 +508,11 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
     }
     return INITIAL_GUIDE_STEPS;
   });
-  const [drawerAgentRole, setDrawerAgentRole] = useState<AgentRole | null>(null);
+  // Agent detail is the recorded-facts view (#/agents/<role>), not a persona drawer.
+  const openAgentFacts = (role: string) => {
+    try { window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}#/agents/${encodeURIComponent(role)}`); } catch { /* no history */ }
+    setActiveTab('agent-fleet');
+  };
   const [isSidebarVisible, setIsSidebarVisible] = useState<boolean>(() => {
     try {
       const saved = localStorage.getItem('hermes_sidebar_visible');
@@ -1588,6 +1602,8 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
         />
 
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+          {/* Which control plane this is, and whether it is reachable (shared by every view). */}
+          <AuthorityBanner />
           {/* Workspace Contextual Top Navigation (rendered when any of the 8 workspaces is active) */}
           {activeWorkspaceType && (
             <WorkspaceTopNav 
@@ -1608,6 +1624,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               every already-eager view underneath is completely unaffected
               (Suspense only ever engages when something below it actually
               suspends). */}
+          <RequireCanonical>
           <Suspense fallback={<div className="flex items-center justify-center h-full w-full text-[#9C97B4] text-sm font-mono">Loading…</div>}>
           {/* Intake & Triage Engine (Voice, Directives, Webhooks) */}
           {activeTab === 'intake-triage' && (
@@ -1703,7 +1720,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               models={models}
               activeWorkspaceId={activeWorkspaceId}
               onSelectTab={setActiveTab}
-              onOpenAgentDrawer={(role) => setDrawerAgentRole(role as AgentRole)}
+              onOpenAgentDrawer={(role) => openAgentFacts(role)}
               onOpenGraphBuilder={() => setActiveTab('graph-builder')}
               onOpenHermesChat={() => setActiveTab('hermes-chat')}
             />
@@ -1785,20 +1802,11 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           )}
 
           {/* Kanban Board (board.db) & Startup Curation Pipeline */}
-          {activeTab === 'kanban' && (
-            <KanbanView
-              tasks={kanbanTasks}
-              agents={agents}
-              models={models}
-              onAddTask={handleAddKanbanTask}
-              onUpdateTask={handleUpdateKanbanTask}
-              onDeleteTask={handleDeleteKanbanTask}
-              onExecuteTask={handleExecuteKanbanTask}
-              onPushTaskToObsidian={handlePushTaskToObsidian}
-              onSelectAgent={(agentRole) => setDrawerAgentRole(agentRole)}
-              onOpenJulianAudit={() => setIsJulianAuditOpen(true)}
-              activeWorkspaceId={activeWorkspaceId}
-            />
+          {/* Tasks: the canonical server task records (read-only; lib/task-board.ts).
+              The browser-local KanbanView board is no longer mounted — see the
+              commit that made this change for its preservation classification. */}
+          {(activeTab === 'kanban' || activeTab === 'hermes-kanban') && (
+            <TaskBoardView workspaceId={activeWorkspaceId} />
           )}
 
           {/* Graph Engine & Interactive Workflow Graph Builder */}
@@ -1981,7 +1989,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               onSelectTab={setActiveTab}
               onAddNoteToVault={(title, content, tags) => handleAddNoteToVault(title, content, tags, 'Startup-Theses')}
               onAddTaskToKanban={handleAddKanbanTask}
-              onOpenAgentDrawer={(role) => setDrawerAgentRole(role as AgentRole)}
+              onOpenAgentDrawer={(role) => openAgentFacts(role)}
             />
           )}
 
@@ -2014,36 +2022,10 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           )}
 
           {/* Hermes Kanban Board */}
-          {activeTab === 'hermes-kanban' && (
-            <KanbanView
-              tasks={kanbanTasks}
-              agents={agents}
-              models={models}
-              onAddTask={handleAddKanbanTask}
-              onUpdateTask={handleUpdateKanbanTask}
-              onDeleteTask={handleDeleteKanbanTask}
-              onExecuteTask={handleExecuteKanbanTask}
-              onPushTaskToObsidian={handlePushTaskToObsidian}
-              onSelectAgent={(agentRole) => setDrawerAgentRole(agentRole)}
-              onOpenJulianAudit={() => setIsJulianAuditOpen(true)}
-              activeWorkspaceId={activeWorkspaceId}
-            />
-          )}
+
 
           {/* Hermes Sub-Route Aliases */}
-          {activeTab === 'hermes-agents' && (
-            <AgentFleetView
-              agents={agents}
-              tasks={kanbanTasks}
-              models={models}
-              onSelectTab={setActiveTab}
-              onOpenDrawer={(role) => setDrawerAgentRole(role as AgentRole)}
-              onExecuteAgentDirective={handleExecuteAgentDirective}
-              onAddTask={handleAddKanbanTask}
-              onUpdateAgent={handleUpdateAgent}
-              onAddNoteToVault={(title, content, tags, folder) => handleAddNoteToVault(title, content, tags, folder || 'Startup-Theses')}
-            />
-          )}
+
 
           {(activeTab === 'hermes-skills' || activeTab === 'hermes-mcps' || activeTab === 'hermes-tools') && (
             <SkillRegistryView activeWorkspaceId={activeWorkspaceId} onNavigate={setActiveTab} />
@@ -2175,18 +2157,10 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           )}
 
           {/* Agent Fleet Overview & Interactive Sandbox Dashboard */}
-          {activeTab === 'agent-fleet' && (
-            <AgentFleetView
-              agents={agents}
-              tasks={kanbanTasks}
-              models={models}
-              onSelectTab={setActiveTab}
-              onOpenDrawer={(role) => setDrawerAgentRole(role as AgentRole)}
-              onExecuteAgentDirective={handleExecuteAgentDirective}
-              onAddTask={handleAddKanbanTask}
-              onUpdateAgent={handleUpdateAgent}
-              onAddNoteToVault={(title, content, tags, folder) => handleAddNoteToVault(title, content, tags, folder || 'Startup-Theses')}
-            />
+          {/* Agent Registry and Agent Detail (#/agents/<role>): recorded facts
+              from the canonical task record (lib/agent-roster.ts). */}
+          {(activeTab === 'agent-fleet' || activeTab === 'hermes-agents') && (
+            <AgentRegistryView workspaceId={activeWorkspaceId} onOpenSkills={() => setActiveTab('skill-registry')} onOpenTasks={() => setActiveTab('kanban')} />
           )}
 
           {/* 32-Step Mission Control Guide Walkthrough */}
@@ -2229,26 +2203,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           )}
 
           {/* Individual Specialized Agent Views */}
-          {isAgentTab(activeTab) && (
-            agents[getAgentRoleFromTab(activeTab)] ? (
-              <AgentView
-                agent={agents[getAgentRoleFromTab(activeTab)]}
-                tasks={kanbanTasks}
-                models={models}
-                onSendQuery={handleSendQuery}
-                onAddTask={handleAddKanbanTask}
-                onUpdateTask={handleUpdateKanbanTask}
-                onPushNoteToObsidian={(title, content, tags) => handleAddNoteToVault(title, content, tags, 'Agent-Syntheses')}
-                onUpdateAgent={handleUpdateAgent}
-                onOpenSkills={() => setActiveTab('skill-registry')}
-              />
-            ) : (
-              <div className="p-8 text-sm text-[#8E94B8]">
-                <p className="text-[#F3F4F9] font-semibold mb-1">Agent not configured</p>
-                <p>No roster entry exists for "{getAgentRoleFromTab(activeTab)}". This workspace has a navigation entry but no matching AGENT_DEFINITIONS record, so there is nothing real to show yet.</p>
-              </div>
-            )
-          )}
+
 
           {/* Obsidian Knowledge Mesh & Vaults */}
           {activeTab === 'obsidian' && (
@@ -2333,27 +2288,11 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
             />
           )}
           </Suspense>
+          </RequireCanonical>
           </main>
         </div>
       </div>
 
-      {/* Slide-over Agent Profile Drawer */}
-      {drawerAgentRole && (
-        <AgentDrawer
-          agent={agents[drawerAgentRole]}
-          isOpen={Boolean(drawerAgentRole)}
-          onClose={() => setDrawerAgentRole(null)}
-          onSelectTab={(tab) => {
-            setDrawerAgentRole(null);
-            setActiveTab(tab);
-          }}
-          models={models}
-          onSendQuery={handleSendQuery}
-          onAddTask={handleAddKanbanTask}
-          onAddNoteToVault={(title, content, tags, folder) => handleAddNoteToVault(title, content, tags, folder || 'Startup-Theses')}
-          onUpdateAgent={handleUpdateAgent}
-        />
-      )}
 
       {/* Floating Jarvis Overlay HUD */}
       <JarvisOverlayHUD

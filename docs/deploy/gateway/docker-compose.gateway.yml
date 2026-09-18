@@ -1,0 +1,23 @@
+# admin.getsynthos.com gateway: Caddy only. No application container, no
+# database. Host networking so Caddy can reach the SSH reverse tunnel's
+# loopback listener (127.0.0.1:18080). The TLS certificate volumes are the
+# ones the earlier deployment created, so no certificate is re-issued.
+services:
+  caddy:
+    image: caddy:2-alpine
+    network_mode: host
+    environment:
+      SYNTHOS_DOMAIN: "${SYNTHOS_DOMAIN:?set SYNTHOS_DOMAIN}"
+    volumes:
+      - ./Caddyfile.gateway:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+    external: true
+    name: synthos-admin_caddy_data
+  caddy_config:
+    external: true
+    name: synthos-admin_caddy_config

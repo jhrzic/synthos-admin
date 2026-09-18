@@ -1,0 +1,60 @@
+# ---------------------------------------------------------------------------
+# admin.getsynthos.com — GATEWAY to the canonical control plane.
+#
+# Caddy terminates TLS and proxies to 127.0.0.1:18080 on this VM, which is the
+# remote end of an SSH reverse tunnel opened OUTBOUND by the canonical control
+# plane (scripts/synthos-gateway-tunnel.sh on the operator's Mac). This VM runs
+# no application process and stores no operational state.
+#
+# Fail closed: if the tunnel or the control plane is down, every request gets
+# CONTROL PLANE UNREACHABLE (HTTP 503) — never a page backed by other data.
+# The only upstream is fixed here; nothing is forwarded to any other host.
+# ---------------------------------------------------------------------------
+{$SYNTHOS_DOMAIN} {
+	encode zstd gzip
+
+	log {
+		output file /data/gateway-access.log {
+			roll_size 10MiB
+			roll_keep 10
+		}
+		format json
+	}
+
+	# Gateway self-description (no state, no secrets).
+	handle /__gateway {
+		header Content-Type application/json
+		header Cache-Control no-store
+		respond `{"role":"GATEWAY","host":"{$SYNTHOS_DOMAIN}","storesState":false,"upstream":"canonical control plane via SSH reverse tunnel"}` 200
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:18080 {
+			# Overwrites any client-supplied value; the control plane uses it to
+			# label the access path (display only — auth never depends on it).
+			header_up X-Synthos-Gateway {$SYNTHOS_DOMAIN}
+			transport http {
+				dial_timeout 3s
+				response_header_timeout 120s
+			}
+		}
+	}
+
+	handle_errors 502 503 504 {
+		header Cache-Control no-store
+		@api path /api/*
+		handle @api {
+			header Content-Type application/json
+			respond `{"success":false,"controlPlane":"UNREACHABLE","error":"The canonical control plane is unreachable from the gateway. No data is shown rather than an empty system."}` 503
+		}
+		handle {
+			header Content-Type "text/html; charset=utf-8"
+			respond `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SynthOS Admin — control plane unreachable</title>
+<style>body{margin:0;background:#0b0c0f;color:#e6e8f2;font:15px/1.5 system-ui,sans-serif;display:grid;place-items:center;min-height:100vh}main{max-width:560px;padding:24px}h1{font-size:18px;letter-spacing:.04em;color:#e8a845}code{color:#c9cce6}</style></head>
+<body><main data-testid="control-plane-unreachable"><h1>CONTROL PLANE UNREACHABLE</h1>
+<p>admin.getsynthos.com is a gateway. The canonical SynthOS control plane is not connected right now (it runs on the operator's machine and reaches this gateway over an outbound tunnel).</p>
+<p>Nothing is shown in its place: no data here is empty, cached or from another database. Try again when the control plane is online.</p>
+<p><code>gateway: {$SYNTHOS_DOMAIN} · stores no state</code></p></main></body></html>` 503
+		}
+	}
+}

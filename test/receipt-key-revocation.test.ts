@@ -20,8 +20,10 @@ const entry = (fingerprint: string): RevokedSigningKey => ({ fingerprint, algori
 
 describe('revoked receipt-signing keys', () => {
   it('the registry holds only public fingerprints for the key exposed in public Git history', () => {
-    expect(REVOKED_RECEIPT_SIGNING_KEYS).toHaveLength(1);
+    expect(REVOKED_RECEIPT_SIGNING_KEYS).toHaveLength(2);
     const k = REVOKED_RECEIPT_SIGNING_KEYS[0];
+    // The retired second signing authority (the archived GCE instance): never used, revoked.
+    expect(REVOKED_RECEIPT_SIGNING_KEYS[1]).toMatchObject({ fingerprint: 'sha256:d210f8db5c25dbaa4cf31c47f204378b32ca1b5adf9b0f5180fcc2f7ddacb3f2', status: 'REVOKED' });
     expect(k).toMatchObject({ fingerprint: 'sha256:7adbc0bb09b99bf93ad57a4ee29069592824ebdc56b1cdc3a4f0e169832cd6ab', status: 'REVOKED', algorithm: 'Ed25519', discoveredAt: '2026-09-18', affectedCommits: ['0e09586', 'e2fd065', '7b07203'] });
     expect(JSON.stringify(REVOKED_RECEIPT_SIGNING_KEYS)).not.toMatch(/PRIVATE KEY|BEGIN/);
     expect(Object.isFrozen(REVOKED_RECEIPT_SIGNING_KEYS)).toBe(true);

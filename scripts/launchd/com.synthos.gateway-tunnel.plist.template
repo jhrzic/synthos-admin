@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Gateway tunnel for admin.getsynthos.com (scripts/synthos-gateway-tunnel.sh).
+     Installed by scripts/install-gateway-tunnel.sh; __REPO__ / __GCLOUD__ /
+     __HOME__ are filled in there. Restarted by launchd if it exits. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.synthos.gateway-tunnel</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/zsh</string><string>__REPO__/scripts/synthos-gateway-tunnel.sh</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SYNTHOS_GCLOUD_BIN</key><string>__GCLOUD__</string>
+    <key>PATH</key><string>__GCLOUD_DIR__:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+    <key>HOME</key><string>__HOME__</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>15</integer>
+  <key>StandardOutPath</key><string>__HOME__/Library/Logs/synthos/gateway-tunnel.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/Library/Logs/synthos/gateway-tunnel.log</string>
+</dict>
+</plist>

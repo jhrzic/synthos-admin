@@ -37,10 +37,10 @@ function sidebarAgentTabIds(): string[] {
 describe('Every sidebar agent workspace tab resolves to a real AGENT_DEFINITIONS entry', () => {
   const tabIds = sidebarAgentTabIds();
 
-  it('sanity: SidebarNav actually lists agent workspace tabs (this test is not vacuous)', () => {
-    expect(tabIds.length).toBeGreaterThan(0);
-    expect(tabIds).toContain('agent-openclaw');
-    expect(tabIds).toContain('agent-gemini');
+  it('no navigation entry opens a hardcoded agent persona (removed from production 2026-09-18)', () => {
+    // The persona pages (AgentView over AGENT_DEFINITIONS) are no longer navigable:
+    // agents are shown from the canonical task record (lib/agent-roster.ts).
+    expect(tabIds).toEqual([]);
   });
 
   it.each(tabIds)('%s has a matching AGENT_DEFINITIONS role with a real systemPrompt', (tabId) => {
@@ -63,12 +63,11 @@ describe('AGENT_DEFINITIONS.gemini specifically (the confirmed crash case)', () 
   });
 });
 
-describe('App.tsx guards AgentView against an unresolved agent role (defense in depth)', () => {
-  it('does not pass agents[...] into AgentView without checking it resolved first', () => {
-    // Regression guard: even with a complete roster today, a future stale
-    // tab id or role rename must degrade to an honest "not configured"
-    // message rather than crash the whole workspace shell again.
-    expect(appContent).toContain('agents[getAgentRoleFromTab(activeTab)] ? (');
-    expect(appContent).toContain('Agent not configured');
+describe('App.tsx no longer renders agent personas', () => {
+  it('AgentView / AgentFleetView / AgentDrawer are not mounted; legacy agent-<role> tabs redirect to recorded facts', () => {
+    expect(appContent).not.toMatch(/<AgentView\b|<AgentFleetView\b|<AgentDrawer\b/);
+    expect(appContent).toContain('<AgentRegistryView');
+    expect(appContent).toContain("setActiveTab('agent-fleet');");
+    expect(appContent).toMatch(/#\/agents\/\$\{encodeURIComponent\(role\)\}/);
   });
 });

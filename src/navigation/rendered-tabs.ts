@@ -24,16 +24,11 @@ export const DIRECT_RENDERED_TABS = [
 export const MODEL_SEAT_TABS = ['claude', 'claudecode', 'kimi3', 'kimi', 'deepseek', 'chatgpt', 'codex', 'cursor', 'antigravity', 'perplexity', 'elevenlabs', 'el', 'gemini', 'openclaw'] as const;
 
 /**
- * Agent detail views (App.tsx isAgentTab) that have an agent definition.
- * agent-hermes, agent-chief-of-staff, agent-writer, agent-coder,
- * agent-researcher exist in the ActiveTab union but render
- * only an "Agent not configured" placeholder, so nothing navigates to them.
+ * The agent-<role> persona views (AgentView over hardcoded AGENT_DEFINITIONS)
+ * are no longer rendered. Agent detail is #/agents/<role> inside the Agent
+ * Registry (recorded facts only); legacy agent-<role> tabs redirect there.
  */
-export const AGENT_DETAIL_TABS = [
-  'agent-orchestrator', 'agent-scout', 'agent-scribe', 'agent-reach', 'agent-dev', 'agent-analytics', 'agent-openclaw',
-  'agent-claude', 'agent-claudecode', 'agent-gemini', 'agent-kimi3', 'agent-deepseek', 'agent-chatgpt', 'agent-codex', 'agent-cursor',
-  'agent-antigravity', 'agent-perplexity', 'agent-elevenlabs',
-] as const;
+export const AGENT_DETAIL_TABS = [] as const;
 
 /** Master Admin sections (App.tsx startsWith('master-admin')) that exist in MasterAdminView. */
 export const MASTER_ADMIN_TABS = [

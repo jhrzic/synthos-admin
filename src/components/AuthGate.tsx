@@ -233,11 +233,11 @@ export const AuthGate: React.FC<{ children: (ctx: { user: AuthUser; workspaces: 
   if (state === 'authenticated' && user) {
     return (
       <div>
-        <div className="fixed top-2 right-2 z-[999] flex items-center gap-2 bg-[#0D0E1A] border border-[#1E2238] rounded-full px-3 py-1.5 text-[10px] font-mono text-[#8E94B8] shadow-lg">
-          <span className="text-white font-bold">{user.display_name}</span>
-          <span className="text-[#5F6589]">{user.email}</span>
+        <div className="fixed top-2 right-2 z-[999] max-w-[calc(100vw-1rem)] flex items-center gap-2 bg-[#0D0E1A] border border-[#1E2238] rounded-full px-3 py-1.5 text-[10px] font-mono text-[#8E94B8] shadow-lg" data-testid="account-badge">
+          <span className="text-white font-bold truncate min-w-0">{user.display_name}</span>
+          <span className="text-[#5F6589] hidden sm:inline truncate min-w-0">{user.email}</span>
           {user.platform_role === 'platform_admin' && (
-            <span className="px-1.5 py-0.5 rounded bg-[#615EFF]/20 text-[#A5A2FF] font-bold">PLATFORM ADMIN</span>
+            <span className="px-1.5 py-0.5 rounded bg-[#615EFF]/20 text-[#A5A2FF] font-bold hidden sm:inline">PLATFORM ADMIN</span>
           )}
           <button onClick={handleLogout} className="text-[#FF5E8E] hover:underline cursor-pointer">Logout</button>
         </div>
