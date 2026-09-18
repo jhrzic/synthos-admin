@@ -2,14 +2,19 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import express from 'express';
 import type { AddressInfo } from 'node:net';
 
-// The one paid call is faked: no test spends money.
-vi.mock('../lib/spend/adapters', () => ({
-  guardedGeminiGenerate: vi.fn(async (_ai: unknown, args: { contents: string }) => ({
-    text: args.contents.includes('best') ? 'Milford Mattress is popular.' : 'Try Mattress Firm.',
-    candidates: [{ groundingMetadata: { groundingChunks: [{ web: { title: 'mattressfirm.com' } }, { web: { title: 'yelp.com' } }] } }],
+// The routed call is faked: no test spends money. The canonical router is
+// represented by its two entry points — a preview (is a qualified web-search
+// route available?) and the routed call itself (answer + grounding payload).
+vi.mock('../lib/fabric/routed-call', () => ({
+  previewRoutedCall: vi.fn(() => (process.env.GEMINI_API_KEY
+    ? { ok: true, decision: { selected: { providerId: 'gemini', modelId: 'fixture-grounded', canonicalVersionId: 'gemini/fixture-grounded' } } }
+    : { ok: false, code: 'NO_QUALIFIED_ROUTE', error: 'no qualified web-search route' })),
+  routedModelCall: vi.fn(async (inp: { prompt: string; tools?: string[] }) => ({
+    ok: true, providerId: 'gemini', modelId: 'fixture-grounded', canonicalVersionId: 'gemini/fixture-grounded',
+    output: inp.prompt.includes('best') ? 'Milford Mattress is popular.' : 'Try Mattress Firm.',
+    raw: { candidates: [{ groundingMetadata: { groundingChunks: [{ web: { title: 'mattressfirm.com' } }, { web: { title: 'yelp.com' } }] } }] },
   })),
 }));
-vi.mock('@google/genai', () => ({ GoogleGenAI: class {} }));
 
 import { registerPublicVisibilityCheck, resetPublicCheckCaps, capReason } from '../lib/aeo/public-check';
 
@@ -60,7 +65,7 @@ describe('public visibility check', () => {
     a.close();
   });
 
-  it('is off without a key rather than pretending', async () => {
+  it('is off when no qualified web-search route exists, rather than pretending', async () => {
     delete process.env.GEMINI_API_KEY;
     const a = await appWith();
     expect((await a.post(body)).status).toBe(503);

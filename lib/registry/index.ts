@@ -94,13 +94,13 @@ export function viewOf(model: StoredModel, provider: StoredProvider, ctx: Execut
   const gaps = metadataGaps(rec);
   if (gaps.length) blockers.push({ state: 'METADATA_REQUIRED', reason: gaps.join('; ') });
 
-  // 4-5. Pricing (a FREE_LOCAL provider needs none)
+  // 4-5. Pricing — always. A FREE_LOCAL route is $0 only by an APPROVED,
+  // current price record whose rates are zero: unknown pricing is never free.
   const pricing = currentPricing(rec);
   const paid = body.billing !== 'FREE_LOCAL';
-  if (paid) {
-    if (pricing.state === 'MISSING' || pricing.state === 'CONFLICTING' || pricing.state === 'NOT_APPROVED') blockers.push({ state: 'PRICING_REQUIRED', reason: pricing.reason });
-    else if (pricing.state === 'STALE') blockers.push({ state: 'PRICE_STALE', reason: pricing.reason });
-  }
+  if (pricing.state === 'MISSING' || pricing.state === 'CONFLICTING' || pricing.state === 'NOT_APPROVED') blockers.push({ state: 'PRICING_REQUIRED', reason: paid ? pricing.reason : `a local route runs only on an approved $0 price record (${pricing.reason})` });
+  else if (pricing.state === 'STALE') blockers.push({ state: 'PRICE_STALE', reason: pricing.reason });
+  else if (!paid && pricing.record && (pricing.record.rates.input !== 0 || pricing.record.rates.output !== 0)) blockers.push({ state: 'PRICING_REQUIRED', reason: 'a FREE_LOCAL route carries a non-zero price; it is not treated as free' });
 
   // 6-7. Operator decisions
   const admin = getAdminRow(model.providerId, model.modelId);
@@ -119,12 +119,18 @@ export function viewOf(model: StoredModel, provider: StoredProvider, ctx: Execut
   const cred = credentialReadiness(body);
   if (!cred.ready && !ctx.credentialHeld) blockers.push({ state: 'NOT_CONFIGURED', reason: `no credential (${[...body.auth.envVars, ...(body.auth.credentialSlot ? [`stored ${body.auth.credentialSlot} credential`] : [])].join(' / ')})` });
 
-  // 9. Spend policy
-  if (paid) {
+  // 9. Spend policy — one policy, three permissions.
+  {
     const policy = getSpendPolicy();
-    if (!policy.paidExecutionEnabled) blockers.push({ state: 'POLICY_BLOCKED', reason: 'paid execution is switched off' });
-    const limits = (policy.providers as Record<string, { enabled: boolean } | undefined>)[body.providerId];
-    if (!limits || !limits.enabled) blockers.push({ state: 'POLICY_BLOCKED', reason: `the spend policy does not enable ${body.providerId}` });
+    if (!policy.modelExecutionEnabled) blockers.push({ state: 'POLICY_BLOCKED', reason: 'all model execution is switched off' });
+    if (paid) {
+      if (!policy.paidExecutionEnabled) blockers.push({ state: 'POLICY_BLOCKED', reason: 'paid execution is switched off' });
+      const limits = (policy.providers as Record<string, { enabled: boolean } | undefined>)[body.providerId];
+      if (!limits || !limits.enabled) blockers.push({ state: 'POLICY_BLOCKED', reason: `the spend policy does not enable ${body.providerId}` });
+    } else {
+      if ((body.routeKind ?? 'DIRECT') !== 'LOCAL') blockers.push({ state: 'POLICY_BLOCKED', reason: 'FREE_LOCAL billing is only valid on a LOCAL route' });
+      if (!policy.localExecutionEnabled) blockers.push({ state: 'POLICY_BLOCKED', reason: 'local $0 execution is switched off' });
+    }
   }
 
   // 10. Workspace

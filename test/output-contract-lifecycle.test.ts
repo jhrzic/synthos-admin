@@ -37,6 +37,7 @@ import { ensureUsageTable, listUsageForKey } from '../lib/spend/ledger';
 import { searchWorkspaceMemory, reindexWorkspaceMemory, getArtifactRetrievalStatus, quarantineArtifact } from '../lib/memory-index';
 import { openAiTermination, geminiTermination, verifyContent, normalizeOutputContract } from '../lib/fabric/output-contract';
 import { seedFixturePrices } from './helpers/spend';
+import { listSegments, listCheckpoints } from '../lib/continuity/controller';
 import { refreshPricingCatalog } from '../lib/pricing/catalog';
 
 const WS = 'ws-contract';
@@ -118,74 +119,64 @@ const history = (id: string) => (getDatabase().prepare('SELECT status FROM task_
 
 // ============================================================================
 describe('THE LIVE PROOF, REPRODUCED — persona + output cap + integrity-only Aegis', () => {
-  it('NARRATIVE task that hits the output cap ends INCOMPLETE, never DONE; evidence kept; artifact quarantined', async () => {
+  // The live-proof failure (a persona memo truncated at the cap marked DONE)
+  // is closed differently now: a truncated NARRATIVE CONTINUES while each
+  // segment makes verified forward progress, and PAUSES for replanning when it
+  // stops making progress. Here the double returns the same truncated memo
+  // every time, so the first segment is progress and the next two are not.
+  it('a NARRATIVE that keeps hitting the cap without progress pauses for REPLAN — never DONE, never INCOMPLETE, never indexed; evidence kept', async () => {
     reply = { text: MEMO, status: 'incomplete', outputTokens: 512, incompleteReason: 'max_output_tokens' };
     const id = task();
     const step = (await tick()).steps.find((s) => s.taskId === id)!;
 
-    expect(step.outcome).toBe('FAILED');
-    expect(status(id)).toBe('INCOMPLETE');
+    expect(step.outcome).toBe('DEFERRED');
+    expect(status(id)).toBe('PAUSED_AWAITING_REPLAN');
     expect(history(id)).not.toContain('DONE');
-    expect(history(id).slice(-2)).toEqual(['AWAITING_VERIFICATION', 'INCOMPLETE']);
-
-    // The persona still shaped this prompt — that is what NARRATIVE means.
+    expect(history(id)).not.toContain('INCOMPLETE');
+    // The persona still shaped the first prompt — that is what NARRATIVE means.
     expect(requests[0].input).toMatch(/Scribe Knowledge Architect/);
+    expect(requests).toHaveLength(3);
 
-    const [review] = getTaskQualityReviews(id);
-    expect(review.decision).toBe('INCOMPLETE');
-    const ev = JSON.parse(review.evidence_json);
-    expect(ev.verificationScopes).toMatchObject({ integrity: 'PASS', completion: 'FAIL', instructionCompliance: 'NOT_APPLICABLE' });
-    expect(ev.termination).toMatchObject({ status: 'INCOMPLETE', providerStatus: 'incomplete', reason: 'max_output_tokens' });
-
-    // An integrity/audit receipt exists and verifies — and says INCOMPLETE.
-    const receipts = getTaskReceipts(id);
-    expect(receipts).toHaveLength(1);
-    expect(verifyReceipt(receipts[0])).toBe(true);
-    const payload = JSON.parse(receipts[0].payload_json);
-    expect(payload.outcome).toBe('INCOMPLETE');
-    expect(payload.aegisDecision).toBe('INCOMPLETE');
-    expect(payload.verificationScope).toMatch(/integrity=PASS; completion=FAIL/);
-
-    // Evidence preserved, retrieval blocked.
-    const [art] = getTaskArtifacts(id);
-    expect(fs.existsSync(art.disk_path)).toBe(true);
-    expect(getArtifactRetrievalStatus(art.artifact_id)!.status).toBe('QUARANTINED');
-    expect(searchWorkspaceMemory(WS, 'Exact-output tasks machine-verifiable response contracts', 20).map((r) => r.artifact_id)).not.toContain(art.artifact_id);
-    reindexWorkspaceMemory(WS);
-    expect(searchWorkspaceMemory(WS, 'Exact-output tasks machine-verifiable response contracts', 20).map((r) => r.artifact_id)).not.toContain(art.artifact_id);
+    // Evidence kept: every segment (with its output and the provider's own
+    // termination) and signed checkpoints; the repeats are marked NO_PROGRESS.
+    const segs = listSegments(id);
+    expect(segs.map((x) => x.status)).toEqual(['INCOMPLETE', 'NO_PROGRESS', 'NO_PROGRESS']);
+    expect(listCheckpoints(id).every((c) => c.verified)).toBe(true);
+    expect(listCheckpoints(id).map((c) => c.payload.reason)).toContain('NO_PROGRESS');
+    // Nothing unfinished reached the Vault, memory or knowledge.
+    expect(getTaskArtifacts(id)).toHaveLength(0);
+    expect(getTaskReceipts(id)).toHaveLength(0);
+    expect(searchWorkspaceMemory(WS, 'Exact-output tasks machine-verifiable response contracts', 20).length).toBe(0);
     expect((getDatabase().prepare('SELECT COUNT(*) n FROM knowledge_candidates WHERE task_id = ?').get(id) as any).n).toBe(0);
-
-    for (const e of ['PROVIDER_COMPLETED', 'ARTIFACT_SAVED', 'AEGIS_INCOMPLETE', 'AUDIT_RECEIPT_CREATED', 'ARTIFACT_QUARANTINED']) expect(events(id)).toContain(e);
+    expect(events(id)).toContain('TASK_PAUSED');
     expect(events(id)).not.toContain('TASK_COMPLETED');
-
     // The billed call is recorded as billed — with the provider's own termination.
     const [row] = listUsageForKey(`orchestration:${id}`);
     expect(row.status).toBe('SUCCESS');
     expect(row.provider_termination).toMatch(/^INCOMPLETE:incomplete:max_output_tokens/);
   });
 
-  it('a "completed" status that nevertheless used every output token is still INCOMPLETE', async () => {
+  it('a "completed" status that nevertheless used every output token is treated as capped, not as done', async () => {
     reply = { text: MEMO, status: 'completed', outputTokens: 512, incompleteReason: null };
     const id = task();
     await tick();
-    expect(status(id)).toBe('INCOMPLETE');
-    expect(JSON.parse(getTaskQualityReviews(id)[0].evidence_json).termination.reason).toBe('OUTPUT_CAP_REACHED');
+    expect(status(id)).not.toBe('DONE');
+    expect(listSegments(id)[0].termination).toMatchObject({ status: 'INCOMPLETE', reason: 'OUTPUT_CAP_REACHED' });
   });
 
-  it('no retry, no fallback, no duplicate call after an INCOMPLETE outcome', async () => {
+  it('no retry, no fallback, no duplicate call: continuations use the same model and stop when progress stalls', async () => {
     reply = { text: MEMO, status: 'incomplete', outputTokens: 512, incompleteReason: 'max_output_tokens' };
     const id = task();
     await tick(); await tick(); await tick();
-    // CONTINUITY: a truncated NARRATIVE continues in at most `maxContinuations`
-    // further segments (task-class data; 2 for this class). Each is its own
-    // segment with its own ledger key — a continuation, not a retry — on the
-    // SAME model (no fallback). Once INCOMPLETE, nothing is ever called again.
+    // Each continuation is its own segment with its own ledger key — a
+    // continuation, not a retry — on the SAME model (no fallback). Once the
+    // task pauses for replanning, later ticks call nothing.
     expect(requests).toHaveLength(3);
     expect(requests.map((r) => r.model)).toEqual([MODEL, MODEL, MODEL]);
     expect(listUsageForKey(`orchestration:${id}`)).toHaveLength(1);
     expect(listUsageForKey(`orchestration:${id}:s2`)).toHaveLength(1);
     expect(listUsageForKey(`orchestration:${id}:s3`)).toHaveLength(1);
-    expect(status(id)).toBe('INCOMPLETE');
+    expect(status(id)).toBe('PAUSED_AWAITING_REPLAN');
     // The continuations carried the signed checkpoint's context, not the persona again.
     expect(requests[1].input).toMatch(/You are continuing a task/);
     expect(requests[1].input).not.toMatch(/Scribe Knowledge Architect/);

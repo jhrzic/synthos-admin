@@ -18,10 +18,9 @@
 // so nothing is untracked — see docs/adr-005-runtime-provider-boundaries.md.
 // ---------------------------------------------------------------------------
 
-import { guardedGeminiGenerate } from './spend/adapters';
-import { GoogleGenAI } from '@google/genai';
+import { requestKey } from './spend/adapters';
+import { routedModelCall } from './fabric/routed-call';
 import { getWorkspaceSkill, classifySkillExecutability, getRawCredentialCiphertext, DeterministicAction } from './skills';
-import { classifyModelRequest, explainUnroutableModel } from './model-router';
 import { decryptCredential, probeMcpServer, readBoundedText } from './mcp-client';
 import { searchWorkspaceMemory } from './memory-index';
 import { listWorkspaceVaultEntries } from './vault';
@@ -158,13 +157,10 @@ async function runDeterministicAction(
 }
 
 /**
- * Model-backed execution. A single, real Gemini call via the GoogleGenAI
- * SDK — no candidate-model failover list (that's server.ts's
- * `/api/generate` UX choice for a chat surface; a skill's declared target
- * is explicit, so a failure here is reported honestly rather than silently
- * substituting a different model than the one configured). Provider
- * identity is preserved: classifyModelRequest must have already resolved
- * to GEMINI (checked by classifySkillExecutability before this runs).
+ * Model-backed execution: ONE routed call (canonical router → Guardian →
+ * spend guard). The skill's configured model is a pinned route; with none,
+ * the router selects a route qualified for content_generation (skill.model). No failover, no
+ * substitute: a refusal is reported with the router's reason.
  */
 async function runModelAction(
   workspaceId: string, skillId: string, modelRef: string | null,
@@ -174,47 +170,22 @@ async function runModelAction(
   if (!prompt.trim()) {
     throw new Error('A "prompt" is required to execute a model-backed skill.');
   }
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error('GEMINI_API_KEY is not configured.');
-
-  const classification = classifyModelRequest(modelRef || undefined);
-  if (classification.provider !== 'GEMINI') {
-    // PUSH 1 — skills remain Gemini-only. Widening them was not part of this
-    // push, and a skill silently changing provider would change its output
-    // with no record of why.
-    throw new Error(explainUnroutableModel(classification, 'model-backed skill execution'));
-  }
-  const model = classification.resolvedModel;
-
-  // STEP 4 — the real call, wrapped so it is a real, observed ctx.invoke()
-  // rather than a bare SDK call. Deliberately still a single real call with
-  // no candidate-model failover — that is unchanged from before this step;
-  // this is NOT lib/fabric/model-gemini.ts's generateViaGemini(), which
-  // fails over across candidates and would be a real behavior change here.
   const ctx = createExecutionContext({ workspaceId });
-  const text = await ctx.invoke('model.gemini', async () => {
-    const ai = new GoogleGenAI({ apiKey });
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), EXECUTE_TIMEOUT_MS);
-    try {
-      const response = await guardedGeminiGenerate(ai, { model, contents: prompt }, { callSite: 'skill.model', workspaceId });
-      return response.text || '';
-    } finally {
-      clearTimeout(timer);
-    }
+  const r = await routedModelCall({
+    callSite: 'skill.model', workspaceId, taskId: `skill:${skillId}`, model: modelRef || '', prompt,
+    idempotencyKey: requestKey('skill.model'), invoke: (name, fn) => ctx.invoke(name, fn),
   });
-
-  if (!text.trim()) {
-    throw new Error(`Model "${model}" returned an empty response.`);
-  }
+  if (!r.ok) throw new Error(`${r.code}: ${r.error}`);
+  const text = r.output;
+  const model = r.modelUsed;
 
   const result: SkillExecutionResult = {
-    success: true, status: 'SUCCESS', targetType: 'model', output: { model, text }, latencyMs: Date.now() - startedAt,
-    toolsInvoked: ctx.getInvocations().map((r) => r.name),
+    success: true, status: 'SUCCESS', targetType: 'model', output: { model, text, provider: r.providerId, canonicalVersionId: r.canonicalVersionId, routingDecisionId: r.decision.decisionId }, latencyMs: Date.now() - startedAt,
+    toolsInvoked: ctx.getInvocations().map((x) => x.name),
   };
   recordRuntimeEvent({
     workspaceId, eventType: 'SKILL_EXECUTION', targetType: 'skill', targetId: skillId,
-    status: 'SUCCESS', latencyMs: result.latencyMs, detail: { targetType: 'model', model },
+    status: 'SUCCESS', latencyMs: result.latencyMs, detail: { targetType: 'model', model, provider: r.providerId, routingDecisionId: r.decision.decisionId },
   });
   return result;
 }

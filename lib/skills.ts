@@ -19,7 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { getDatabase } from './persistence';
-import { classifyModelRequest, explainUnroutableModel } from './model-router';
+import { previewRoutedCall } from './fabric/routed-call';
 import { encryptCredential, credentialEncryptionConfigured } from './mcp-client';
 import { resolveWindmillTarget } from './windmill-targets';
 import { isWindmillConfigured } from './windmill-client';
@@ -305,14 +305,13 @@ export function classifySkillExecutability(skill: SkillRecord): SkillExecutabili
 
   switch (skill.execution_target_type) {
     case 'model': {
-      const classification = classifyModelRequest(skill.execution_target_ref || undefined);
-      if (classification.provider !== 'GEMINI') {
-        return { executable: false, reason: 'MISSING_PROVIDER', message: explainUnroutableModel(classification, 'model-backed skill execution') };
-      }
-      if (!process.env.GEMINI_API_KEY) {
-        return { executable: false, reason: 'MISSING_PROVIDER', message: 'GEMINI_API_KEY is not configured in this deployment.' };
-      }
-      return { executable: true, reason: 'READY', message: `Routes to Gemini model "${classification.resolvedModel}".` };
+      // A skill's configured model is a PINNED route (validated, never
+      // swapped); with none configured the canonical router selects a route
+      // qualified for content_generation (skill.model). A preview — nothing is sent.
+      const p = previewRoutedCall({ callSite: 'skill.model', workspaceId: skill.workspace_id ?? null, model: skill.execution_target_ref || '' });
+      if (!p.ok) return { executable: false, reason: 'MISSING_PROVIDER', message: p.error };
+      const sel = p.decision.selected!;
+      return { executable: true, reason: 'READY', message: `Routes to ${sel.canonicalVersionId ?? `${sel.providerId}/${sel.modelId}`} via ${sel.providerId} (qualified for content_generation).` };
     }
     case 'hermes_runtime': {
       // execute() is an honest Phase-1 NOT_IMPLEMENTED stub (ADR-001) — no

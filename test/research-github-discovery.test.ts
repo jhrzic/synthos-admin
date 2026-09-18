@@ -151,13 +151,13 @@ describe('A7.7: a real GitHub rate-limit response stops the run before synthesis
     requestLog.length = 0;
     const ctx = createExecutionContext({ workspaceId: 'ws-research-discovery' });
     await expect(
-      runLiveRepositoryResearch({ apiKey: 'irrelevant-never-reached', query: 'ai agent framework' }, ctx)
+      runLiveRepositoryResearch({ query: 'ai agent framework' }, ctx)
     ).rejects.toMatchObject({ name: 'GithubRateLimitError' });
 
     // No model.gemini invocation was ever attempted — the failure happened
     // at discovery, before synthesis had anything to work with.
     const invocationNames = ctx.getInvocations().map((r) => r.name);
-    expect(invocationNames).not.toContain('model.gemini');
+    expect(invocationNames.filter((n) => n.startsWith('model.'))).toEqual([]);
   });
 });
 

@@ -60,6 +60,8 @@ export function resolveOpenAiBaseUrl(): string {
 }
 
 export interface GenerateViaOpenAiParams {
+  /** Role-separated input items (Responses API). When set, `contents` is not sent. */
+  input?: Array<{ role: string; content: string }>;
   apiKey: string;
   contents: string;
   candidateModels: string[];
@@ -161,6 +163,8 @@ export function extractOpenAiText(payload: any): string {
  */
 export async function generateViaOpenAI(params: GenerateViaOpenAiParams): Promise<GenerateViaOpenAiResult> {
   const { apiKey, contents } = params;
+  const inputBody: unknown = params.input ?? contents;
+  const inputChars = params.input ? JSON.stringify(params.input).length : contents.length;
   const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const providerId = params.providerId || 'openai';
   let baseUrl: string;
@@ -194,7 +198,7 @@ export async function generateViaOpenAI(params: GenerateViaOpenAiParams): Promis
       provider: providerId, model: m, callSite: params.spend.callSite,
       workspaceId: params.spend.workspaceId ?? null, taskId: params.spend.taskId ?? null, correlationId: params.spend.correlationId ?? null,
       idempotencyKey: params.spend.idempotencyKey || requestKey(params.spend.callSite),
-      inputChars: contents.length, maxOutputTokens, approvalId: params.spend.approvalId ?? null,
+      inputChars, maxOutputTokens, approvalId: params.spend.approvalId ?? null,
     }, async () => {
       const startedAt = Date.now();
       const controller = new AbortController();
@@ -210,7 +214,7 @@ export async function generateViaOpenAI(params: GenerateViaOpenAiParams): Promis
           },
           // max_output_tokens is sent, so the output bound is enforced by the
           // provider rather than assumed by us.
-          body: JSON.stringify({ model: m, input: contents, max_output_tokens: maxOutputTokens }),
+          body: JSON.stringify({ model: m, input: inputBody, max_output_tokens: maxOutputTokens }),
           signal: controller.signal,
         });
 

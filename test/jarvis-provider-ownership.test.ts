@@ -36,48 +36,23 @@ function jarvisCommandRouteSlice(): string {
   return serverContent.slice(idx, nextRoute);
 }
 
-describe('1/2/3: Jarvis resolves its model through the central router, not a direct hardcoded provider call', () => {
-  it('calls classifyModelRequest() to resolve its preferred model, not a raw string literal fed straight to generateWithFailover', () => {
+describe('1-4: Jarvis runs on the canonical router — no model of its own, no classifier, no failover list', () => {
+  it('one routed call for the conversation task class (jarvis.command), with role-separated messages', () => {
     const slice = jarvisCommandRouteSlice();
-    expect(slice).toContain('classifyModelRequest("gemini-3.7-flash")');
-    // The old bug: this exact array literal fed the raw string directly to
-    // the failover helper, never touching the classifier.
-    expect(slice).not.toContain('["gemini-3.7-flash", ...DEFAULT_CANDIDATE_MODELS]');
+    expect(slice).toContain('routedModelCall({');
+    expect(slice).toContain('callSite: "jarvis.command"');
+    expect(slice).toContain('messages: conversationMessages');
   });
 
-  it('uses the classifier\'s resolvedModel, not the literal, to build the candidate list', () => {
+  it('no hardcoded model, no name classifier, no candidate list, no failover helper', () => {
     const slice = jarvisCommandRouteSlice();
-    expect(slice).toContain('[jarvisClassification.resolvedModel, ...DEFAULT_CANDIDATE_MODELS]');
+    expect(slice).not.toMatch(/gemini-\d|classifyModelRequest|DEFAULT_CANDIDATE_MODELS|generateWithFailover|candidateModels/);
   });
 
-  it('does not assume the classification is GEMINI without checking — a real UNSUPPORTED classification degrades honestly', () => {
+  it('a refusal (nothing qualified, spend guard, provider failure) degrades honestly and names the reason', () => {
     const slice = jarvisCommandRouteSlice();
-    expect(slice).toContain('jarvisClassification.provider !== "GEMINI"');
-  });
-
-  it('Jarvis and /api/generate share the exact same classifier import (one central router, not two)', () => {
-    expect(serverContent).toMatch(/import \{[^}]*\bclassifyModelRequest\b[^}]*\} from "\.\/lib\/model-router"/);
-    const generateIdx = serverContent.indexOf('app.post(["/api/generate"]');
-    const generateNextRoute = serverContent.indexOf('\n  app.', generateIdx + 10);
-    const generateSlice = serverContent.slice(generateIdx, generateNextRoute);
-    expect(generateSlice).toContain('classifyModelRequest(model)');
-    // Same shared failover helper on both routes — one router, not a second one.
-    expect(jarvisCommandRouteSlice()).toContain('generateWithFailover(candidateModels');
-    expect(generateSlice).toContain('generateWithFailover(candidateModels');
-  });
-});
-
-describe('4: provider fallback still works after the routing fix (2f16fad not regressed)', () => {
-  it('Jarvis still builds a multi-candidate list and still calls generateWithFailover with it', () => {
-    const slice = jarvisCommandRouteSlice();
-    expect(slice).toContain('...DEFAULT_CANDIDATE_MODELS');
-    expect(slice).toContain('jarvisFailover = await generateWithFailover(candidateModels');
-  });
-
-  it('a failed candidate still throws rather than returning a fabricated empty-response success', () => {
-    const slice = jarvisCommandRouteSlice();
-    expect(slice).toContain('if (!response.text)');
-    expect(slice).toContain('throw new Error("Model returned an empty response.")');
+    expect(slice).toContain('reason: jf.refusal === "NO_QUALIFIED_ROUTE" ? "NO_QUALIFIED_ROUTE" : "MODEL_PROVIDER_UNAVAILABLE"');
+    expect(slice).toContain('no qualified model route is available on this deployment');
   });
 });
 
@@ -172,9 +147,10 @@ describe('9: the actual resolved provider/model is surfaced in the real API resp
     expect(slice).toContain('fallbackUsed: jarvisFailover?.fallbackUsed');
   });
 
-  it('the activity ledger records the requested vs. actual model and whether fallback occurred', () => {
+  it('the activity ledger records the routed provider, the routing decision and the model that ran (fallback is always false)', () => {
     const slice = jarvisCommandRouteSlice();
-    expect(slice).toContain('requestedModel: jarvisFailover?.requestedModel');
+    expect(slice).toContain('provider: jarvisFailover?.provider ?? null');
+    expect(slice).toContain('routingDecisionId: jarvisFailover?.routingDecisionId ?? null');
     expect(slice).toContain('modelUsed: jarvisFailover?.modelUsed');
     expect(slice).toContain('fallbackUsed: jarvisFailover?.fallbackUsed ?? false');
   });

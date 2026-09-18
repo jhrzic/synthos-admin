@@ -235,7 +235,9 @@ export async function answerWithBestAvailableMode(params: {
   };
 
   // 3. Phrase the evidence with a model, if one is really available.
-  const availability = resolveConversationProvider();
+  // Availability is the canonical router's preview for this workspace (a
+  // test-injected callModel only ever replaces dispatch, never this check).
+  const availability = resolveConversationProvider(workspaceId);
   if (availability.available !== true) {
     return {
       ...extractive(),

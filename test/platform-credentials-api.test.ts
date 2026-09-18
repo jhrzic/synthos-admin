@@ -375,7 +375,7 @@ describe('6. DEVELOPMENT-LOOP API COMPLETENESS — every step of the copy/paste-
     expect(status).toBe(200);
     expect(json.success).toBe(false);
     expect(json.review.outcome).toBe('NOT_CONFIGURED');
-    expect(json.review.reason).toContain('OPENAI_API_KEY');
+    expect(json.review.reason).toContain('INVALID_OR_MISSING_CREDENTIAL');
     expect(json.task.state).toBe('WAITING_FOR_REVIEW');
   });
 

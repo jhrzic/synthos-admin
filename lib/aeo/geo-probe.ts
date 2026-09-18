@@ -11,8 +11,10 @@
 //
 // Rules inherited from analyzer.ts:
 //   - Frequencies, never a "rank". One engine, one sample, stated as such.
-//   - Every call is a paid request and goes through guardedGeminiGenerate, so
-//     it is reserved against the spend policy and appears in the ledger.
+//   - Every call is a paid request and goes through the canonical router
+//     (research_synthesis + web_search) and the spend guard, so it is reserved
+//     against the spend policy and appears in the ledger. No hardcoded model:
+//     GEO_PROBE_MODEL, when set, is a PINNED route; otherwise the router picks.
 //   - A refused or failed query is dropped, not guessed; if none ran, the
 //     caller reports UNAVAILABLE with the reason.
 // ---------------------------------------------------------------------------
@@ -21,7 +23,25 @@ import type { GeoEvidence } from './analyzer';
 
 export const GEO_ENGINE = 'gemini+google_search';
 export const GEO_MAX_QUERIES = 5;
-export const GEO_MODEL = process.env.GEO_PROBE_MODEL || 'gemini-3.5-flash';
+/** Optional pin. Empty → the canonical router selects a qualified web-search route. */
+export const GEO_PINNED_MODEL = (process.env.GEO_PROBE_MODEL || '').trim();
+
+/**
+ * ONE grounded question through the canonical router. Throws with the
+ * router's reason when nothing qualified can answer (the probe then drops
+ * the question and says why — never a guess).
+ */
+export async function askGrounded(query: string, opts: { callSite: 'aeo.geo_probe' | 'aeo.public_check'; workspaceId: string | null; maxOutputTokens: number }): Promise<{ text: string; chunks: GroundingChunk[]; model: string }> {
+  const { routedModelCall } = await import('../fabric/routed-call');
+  const { requestKey } = await import('../spend/adapters');
+  const r = await routedModelCall({
+    callSite: opts.callSite, workspaceId: opts.workspaceId, model: GEO_PINNED_MODEL, prompt: query,
+    tools: ['web_search'], maxOutputTokens: opts.maxOutputTokens, idempotencyKey: requestKey(opts.callSite),
+  });
+  if (!r.ok) throw new Error(`${r.code}: ${r.error}`);
+  const chunks: GroundingChunk[] = (r.raw as any)?.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
+  return { text: r.output, chunks, model: r.canonicalVersionId ?? `${r.providerId}/${r.modelId}` };
+}
 
 export interface GeoProbeParams {
   businessName?: string;
@@ -109,7 +129,7 @@ export function evaluateAnswer(
   return { brandAppeared, competitorsSeen, citedSources: [...new Set(cited)] };
 }
 
-type Generate = (query: string) => Promise<{ text: string; chunks: GroundingChunk[] }>;
+type Generate = (query: string) => Promise<{ text: string; chunks: GroundingChunk[]; model?: string }>;
 
 /**
  * Run the panel. `generate` performs one guarded, grounded call; injected so
@@ -126,9 +146,11 @@ export async function runGeoProbe(params: GeoProbeParams, generate: Generate): P
   }
   const results: GeoEvidence['queries'] = [];
   const failures: string[] = [];
+  const models = new Set<string>();
   for (const query of queries) {
     try {
-      const { text, chunks } = await generate(query);
+      const { text, chunks, model } = await generate(query);
+      if (model) models.add(model);
       results.push({ engine: GEO_ENGINE, query, ...evaluateAnswer(text, chunks, params) });
     } catch (err: any) {
       failures.push(`${query}: ${String(err?.message || err).slice(0, 120)}`);
@@ -138,12 +160,12 @@ export async function runGeoProbe(params: GeoProbeParams, generate: Generate): P
     return {
       queries: [],
       providerStatus: 'UNAVAILABLE',
-      providerDetail: `Gemini with Google Search was configured but every query failed or was blocked (${failures[0] ?? 'unknown'}). No AI query result is reported.`,
+      providerDetail: `Every grounded query failed or was refused (${failures[0] ?? 'unknown'}). No AI query result is reported.`,
     };
   }
   return {
     queries: results,
     providerStatus: 'USED',
-    providerDetail: `${results.length} of ${queries.length} questions asked of ${GEO_MODEL} with Google Search grounding on ${new Date().toISOString().slice(0, 10)}. One engine, one sample: answers vary between runs, so treat these as frequencies, not a ranking.${failures.length ? ` ${failures.length} question(s) failed and are excluded.` : ''}`,
+    providerDetail: `${results.length} of ${queries.length} questions asked of ${[...models].join(', ') || 'the routed model'} with web-search grounding on ${new Date().toISOString().slice(0, 10)}. One engine, one sample: answers vary between runs, so treat these as frequencies, not a ranking.${failures.length ? ` ${failures.length} question(s) failed and are excluded.` : ''}`,
   };
 }

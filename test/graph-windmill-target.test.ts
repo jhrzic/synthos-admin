@@ -33,11 +33,13 @@ describe('POST /api/graphs/execute: Windmill node target (G1-G4)', () => {
   it('STEP 4: every other node takes the native COMPUTE path — a direct ctx.invoke("model.gemini", ...) call, no longer a self-HTTP round-trip through /api/execute-agent-task (that was the per-node-receipt problem Step 4 removes)', () => {
     expect(executeRoute).not.toContain('await fetch(`http://127.0.0.1:${PORT}/api/execute-agent-task`');
     expect(executeRoute).not.toContain('X-Internal-Service-Token');
-    // Routed by the model registry: the invocation is named from the resolved
-    // provider, and dispatch goes through that provider's protocol adapter.
-    expect(executeRoute).toContain('await graphRunCtx.invoke(`model.${route.providerId}`, async () => {');
+    // Routed by the canonical router: the node calls routedModelCall, which
+    // names the invocation from the SELECTED route's provider and dispatches
+    // through that provider's protocol adapter inside the run context.
+    expect(executeRoute).toContain('routedModelCall({');
+    expect(executeRoute).toContain('invoke: (name, fn) => graphRunCtx.invoke(name, fn)');
     expect(executeRoute).toContain('buildAgentRolePrompt({');
-    expect(executeRoute).toContain('route.adapter.call!({');
+    expect(executeRoute).not.toContain('route.adapter.call!({');
   });
 
   it('the Windmill branch submits through the real control plane (submitAndAwaitExternalExecution), never a second/duplicate submission path', () => {

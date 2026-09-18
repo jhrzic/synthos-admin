@@ -1,6 +1,6 @@
 {
   "schemaVersion": "synthos.task-classes/v1",
-  "dataVersion": "2026.09.18-2",
+  "dataVersion": "2026.09.18-5",
   "taskClasses": [
     {
       "taskClassId": "literal_transformation",
@@ -26,14 +26,15 @@
       "minContextTokens": null,
       "requiredTools": [],
       "callSites": [
+        "admin.e2e_test",
+        "admin.preview",
+        "admin.provider_test",
         "credential.verify.gemini",
-        "credential.verify.openai",
-        "admin.preview"
+        "credential.verify.openai"
       ],
       "defaultForContracts": [
         "LITERAL"
-      ],
-      "maxContinuations": 0
+      ]
     },
     {
       "taskClassId": "json_extraction",
@@ -63,8 +64,7 @@
       ],
       "defaultForContracts": [
         "JSON_OBJECT"
-      ],
-      "maxContinuations": 0
+      ]
     },
     {
       "taskClassId": "summarization",
@@ -93,8 +93,7 @@
         "youtube.audit",
         "youtube.ingest"
       ],
-      "defaultForContracts": [],
-      "maxContinuations": 2
+      "defaultForContracts": []
     },
     {
       "taskClassId": "research_synthesis",
@@ -124,8 +123,7 @@
         "aeo.geo_probe",
         "aeo.public_check"
       ],
-      "defaultForContracts": [],
-      "maxContinuations": 2
+      "defaultForContracts": []
     },
     {
       "taskClassId": "content_generation",
@@ -151,12 +149,12 @@
       "minContextTokens": null,
       "requiredTools": [],
       "callSites": [
-        "kernel.model_task"
+        "kernel.model_task",
+        "skill.model"
       ],
       "defaultForContracts": [
         "NARRATIVE"
-      ],
-      "maxContinuations": 2
+      ]
     },
     {
       "taskClassId": "conversation",
@@ -186,8 +184,7 @@
         "jarvis.command",
         "api.generate"
       ],
-      "defaultForContracts": [],
-      "maxContinuations": 0
+      "defaultForContracts": []
     },
     {
       "taskClassId": "planning",
@@ -215,8 +212,7 @@
       "callSites": [
         "orchestrator.decompose"
       ],
-      "defaultForContracts": [],
-      "maxContinuations": 0
+      "defaultForContracts": []
     },
     {
       "taskClassId": "coding",
@@ -242,8 +238,7 @@
       "minContextTokens": null,
       "requiredTools": [],
       "callSites": [],
-      "defaultForContracts": [],
-      "maxContinuations": 2
+      "defaultForContracts": []
     },
     {
       "taskClassId": "code_review",
@@ -271,8 +266,7 @@
       "callSites": [
         "development.review"
       ],
-      "defaultForContracts": [],
-      "maxContinuations": 0
+      "defaultForContracts": []
     },
     {
       "taskClassId": "tool_use",
@@ -299,11 +293,8 @@
       "requiredTools": [
         "function_calling"
       ],
-      "callSites": [
-        "skill.model"
-      ],
-      "defaultForContracts": [],
-      "maxContinuations": 0
+      "callSites": [],
+      "defaultForContracts": []
     },
     {
       "taskClassId": "long_context_reasoning",
@@ -329,8 +320,7 @@
       "minContextTokens": 100000,
       "requiredTools": [],
       "callSites": [],
-      "defaultForContracts": [],
-      "maxContinuations": 2
+      "defaultForContracts": []
     },
     {
       "taskClassId": "image_understanding",
@@ -357,8 +347,7 @@
       "minContextTokens": null,
       "requiredTools": [],
       "callSites": [],
-      "defaultForContracts": [],
-      "maxContinuations": 0
+      "defaultForContracts": []
     },
     {
       "taskClassId": "speech",
@@ -387,8 +376,7 @@
         "voice.fish",
         "voice.fish.free_tier"
       ],
-      "defaultForContracts": [],
-      "maxContinuations": 0
+      "defaultForContracts": []
     },
     {
       "taskClassId": "agent_orchestration",
@@ -416,8 +404,7 @@
       "callSites": [
         "runtime.antigravity"
       ],
-      "defaultForContracts": [],
-      "maxContinuations": 0
+      "defaultForContracts": []
     }
   ]
 }

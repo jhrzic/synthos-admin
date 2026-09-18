@@ -227,8 +227,12 @@ describe('both providers use the same mechanism', () => {
 
   it('the provider id matches what the credential probe writes, so one ledger serves both', () => {
     const credSrc = fs.readFileSync(path.join(process.cwd(), 'lib/model-credentials.ts'), 'utf8');
-    // The probe records with the lowercase provider id from ModelProvider.
-    expect(credSrc).toMatch(/recordProviderAttempt\(\{[\s\S]{0,120}provider/);
+    // The probe runs through the canonical routed call, restricted to its own
+    // provider; routed-call records the attempt under the registry provider id
+    // (lowercase, the same id the segment runner writes).
+    expect(credSrc).toMatch(/routedModelCall\(\{[\s\S]{0,240}permittedProviders: \[provider\]/);
+    const routed = fs.readFileSync(path.join(process.cwd(), 'lib/fabric/routed-call.ts'), 'utf8');
+    expect(routed).toMatch(/recordProviderAttempt\(\{ provider: sel\.providerId,/);
     const rows = providerCallRows('openai');
     expect(rows.length).toBeGreaterThan(0);
     // Nothing writes 'OPENAI' uppercase into the ledger.

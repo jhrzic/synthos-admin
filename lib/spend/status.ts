@@ -10,7 +10,7 @@ import { getDatabase } from '../persistence';
 import { getSpendPolicy, getModelPrice, costTierFor, PAID_PROVIDERS, type PaidProvider } from './policy';
 import { previewPaidCall } from './guard';
 import { listPricingSources, listCatalogPrices, priceHistory, lastPricingRefresh } from '../pricing/catalog';
-import { resolveDefaultOpenAiModel, resolveReviewSeatModel, normalizeGeminiModel } from '../model-router';
+import { listQualifications } from '../registry/qualification';
 import { resolveAntigravityAgent } from '../antigravity-client';
 import { ensureUsageTable, periodStarts, spentSince, inFlightCount, listSpendAlerts, COST_BEARING_STATUSES } from './ledger';
 import { unguardedAttemptCount } from './network-guard';
@@ -131,12 +131,15 @@ function pricingView(policy: ReturnType<typeof getSpendPolicy>) {
     };
   });
 
-  // The models the router actually selects today. Pricing never changes this
-  // selection; it only decides whether the selection may spend.
+  // What can actually run today: every route with a VALID task qualification
+  // (the canonical router selects only among these), plus the non-registry
+  // speech and managed-agent rows. There is no provider "default" model.
+  const qualifiedRoutes = listQualifications().filter((q) => q.state === 'VALID');
   const selected: Array<{ role: string; provider: PaidProvider; model: string }> = [
-    { role: 'OpenAI default', provider: 'openai', model: resolveDefaultOpenAiModel() },
-    { role: 'Development review seat', provider: 'openai', model: resolveReviewSeatModel() },
-    { role: 'Gemini default', provider: 'gemini', model: normalizeGeminiModel() },
+    ...[...new Map(qualifiedRoutes.map((q) => [`${q.providerId}/${q.modelId}`, q])).values()].map((q) => ({
+      role: `Qualified route (${qualifiedRoutes.filter((x) => x.providerId === q.providerId && x.modelId === q.modelId).map((x) => x.taskClass).join(', ')})`,
+      provider: q.providerId as PaidProvider, model: q.modelId,
+    })),
     { role: 'Antigravity agent', provider: 'antigravity', model: resolveAntigravityAgent() },
     { role: 'OpenAI speech', provider: 'openai_tts', model: 'tts-1' },
   ];

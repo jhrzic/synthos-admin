@@ -95,6 +95,19 @@ export function SpendControlPanel() {
             {master ? 'Disable all paid execution' : 'Enable paid execution'}
           </button>
         </div>
+        {/* One policy, three permissions — paid OFF never blocks a governed $0 local route, and local ON never covers a free external route. */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2" data-testid="execution-permissions">
+          {([
+            ['model-execution', 'ALL MODEL EXECUTION', status.policy.modelExecutionEnabled !== false, 'Master switch: off means nothing runs, paid or free.'],
+            ['local-execution', 'LOCAL $0 EXECUTION', status.policy.localExecutionEnabled === true, 'Only LOCAL routes with an approved $0 price record. Free external routes stay under paid execution.'],
+          ] as const).map(([scope, label, on, help]) => (
+            <button key={scope} disabled={busy === `kill-${scope}`} onClick={() => post('/api/master-admin/spend/kill', { scope, enabled: !on }, `kill-${scope}`)}
+              className="text-left border border-[#1E223D] rounded-lg px-3 py-2 hover:border-[#615EFF]">
+              <div className={`font-mono text-[11px] font-bold ${on ? 'text-[#5FE3A1]' : 'text-[#FF6B6B]'}`}>{label} {on ? 'ON' : 'OFF'}</div>
+              <div className="text-[10px] text-[#6A7097]">{help}</div>
+            </button>
+          ))}
+        </div>
         <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
           {status.providers.map((p: any) => (
             <button key={p.provider} disabled={busy === `kill-${p.provider}`} onClick={() => post('/api/master-admin/spend/kill', { scope: p.provider, enabled: !p.enabled }, `kill-${p.provider}`)}

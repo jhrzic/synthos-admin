@@ -90,7 +90,7 @@ beforeAll(async () => {
       if (m === '429') { res.writeHead(429, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'rate limit exceeded' } })); }
       if (m === '500') { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'upstream error' } })); }
       let text = answer(content); let finish = 'stop';
-      if (m === 'truncate' || (m === 'truncate-then-ok' && (truncCount[route] = (truncCount[route] ?? 0) + 1) === 1)) { text = 'Part one of the narrative, cut'; finish = 'length'; }
+      if (m === 'truncate' || (m === 'truncate-then-ok' && (truncCount[route] = (truncCount[route] ?? 0) + 1) === 1)) { text = 'Part one of the narrative describes the store, its opening hours and the delivery area, cut'; finish = 'length'; }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ id: `r-${requests.length}`, model: p.model, choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: finish }], usage: { prompt_tokens: 40, completion_tokens: 8, total_tokens: 48 } }));
     });
@@ -183,7 +183,7 @@ function policy(paid: boolean, over: Record<string, unknown> = {}) {
   const off = { enabled: false, dailyUsd: 0, monthlyUsd: 0, maxConcurrent: 0 };
   const on = { enabled: true, dailyUsd: 10, monthlyUsd: 10, maxConcurrent: 5 };
   const r = saveSpendPolicy({
-    ...DEFAULT_SPEND_POLICY, paidExecutionEnabled: paid,
+    ...DEFAULT_SPEND_POLICY, paidExecutionEnabled: paid, localExecutionEnabled: true,
     global: { dailyUsd: 10, monthlyUsd: 10, maxConcurrent: 5 },
     providers: { ...Object.fromEntries(Object.keys(DEFAULT_SPEND_POLICY.providers).map((p) => [p, off])), [PUB]: on, [AGG]: on, [LOC]: on },
     workspaceDefault: { dailyUsd: 10, maxConcurrent: 5 },
@@ -655,17 +655,22 @@ describe('execution continuity — checkpoints, qualified switching, pauses, no 
     const segs = listSegments(taskId);
     expect(segs.map((s) => s.status)).toEqual(['INCOMPLETE', 'COMPLETED']);
     expect(requests[1].content).toMatch(/You are continuing a task/);
-    expect(requests[1].content).toMatch(/Part one of the narrative, cut/);
-    expect(result.body.outputs).toBe('Part one of the narrative, cutA complete narrative answer.');
+    expect(requests[1].content).toMatch(/Part one of the narrative describes the store/);
+    expect(result.body.outputs).toBe('Part one of the narrative describes the store, its opening hours and the delivery area, cutA complete narrative answer.');
     expect(listCheckpoints(taskId)[0].payload.reason).toBe('OUTPUT_CAPACITY');
   });
 
-  it('LITERAL output pressure: never split — the truncated answer is INCOMPLETE, one call, no continuation', async () => {
+  it('LITERAL output pressure: never split, never INCOMPLETE — it pauses for a route with enough output, and cannot loop paying for the same truncation', async () => {
     mode.pub = 'truncate';
     const { taskId, result } = await runTask({ outputContract: { mode: 'LITERAL', literal: 'ROUTER OK' }, routing: { prohibited: [AGG, LOC] } });
-    expect(result.body.status).toBe('INCOMPLETE');
+    expect(result.body.status).toBe('PAUSED_AWAITING_QUALIFIED_CAPACITY');
     expect(requests).toHaveLength(1);
     expect(listSegments(taskId).map((s) => s.status)).toEqual(['INCOMPLETE']);
+    // It now needs more output than the policy ceiling allows: the sweep does NOT resume it (nothing is paid again).
+    expect(getContinuity(taskId)!.requirements.expectedOutputTokens).toBe(2000);
+    resetResumeThrottleForTests();
+    expect(continuityTickForScheduler().resumed).not.toContain(taskId);
+    expect(requests).toHaveLength(1);
   });
 
   it('paid execution OFF: the task waits PAUSED_AWAITING_BUDGET with zero requests, and resumes when the switch opens', async () => {

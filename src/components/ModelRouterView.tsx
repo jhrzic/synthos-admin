@@ -99,9 +99,32 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
   };
   useEffect(() => { loadRegistryFreeModels().catch(() => {}); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [workspaceId]);
 
+  // Live registry counts for the header — read, never fabricated.
+  const [counts, setCounts] = useState<{ families: number; versions: number; offerings: number; available: number; qualified: number } | null>(null);
+  const loadCounts = async () => {
+    try {
+      const q = `workspaceId=${encodeURIComponent(workspaceId)}`;
+      const [m, qu, id] = await Promise.all([
+        fetch(`/api/registry/models?${q}`).then((r) => r.json()),
+        fetch(`/api/registry/qualifications?${q}`).then((r) => r.json()),
+        fetch(`/api/registry/identity?${q}`).then((r) => r.json()),
+      ]);
+      if (!m?.success || !qu?.success || !id?.success) { setCounts(null); return; }
+      const models = (m.models || []).filter((x: any) => x.lifecycle !== 'REMOVED');
+      setCounts({
+        families: (id.families || []).length,
+        versions: (id.families || []).reduce((n: number, f: any) => n + (f.versions || []).length, 0),
+        offerings: models.length,
+        available: models.filter((x: any) => x.executable).length,
+        qualified: new Set((qu.qualifications || []).filter((x: any) => x.state === 'VALID').map((x: any) => `${x.providerId}/${x.modelId}`)).size,
+      });
+    } catch { setCounts(null); }
+  };
+  useEffect(() => { loadCounts(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [workspaceId]);
+
   const handleSyncFreeModels = async () => {
     setIsSyncingModels(true);
-    try { await loadRegistryFreeModels(); } catch (err) { console.error(err); } finally { setIsSyncingModels(false); }
+    try { await Promise.all([loadRegistryFreeModels(), loadCounts()]); } catch (err) { console.error(err); } finally { setIsSyncingModels(false); }
   };
 
   // Filter free models
@@ -174,17 +197,20 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
         <div>
           <div className="inline-flex items-center gap-2 mb-2">
             <span className="airbyte-badge">
-              OPENROUTER FREE MODEL ARBITRATION & DYNAMIC FALLBACK ROUTER
+              CANONICAL MODEL ROUTER · QUALIFIED ROUTES ONLY · NO SILENT FALLBACK
             </span>
-            <span className="text-[10px] font-mono text-[#00D26A] bg-[#00D26A]/10 px-2 py-0.5 rounded border border-[#00D26A]/30">
-              {freeModels.length} FREE ENDPOINTS ONLINE
+            <span data-testid="router-qualified-count" className={`text-[10px] font-mono px-2 py-0.5 rounded border ${counts && counts.qualified > 0 ? 'text-[#00D26A] bg-[#00D26A]/10 border-[#00D26A]/30' : 'text-[#E8A845] bg-[#E8A845]/10 border-[#E8A845]/30'}`}>
+              {counts === null ? 'COUNTS UNKNOWN' : counts.qualified > 0 ? `${counts.qualified} QUALIFIED ROUTE${counts.qualified === 1 ? '' : 'S'}` : 'NO ROUTES QUALIFIED'}
             </span>
           </div>
           <h1 className="text-2xl sm:text-4xl font-extrabold text-white tracking-tight font-['Space_Grotesk']">
-            Hermes Model Router & OpenRouter Hub
+            Canonical Model Router
           </h1>
-          <p className="text-xs sm:text-sm text-[#8E94B8] mt-1">
-            Dynamic token optimization, zero-cost free endpoint routing (:free), and automated fallback waterfalls across 29+ models.
+          <p className="text-xs sm:text-sm text-[#8E94B8] mt-1" data-testid="router-registry-summary">
+            {counts === null
+              ? 'Registry counts could not be read.'
+              : `Registry-driven model families and versions: ${counts.families} famil${counts.families === 1 ? 'y' : 'ies'}, ${counts.versions} canonical version${counts.versions === 1 ? '' : 's'}, ${counts.offerings} provider route offering${counts.offerings === 1 ? '' : 's'} (${counts.available} available now, ${counts.qualified} qualified for a task class).`}
+            {counts !== null && counts.qualified === 0 && ' No route is qualified yet, so every model task waits (paused, not failed) until an operator qualifies one.'}
           </p>
         </div>
 
@@ -196,7 +222,7 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
             className="px-3.5 py-2 rounded-xl bg-[#615EFF]/20 hover:bg-[#615EFF]/30 border border-[#615EFF]/50 text-[#A5A2FF] text-xs font-bold transition flex items-center gap-1.5 active:scale-95"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isSyncingModels ? 'animate-spin' : ''}`} />
-            <span>{isSyncingModels ? 'Syncing...' : 'Sync Free Models'}</span>
+            <span>{isSyncingModels ? 'Reading…' : 'Reload from registry'}</span>
           </button>
 
           <a
@@ -214,8 +240,8 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
       {/* 3-Step Setup Wizard for OpenRouter Free Model Router */}
       <SetupWizardCard
         id="model-router-setup-wizard"
-        sectionTitle="OpenRouter Zero-Cost Model Router Setup"
-        sectionSubtitle="3-Step router configuration. Connect OpenRouter API, sync 29+ free models (:free), and allocate zero-token-waste fallbacks."
+        sectionTitle="Free & Aggregator Routes (from the Model Registry)"
+        sectionSubtitle="Free and aggregator offerings arrive by manual route import in the Model Registry. Nothing is fetched from this page, and a free route runs only when qualified for the task class."
         statusBadge={{
           isConnected: isLiveApi || freeModels.length > 0,
           connectedLabel: `${freeModels.length} Free Endpoints Synced`,
@@ -235,8 +261,8 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
           placeholder: "Select routing strategy",
           type: "select",
           options: [
-            { label: "Active (Prioritize 29+ Free :free Endpoints)", value: "enabled" },
-            { label: "Disabled (Direct Frontier Model Calling)", value: "disabled" },
+            { label: "Prefer qualified free routes (FREE_WHEN_QUALIFIED)", value: "enabled" },
+            { label: "Default (BEST_QUALIFIED)", value: "disabled" },
           ],
           helperText: "Prefers qualified free routes (FREE_WHEN_QUALIFIED). Never falls back to an unqualified route.",
           onChange: (val) => setZeroCostModeEnabled(val === "enabled"),
@@ -256,16 +282,16 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
           localStorage.setItem('hermes_zero_cost_mode', zeroCostModeEnabled ? '1' : '0');
         }}
         howToGuide={{
-          title: "How to Configure OpenRouter Zero-Cost Routing",
+          title: "How routes become usable",
           steps: [
-            "Paste your OpenRouter API key or click 'Test & Sync Free Endpoints' to pull live free models.",
-            "Review the 29+ Free Model Catalog categorized by Reasoning, Code, Vision, Long Context, and Speed.",
-            "Configure role mappings in the 'Agent Role Allocation Matrix' to pin specific free models to fleet agents.",
-            "Use the 'Router Testing Sandbox' to test live task arbitration and view the fallback waterfall."
+            "Import a route document (OpenRouter, NVIDIA, a local runtime, or a signed manifest) in Admin → Providers & Models.",
+            "Approve which canonical model version each aggregator offering serves.",
+            "Qualify the route for a task class: deterministic evaluation plus canary ledger evidence, approved by an operator.",
+            "Preview routing in the Canonical Router tab — nothing is sent."
           ],
           troubleshooting: [
-            "If an endpoint hits a 429 rate limit, the router automatically hops to the next model in the fallback chain.",
-            "No credit card or paid balance is required when zero-cost routing mode is enabled."
+            "A 429 pauses the task and switches only to an equally qualified route — there is no fallback chain.",
+            "Free external routes are volatile and still need qualification; they are never treated as local $0 execution."
           ]
         }}
       />
@@ -395,7 +421,7 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
               <span>Dynamic Agent-to-Free-Model Routing Matrix</span>
             </h3>
             <p className="text-xs text-[#8E94B8]">
-              Allocate primary and secondary free OpenRouter models (:free) for each specialized agent role. Tasks dispatched to an agent will automatically use these zero-cost models.
+              Reference layout only — the canonical router does not read this matrix. Tasks run on routes qualified for their task class, never on a per-agent model list.
             </p>
           </div>
 
@@ -407,7 +433,7 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
                     <th className="py-3 px-4">Agent Role</th>
                     <th className="py-3 px-4">Specialty</th>
                     <th className="py-3 px-4">Primary Free Model (:free)</th>
-                    <th className="py-3 px-4">Secondary Fallback</th>
+                    <th className="py-3 px-4">Secondary (reference)</th>
                     <th className="py-3 px-4">Recommended Tier</th>
                   </tr>
                 </thead>
@@ -485,7 +511,7 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
                         : 'bg-[#151828] text-[#8E94B8] border-[#222744]'
                     }`}
                   >
-                    {zeroCostModeEnabled ? 'ACTIVE (FREE :free)' : 'DISABLED'}
+                    {zeroCostModeEnabled ? 'FREE_WHEN_QUALIFIED' : 'BEST_QUALIFIED'}
                   </button>
                 </div>
               </div>
@@ -574,7 +600,7 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
                   <div className="flex items-center gap-2">
                     <CheckCircle2 className={`w-4 h-4 ${routeResult.failed ? 'text-[#FF6B6B]' : 'text-[#00D26A]'}`} />
                     <h4 className="text-sm font-bold text-white font-mono uppercase">
-                      Arbitration Decision & Fallback Waterfall
+                      Router Decision (preview — nothing sent)
                     </h4>
                   </div>
                   {routeResult.failed && (
@@ -637,10 +663,10 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
             <div className="bg-[#090A14] border border-[#1F233C] rounded-2xl p-6 shadow-xl space-y-4">
               <div className="flex items-center gap-2 text-white font-bold font-['Space_Grotesk'] text-base">
                 <Shield className="w-4 h-4 text-[#00D26A]" />
-                <span>Zero-Token-Waste Protocol</span>
+                <span>Qualified-route protocol</span>
               </div>
               <p className="text-xs text-[#8E94B8] leading-relaxed">
-                Hermes AgentOS prioritizes free OpenRouter endpoints (<code className="text-[#A5A2FF]">:free</code>) for non-critical triage, intermediate scratchpad planning, and validation sweeps before utilizing higher-tier reasoning models.
+                The router selects only routes qualified for the task class; cost is optimised only among qualified routes; free routes are volatile and must be qualified like any other.
               </p>
 
               <div className="space-y-2 text-xs font-mono">
@@ -669,10 +695,10 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
           <div className="flex items-center justify-between">
             <div>
               <h3 className="text-lg font-bold text-white font-['Space_Grotesk']">
-                Deterministic Model Routing Rules ({rules.length})
+                Legacy Routing Rules ({rules.length}) — not used for selection
               </h3>
               <p className="text-xs text-[#8E94B8]">
-                Heuristic pattern matching rules for automated model selection.
+                Kept for reference. Model selection is the canonical router's (Canonical Router tab); these keyword rules are never read at execution time.
               </p>
             </div>
 
@@ -693,7 +719,7 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
                   <th className="py-3 px-4">Rule Name</th>
                   <th className="py-3 px-4">Condition Matcher</th>
                   <th className="py-3 px-4">Target Model</th>
-                  <th className="py-3 px-4">Fallback</th>
+                  <th className="py-3 px-4">Legacy fallback (not used)</th>
                   <th className="py-3 px-4">Status</th>
                   <th className="py-3 px-4 text-right">Actions</th>
                 </tr>

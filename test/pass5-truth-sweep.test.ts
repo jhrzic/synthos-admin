@@ -72,9 +72,15 @@ describe('N: Master Admin diagnostics no longer fabricates a Guardian policy cou
 });
 
 describe('Architecture rule 1/9: Hermes MODEL and Hermes dedicated runtime stay separate', () => {
-  it('the model router explicitly recognizes "hermes" as an unconfigured provider — never silently mapped to Gemini', () => {
-    const modelRouterContent = fs.readFileSync(path.resolve(process.cwd(), 'lib/model-router.ts'), 'utf-8');
-    expect(modelRouterContent).toMatch(/RECOGNIZED_UNCONFIGURED_PROVIDERS[\s\S]*?"hermes"/);
+  it('"hermes" is never silently mapped to Gemini — the canonical registry resolves it or refuses it', async () => {
+    // The legacy name-prefix router (lib/model-router.ts) is gone; identity
+    // now comes only from the model registry.
+    expect(fs.existsSync(path.resolve(process.cwd(), 'lib/model-router.ts'))).toBe(false);
+    const { resolveRoute, ensureRegistry } = await import('../lib/registry');
+    ensureRegistry();
+    const r = resolveRoute('hermes');
+    if (r.ok) expect(r.providerId).not.toBe('gemini');
+    else expect(r.code).toMatch(/MODEL_NOT_REGISTERED|MODEL_AMBIGUOUS/);
   });
 
   it('hermes-runtime-backed skill execution never falls through to a model call', () => {
@@ -83,17 +89,18 @@ describe('Architecture rule 1/9: Hermes MODEL and Hermes dedicated runtime stay 
     const nextCase = skillExecContent.indexOf("case '", idx + 10);
     const slice = skillExecContent.slice(idx, nextCase > -1 ? nextCase : idx + 800);
     expect(slice).toContain('hermesAdapter.execute(');
-    expect(slice).not.toMatch(/GoogleGenAI|generateContent/);
+    expect(slice).not.toMatch(/GoogleGenAI|generateContent|routedModelCall/);
   });
 });
 
 describe('Rule 6: Hermes runtime requests are never routed through Gemini to fake functionality', () => {
-  it('lib/skill-execution.ts model branch only ever calls GoogleGenAI when the target type is "model", not "hermes_runtime"', () => {
+  it('lib/skill-execution.ts model branch runs through the canonical router, never a direct provider SDK', () => {
     const content = fs.readFileSync(path.resolve(process.cwd(), 'lib/skill-execution.ts'), 'utf-8');
     const modelFnIdx = content.indexOf('async function runModelAction');
     expect(modelFnIdx).toBeGreaterThan(-1);
     const modelFnSlice = content.slice(modelFnIdx, modelFnIdx + 1500);
-    expect(modelFnSlice).toContain('GoogleGenAI');
+    expect(modelFnSlice).toContain('routedModelCall(');
+    expect(content).not.toMatch(/GoogleGenAI|generateContent/);
   });
 });
 

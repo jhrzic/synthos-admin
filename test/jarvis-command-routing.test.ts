@@ -146,11 +146,11 @@ describe('"show me recent receipts" -> real internal READ', () => {
 });
 
 describe('"what is a transformer?" -> plain conversational path, unchanged', () => {
-  it('reaches the natural-language branch (GENERAL_DIRECTIVE), honestly degrades without a real key', async () => {
+  it('reaches the natural-language branch (GENERAL_DIRECTIVE), honestly degrades with no qualified route', async () => {
     const { status, json } = await jarvisCommand('what is a transformer?');
     expect(status).toBe(200);
     expect(json.status).toBe('DEGRADED');
-    expect(json.reason).toBe('API_KEY_NOT_CONFIGURED');
+    expect(json.reason).toBe('NO_QUALIFIED_ROUTE');
   });
 });
 

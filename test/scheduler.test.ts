@@ -27,6 +27,9 @@ isolateVaultForTest('scheduler');
 delete process.env.GEMINI_API_KEY;
 delete process.env.WINDMILL_BASE_URL;
 
+import { allowPaidExecutionForTest } from './helpers/spend';
+import { saveSpendPolicy, DEFAULT_SPEND_POLICY } from '../lib/spend/policy';
+
 import {
   parseSchedulePhrase,
   computeNextIntervalRun,
@@ -508,6 +511,11 @@ describe('10/11: a scheduled occurrence that genuinely fails records the failure
   it('a GitHub rate-limit failure at fire time records status FAILED, zero artifact/Aegis/receipt, and the schedule reaches terminal FAILED (ONE_TIME)', async () => {
     process.env.GEMINI_API_KEY = 'fake-key-never-reached-github-fails-first';
     process.env.GITHUB_API_BASE_URL = `http://127.0.0.1:${mockPort}`;
+    // Research refuses up front (NOT_CONFIGURED) when no route is qualified for
+    // research synthesis. This test is about a failure AFTER that gate — GitHub
+    // discovery failing — so it stands up a qualified fixture route. The model
+    // is never reached: GitHub fails first.
+    allowPaidExecutionForTest([['gemini', 'gemini-3.6-flash']]);
     try {
       const dueNow = new Date().toISOString();
       const parsed = { recurrenceType: 'ONCE' as const, nextRunAt: dueNow, matchedPhrase: 'now' };
@@ -537,6 +545,7 @@ describe('10/11: a scheduled occurrence that genuinely fails records the failure
     } finally {
       delete process.env.GEMINI_API_KEY;
       delete process.env.GITHUB_API_BASE_URL;
+      saveSpendPolicy(DEFAULT_SPEND_POLICY, 'test');
     }
   });
 });

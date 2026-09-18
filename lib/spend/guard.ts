@@ -36,7 +36,8 @@
 import { recordRuntimeEvent } from '../runtime-events';
 import { getDatabase } from '../persistence';
 import { runWithPermit, type SpendPermit } from './network-guard';
-import { isRegistryGoverned, registryGate } from '../registry';
+import { isRegistryGoverned, registryGate, registryPrice } from '../registry';
+import { getProviderBody } from '../registry/store';
 import { currentRouteContext } from '../registry/route-context';
 import {
   getSpendPolicy, getModelPrice, costTierFor, tierRank, estimateTokensFromChars,
@@ -214,6 +215,29 @@ function block(req: PaidCallRequest, attempt: number, code: string, reason: stri
   return { permitted: false, usageId, status: 'BLOCKED', code, reason, estimatedCostUsd: (extra.estimatedCostUsd as number) ?? null };
 }
 
+/**
+ * A genuinely $0 LOCAL call: a registry-governed provider whose route kind is
+ * LOCAL and billing FREE_LOCAL, with an APPROVED, current price record whose
+ * every rate is zero. Unknown, unreviewed, stale or non-zero pricing is never
+ * treated as free, and nothing external qualifies however cheap it is.
+ */
+export function isGovernedZeroCostLocal(provider: string, model: string): boolean {
+  try {
+    if (!isRegistryGoverned(provider)) return false;
+    const body = getProviderBody(provider);
+    if (!body || body.routeKind !== 'LOCAL' || body.billing !== 'FREE_LOCAL') return false;
+    const p = registryPrice(provider, model);
+    if (!p || p.state !== 'CURRENT' || p.record.approval !== 'APPROVED') return false;
+    const r = p.record;
+    const zero = (x: number | null) => x === null || x === 0;
+    return r.rates.input === 0 && r.rates.output === 0 && zero(r.rates.cachedInput)
+      && r.tiers.every((t) => t.rates.input === 0 && t.rates.output === 0 && zero(t.rates.cachedInput))
+      && r.toolCharges.every((t) => t.usd === 0) && r.modalityCharges.every((m) => m.usd === 0);
+  } catch {
+    return false;
+  }
+}
+
 /** Pre-dispatch checks and reservation. Returns a refusal, or the reserved row id and estimate. */
 export function authorizePaidCall(req: PaidCallRequest): { permitted: false; usageId: string; status: 'BLOCKED'; code: string; reason: string; estimatedCostUsd: number | null } | { permitted: true; usageId: string; estimatedCostUsd: number; tier: string; attempt: number; maxTotalTokens?: number } {
   const policy = getSpendPolicy();
@@ -221,9 +245,22 @@ export function authorizePaidCall(req: PaidCallRequest): { permitted: false; usa
   const attempt = prior.length ? Math.max(...prior.map((r) => r.attempt)) + 1 : 1;
 
   if (!req.idempotencyKey || !req.idempotencyKey.trim()) return block(req, attempt, 'NO_IDEMPOTENCY_KEY', 'A paid call must carry an idempotency key.');
-  if (!policy.paidExecutionEnabled) return block(req, attempt, 'PAID_EXECUTION_DISABLED', 'Paid execution is switched off (Master Admin → Spend Control).');
-  const provLimits = policy.providers[req.provider];
-  if (!provLimits || !provLimits.enabled) return block(req, attempt, 'PROVIDER_DISABLED', `Paid calls to ${req.provider} are switched off.`);
+  // ONE policy, three permissions: any model execution at all; paid external
+  // execution; genuinely $0 LOCAL execution. Paid OFF blocks every
+  // positive-cost call — it does not block a governed $0 local route, which
+  // has its own switch. A free EXTERNAL route (promotional / aggregator) is
+  // never "local": it stays under the paid switch and provider permission.
+  if (!policy.modelExecutionEnabled) return block(req, attempt, 'MODEL_EXECUTION_DISABLED', 'All model execution is switched off (Master Admin → Spend Control).');
+  const zeroLocal = isGovernedZeroCostLocal(req.provider, req.model);
+  // A local route with no explicit limits gets a conservative one: one call at a time, $0.
+  const provLimits = policy.providers[req.provider] ?? (zeroLocal ? { enabled: true, dailyUsd: 0, monthlyUsd: 0, maxConcurrent: 1 } : undefined);
+  if (zeroLocal) {
+    if (!policy.localExecutionEnabled) return block(req, attempt, 'LOCAL_EXECUTION_DISABLED', 'Local $0 execution is switched off (Master Admin → Spend Control).');
+  } else {
+    if (!policy.paidExecutionEnabled) return block(req, attempt, 'PAID_EXECUTION_DISABLED', 'Paid execution is switched off (Master Admin → Spend Control).');
+    if (!provLimits || !provLimits.enabled) return block(req, attempt, 'PROVIDER_DISABLED', `Paid calls to ${req.provider} are switched off.`);
+  }
+  if (!provLimits) return block(req, attempt, 'PROVIDER_DISABLED', `No limits are configured for ${req.provider}.`);
 
   // --- MODEL REGISTRY ---------------------------------------------------------
   // A provider governed by the registry may only be called for a canonical,
@@ -353,7 +390,7 @@ export function previewPaidCall(req: PaidCallRequest) {
 
 /** Refusals that mean "not now" — the work should wait, not fail. */
 export const SPEND_WAIT_CODES = new Set([
-  'PAID_EXECUTION_DISABLED', 'PROVIDER_DISABLED', 'PRICING_UNKNOWN',
+  'PAID_EXECUTION_DISABLED', 'LOCAL_EXECUTION_DISABLED', 'MODEL_EXECUTION_DISABLED', 'PROVIDER_DISABLED', 'PRICING_UNKNOWN',
   'CONCURRENCY_GLOBAL', 'CONCURRENCY_PROVIDER', 'CONCURRENCY_WORKSPACE',
   'BUDGET_GLOBAL_DAILY', 'BUDGET_GLOBAL_MONTHLY', 'BUDGET_PROVIDER_DAILY', 'BUDGET_PROVIDER_MONTHLY', 'BUDGET_WORKSPACE_DAILY',
 ]);

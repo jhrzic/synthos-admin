@@ -48,8 +48,10 @@ describe('Jarvis conversation memory: server-side wiring is real, not decorative
 
   it('12/15: the model request uses native chat-role turns, never flattens history into the system instruction string', () => {
     const slice = jarvisCommandRouteSlice();
-    expect(slice).toContain('role: m.role === "assistant" ? "model" : "user"');
-    expect(slice).toContain('parts: [{ text: m.content }]');
+    // Role separation is preserved through the protocol adapter: history
+    // stays user/assistant turns, the system instruction is its own role.
+    expect(slice).toContain('{ role: "system" as const, content: jarvisSystemInstruction }');
+    expect(slice).toContain('...priorTurns.map((m) => ({ role: (m.role === "assistant" ? "assistant" : "user") as "assistant" | "user", content: m.content }))');
     // The system instruction itself is a static literal, never built by
     // concatenating history. P3 (TTS/speech separation) turned it into a
     // multi-line template literal (it now describes a JSON response
@@ -63,19 +65,19 @@ describe('Jarvis conversation memory: server-side wiring is real, not decorative
 
   it('the current message is appended exactly once, as the final turn, separately from retrieved history', () => {
     const slice = jarvisCommandRouteSlice();
-    const conversationContentsIdx = slice.indexOf('const conversationContents = [');
-    expect(conversationContentsIdx).toBeGreaterThan(-1);
-    const constructionSlice = slice.slice(conversationContentsIdx, conversationContentsIdx + 400);
-    expect(constructionSlice).toContain('{ role: "user", parts: [{ text: trimmed }] }');
-    // Exactly one occurrence of appending `trimmed` as its own turn.
-    const occurrences = (constructionSlice.match(/parts: \[\{ text: trimmed \}\]/g) || []).length;
-    expect(occurrences).toBe(1);
+    const idx = slice.indexOf('const conversationMessages = [');
+    expect(idx).toBeGreaterThan(-1);
+    const end = slice.indexOf('];', idx);
+    const constructionSlice = slice.slice(idx, end);
+    // Exactly one occurrence of appending `trimmed` as its own turn — the last element.
+    expect((constructionSlice.match(/content: trimmed \}/g) || []).length).toBe(1);
+    expect(constructionSlice.trim().split('\n').filter(Boolean).pop()).toContain('{ role: "user" as const, content: trimmed }');
   });
 
-  it('13: the failover helper still receives the full candidate model list — 2f16fad\'s failover logic is untouched', () => {
+  it('13: one routed call carries the whole conversation — no candidate list, no failover', () => {
     const slice = jarvisCommandRouteSlice();
-    expect(slice).toContain('jarvisFailover = await generateWithFailover(candidateModels, async (candidateModel)');
-    expect(slice).toContain('...DEFAULT_CANDIDATE_MODELS');
+    expect(slice).toContain('messages: conversationMessages');
+    expect(slice).not.toMatch(/generateWithFailover|DEFAULT_CANDIDATE_MODELS/);
   });
 
   it('14: real provenance (session id, prior message count, context size, strategy, truncation) is returned — never fabricated', () => {

@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "synthos.continuation-policy/v1",
+  "version": "1.0.0",
+  "description": "Progress-aware continuation. No fixed segment count ends a task: it continues while each segment makes verified forward progress and authorised budget remains, and pauses for replanning when progress stalls.",
+  "maxNoProgressSegments": 2,
+  "minProgressChars": 40,
+  "maxShingleOverlap": 0.8,
+  "maxTaskSpendUsd": 1.0,
+  "safetySegmentCeiling": 200
+}

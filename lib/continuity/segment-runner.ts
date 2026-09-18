@@ -40,8 +40,11 @@ import type { OutputContract, ProviderTermination } from '../fabric/output-contr
 import type { PrivacyClass } from '../registry/types';
 import {
   getContinuity, openContinuity, openSegment, closeSegment, writeCheckpoint, continuationContext, transition, excludeRoute, floorFrom,
-  listSegments, sha256, MAX_SEGMENTS, type PauseState, type SegmentRecord,
+  listSegments, sha256, continuationPolicy, setNoProgressCount, taskSpendUsd, recordSegmentProgress, updateRequirements,
+  type PauseState, type SegmentRecord,
 } from './controller';
+import { measureProgress } from './progress';
+import { getSpendPolicy } from '../spend/policy';
 
 export interface SegmentRunInput {
   taskId: string;
@@ -83,7 +86,7 @@ export type SegmentRunResult =
   | { kind: 'PROVIDER_FAILED'; code: 'MODEL_PROVIDER_UNAVAILABLE' | 'EMPTY_PROVIDER_RESPONSE'; error: string; lastProviderError: string | null; hadProviderError: boolean };
 
 const WAIT_CODE_STATE: Record<string, PauseState> = {
-  PAID_EXECUTION_DISABLED: 'PAUSED_AWAITING_BUDGET', PROVIDER_DISABLED: 'PAUSED_AWAITING_BUDGET', PRICING_UNKNOWN: 'PAUSED_AWAITING_QUALIFIED_CAPACITY',
+  PAID_EXECUTION_DISABLED: 'PAUSED_AWAITING_BUDGET', LOCAL_EXECUTION_DISABLED: 'PAUSED_AWAITING_BUDGET', MODEL_EXECUTION_DISABLED: 'PAUSED_AWAITING_BUDGET', PROVIDER_DISABLED: 'PAUSED_AWAITING_BUDGET', PRICING_UNKNOWN: 'PAUSED_AWAITING_QUALIFIED_CAPACITY',
   BUDGET_GLOBAL_DAILY: 'PAUSED_AWAITING_BUDGET', BUDGET_GLOBAL_MONTHLY: 'PAUSED_AWAITING_BUDGET', BUDGET_PROVIDER_DAILY: 'PAUSED_AWAITING_BUDGET',
   BUDGET_PROVIDER_MONTHLY: 'PAUSED_AWAITING_BUDGET', BUDGET_WORKSPACE_DAILY: 'PAUSED_AWAITING_BUDGET',
   CONCURRENCY_GLOBAL: 'PAUSED_AWAITING_CAPACITY', CONCURRENCY_PROVIDER: 'PAUSED_AWAITING_CAPACITY', CONCURRENCY_WORKSPACE: 'PAUSED_AWAITING_CAPACITY',
@@ -140,6 +143,9 @@ export async function runModelSegments(inp: SegmentRunInput): Promise<SegmentRun
   }
   inp.onRunning?.();
   let cont = getContinuity(inp.taskId);
+  // A resumed task keeps what it learned about itself (e.g. a contract-atomic
+  // answer that needs more output than it was first given).
+  if (cont && cont.requirements?.expectedOutputTokens > req.expectedOutputTokens) req.expectedOutputTokens = cont.requirements.expectedOutputTokens;
   const { instruction: _i, ...storedReq } = req;
   if (!cont) cont = openContinuity({ taskId: inp.taskId, workspaceId: inp.workspaceId, taskClass: tc.taskClassId, contract, requirements: storedReq, constraints, privacyClass: inp.privacyClass ?? 'STANDARD' });
 
@@ -155,9 +161,13 @@ export async function runModelSegments(inp: SegmentRunInput): Promise<SegmentRun
 
   for (;;) {
     cont = getContinuity(inp.taskId)!;
-    if (cont.segmentCount >= MAX_SEGMENTS) {
-      transition(inp.taskId, inp.workspaceId, 'PAUSED_AWAITING_QUALIFIED_CAPACITY', `The task reached ${MAX_SEGMENTS} segments without completing its contract; it waits for an operator rather than continuing indefinitely.`);
-      return { kind: 'PAUSED', state: 'PAUSED_AWAITING_QUALIFIED_CAPACITY', reason: `segment limit ${MAX_SEGMENTS} reached`, decision: lastDecision };
+    const policy = continuationPolicy();
+    // Absolute safety ceiling — far beyond any progressing task; only a
+    // malfunction reaches it. Work is kept; a human replans.
+    if (cont.segmentCount >= policy.safetySegmentCeiling) {
+      writeCheckpoint({ taskId: inp.taskId, reason: 'SAFETY_CEILING', objective: `${inp.taskTitle}\n${inp.description}`, acceptanceCriteria: acceptance(contract), remainingWork: [nextStep || 'Run the task'], tail: outputs.join('') || null });
+      transition(inp.taskId, inp.workspaceId, 'PAUSED_AWAITING_REPLAN', `The task reached the safety ceiling of ${policy.safetySegmentCeiling} segments (continuation policy v${policy.version}). Its work is kept in a signed checkpoint; an operator replans or resumes it.`);
+      return { kind: 'PAUSED', state: 'PAUSED_AWAITING_REPLAN', reason: `safety ceiling ${policy.safetySegmentCeiling} reached`, decision: lastDecision };
     }
     // ---- 2. route --------------------------------------------------------------------
     const current = cont.currentDecisionId ? lastDecision : null;
@@ -182,6 +192,17 @@ export async function runModelSegments(inp: SegmentRunInput): Promise<SegmentRun
       try { recordActivityEvent({ taskId: inp.taskId, expectedWorkspaceId: inp.workspaceId, eventType: 'ROUTE_SWITCHED', agentId: 'continuity', payload: { from: cont.currentRouteKey, to: `${decision.selected.providerId}/${decision.selected.modelId}@${decision.selected.deploymentId}`, decisionId: decision.decisionId } }); } catch { /* evidence only */ }
     }
     const sel = decision.selected;
+    // AUTHORISED TASK SPEND — checked before every segment. Reaching it never
+    // fails the task: it pauses for an operator to authorise more.
+    {
+      const allowance = cont.spendAllowanceUsd ?? policy.maxTaskSpendUsd;
+      const spent = taskSpendUsd(inp.taskId);
+      if (spent + (sel.estimatedCostUsd ?? 0) > allowance) {
+        writeCheckpoint({ taskId: inp.taskId, reason: 'TASK_SPEND_ALLOWANCE', objective: `${inp.taskTitle}\n${inp.description}`, acceptanceCriteria: acceptance(contract), remainingWork: [nextStep || 'Run the task'], tail: outputs.join('') || null });
+        transition(inp.taskId, inp.workspaceId, 'PAUSED_AWAITING_APPROVAL', `This task has spent $${spent.toFixed(6)} of its authorised $${allowance.toFixed(2)}; the next segment could cost up to $${(sel.estimatedCostUsd ?? 0).toFixed(6)}. An operator's resume authorises one more increment.`);
+        return { kind: 'PAUSED', state: 'PAUSED_AWAITING_APPROVAL', reason: 'authorised task spend reached', decision };
+      }
+    }
     const selCand = decision.candidates.find((c) => c.routeKey === `${sel.providerId}/${sel.modelId}@${sel.deploymentId}`);
     if (selCand?.capacity?.acting?.length) {
       try { recordActivityEvent({ taskId: inp.taskId, expectedWorkspaceId: inp.workspaceId, eventType: 'CAPACITY_WARNING', agentId: 'continuity', payload: { route: selCand.routeKey, acting: selCand.capacity.acting, headroom: selCand.capacity.headroom } }); } catch { /* evidence only */ }
@@ -278,31 +299,59 @@ export async function runModelSegments(inp: SegmentRunInput): Promise<SegmentRun
     }
 
     if (row?.status === 'SUCCESS') successKeys.push(spendKey);
-    outputs.push(gen.output);
     const outputHash = sha256(gen.output);
+    const atomic = contract.mode !== 'NARRATIVE' || !tc.segmentable;
 
-    if (isOutputCap(termination)) {
-      const continuationsUsed = listSegments(inp.taskId).filter((x) => x.status === 'INCOMPLETE').length;
-      if (contract.mode === 'NARRATIVE' && tc.segmentable && continuationsUsed < (tc.maxContinuations ?? 0)) {
-        // Output pressure on a narrative: the text so far is kept (unverified
-        // until assembly), and the next segment continues it.
-        closeSegment(seg.segmentId, { ...segUsage, status: 'INCOMPLETE', statusReason: `output capacity reached (${termination.providerStatus ?? termination.reason}); continued in the next segment`, outputHash, artifactHashes: [outputHash] });
+    if (isOutputCap(termination) && !atomic) {
+      // Output pressure on a narrative: continue while each segment makes
+      // VERIFIED FORWARD PROGRESS. No segment count ends the task.
+      const progress = measureProgress(outputs.join(''), gen.output, policy);
+      recordSegmentProgress(seg.segmentId, progress);
+      if (progress.made) {
+        outputs.push(gen.output);
+        setNoProgressCount(inp.taskId, 0);
+        closeSegment(seg.segmentId, { ...segUsage, status: 'INCOMPLETE', statusReason: `output capacity reached (${termination.providerStatus ?? termination.reason}); +${progress.newChars} new characters; continued in the next segment`, outputHash, artifactHashes: [outputHash] });
         storeSegmentOutput(seg.segmentId, gen.output);
-        writeCheckpoint({ taskId: inp.taskId, reason: 'OUTPUT_CAPACITY', objective: `${inp.taskTitle}\n${inp.description}`, acceptanceCriteria: acceptance(contract), remainingWork: ['Continue the text exactly where it stopped, completing the remaining work.'], tail: outputs.join('') });
-        transition(inp.taskId, inp.workspaceId, 'AWAITING_CONTINUATION', `Segment ${seg.sequence} reached the output limit; the task continues in segment ${seg.sequence + 1}.`);
-        nextStep = 'Continue the text exactly where it stopped, completing the remaining work.';
-        switching = false;
-        continue;
+      } else {
+        // Kept as evidence, excluded from the assembly.
+        const stalled = cont.noProgressCount + 1;
+        setNoProgressCount(inp.taskId, stalled);
+        closeSegment(seg.segmentId, { ...segUsage, status: 'NO_PROGRESS', statusReason: `no forward progress: ${progress.reason} (${stalled} of ${policy.maxNoProgressSegments} allowed in a row)`, outputHash, artifactHashes: [outputHash] });
+        storeSegmentOutput(seg.segmentId, gen.output);
+        if (stalled >= policy.maxNoProgressSegments) {
+          writeCheckpoint({ taskId: inp.taskId, reason: 'NO_PROGRESS', objective: `${inp.taskTitle}\n${inp.description}`, acceptanceCriteria: acceptance(contract), remainingWork: ['Replan: the last segments stopped making progress.'], openQuestions: [progress.reason], tail: outputs.join('') || null });
+          transition(inp.taskId, inp.workspaceId, 'PAUSED_AWAITING_REPLAN', `${stalled} consecutive segments made no forward progress (${progress.reason}). The work so far is kept in a signed checkpoint; an operator replans or resumes it. Nothing further is spent until then.`);
+          return { kind: 'PAUSED', state: 'PAUSED_AWAITING_REPLAN', reason: progress.reason, decision };
+        }
       }
-      // LITERAL / JSON: never split. A NARRATIVE that used every continuation
-      // its class allows stops too. Either way the truncated answer stays
-      // INCOMPLETE and goes to Aegis as such — never DONE.
-      closeSegment(seg.segmentId, { ...segUsage, status: 'INCOMPLETE', statusReason: contract.mode === 'NARRATIVE' ? `output limit reached with no continuation left (${tc.maxContinuations ?? 0} allowed for ${tc.taskClassId})` : `${contract.mode} output truncated at the output limit; a ${contract.mode} answer is never split across segments`, outputHash, artifactHashes: [outputHash] });
-      storeSegmentOutput(seg.segmentId, gen.output);
-    } else {
-      closeSegment(seg.segmentId, { ...segUsage, status: 'COMPLETED', outputHash, artifactHashes: [outputHash] });
-      storeSegmentOutput(seg.segmentId, gen.output);
+      writeCheckpoint({ taskId: inp.taskId, reason: 'OUTPUT_CAPACITY', objective: `${inp.taskTitle}\n${inp.description}`, acceptanceCriteria: acceptance(contract), remainingWork: ['Continue the text exactly where it stopped, completing the remaining work.'], tail: outputs.join('') });
+      transition(inp.taskId, inp.workspaceId, 'AWAITING_CONTINUATION', `Segment ${seg.sequence} reached the output limit; the task continues in segment ${seg.sequence + 1}.`);
+      nextStep = 'Continue the text exactly where it stopped, completing the remaining work.';
+      switching = false;
+      continue;
     }
+
+    if (isOutputCap(termination) && atomic) {
+      // CONTRACT-ATOMIC (LITERAL / JSON_OBJECT, or a non-segmentable class):
+      // never split, never shown as done. The task records that it needs more
+      // output than this route/ceiling gave, and pauses; the router will only
+      // resume it on a qualified route whose capacity AND the policy ceiling
+      // cover that — so it cannot loop paying for the same truncation.
+      const ceiling = getSpendPolicy().task.maxOutputTokens;
+      const needed = Math.max(req.expectedOutputTokens, ceiling) * 2;
+      closeSegment(seg.segmentId, { ...segUsage, status: 'INCOMPLETE', statusReason: `${contract.mode} answer truncated at the output limit; a contract-atomic answer is never split. It needs a route with at least ${needed} output tokens.`, outputHash, artifactHashes: [outputHash] });
+      storeSegmentOutput(seg.segmentId, gen.output);
+      req.expectedOutputTokens = needed;
+      const { instruction: _x, ...reqToStore } = req;
+      updateRequirements(inp.taskId, reqToStore);
+      writeCheckpoint({ taskId: inp.taskId, reason: 'OUTPUT_CAPACITY_ATOMIC', objective: `${inp.taskTitle}\n${inp.description}`, acceptanceCriteria: acceptance(contract), remainingWork: [`Produce the complete ${contract.mode} answer on a route with ≥ ${needed} output tokens`], tail: null });
+      transition(inp.taskId, inp.workspaceId, 'PAUSED_AWAITING_QUALIFIED_CAPACITY', `The ${contract.mode} answer needs more output than this route or the policy ceiling (${ceiling} tokens) allows. It is never split; it resumes on a qualified route with at least ${needed} output tokens once the ceiling permits.`);
+      return { kind: 'PAUSED', state: 'PAUSED_AWAITING_QUALIFIED_CAPACITY', reason: `needs ≥ ${needed} output tokens`, decision };
+    }
+
+    outputs.push(gen.output);
+    closeSegment(seg.segmentId, { ...segUsage, status: 'COMPLETED', outputHash, artifactHashes: [outputHash] });
+    storeSegmentOutput(seg.segmentId, gen.output);
     return {
       kind: 'OUTPUT', output: outputs.join(''), modelUsed, providerId: sel.providerId, modelId: sel.modelId, usageMetadata, termination,
       successUsageKeys: successKeys, decision, taskClass: tc.taskClassId, qualificationId: sel.qualificationId, segments: listSegments(inp.taskId), latencyMs,

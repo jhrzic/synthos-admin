@@ -29,17 +29,16 @@ isolateVaultForTest('graph-contract');
 import { getDatabase, getTaskReceipts, verifyReceipt, getTaskWithHistory, getTaskArtifacts } from '../lib/persistence';
 import { createUser, login } from '../lib/auth';
 import { ensureWorkspace, grantMembership } from '../lib/workspaces';
-import { classifyModelRequest } from '../lib/model-router';
 import { searchWorkspaceMemory, reindexWorkspaceMemory, getArtifactRetrievalStatus } from '../lib/memory-index';
 import { allowPaidExecutionForTest } from './helpers/spend';
 import { listUsageForKey } from '../lib/spend/ledger';
 import { DEFAULT_SPEND_POLICY } from '../lib/spend/policy';
 
 const WS = `ws-graph-contract-${Date.now()}`;
+// A synthetic-free fixture id registered (and qualified) in this test's own
+// registry by allowPaidExecutionForTest — never a hardcoded routing rule.
 const MODEL_ALIAS = 'gemini-3.6-flash';
-const ROUTE = classifyModelRequest(MODEL_ALIAS);
-if (ROUTE.provider !== 'GEMINI') throw new Error(`${MODEL_ALIAS} no longer routes to Gemini`);
-const MODEL = ROUTE.resolvedModel;
+const MODEL = MODEL_ALIAS;
 let token = '';
 let BASE = '';
 let child: ChildProcess;

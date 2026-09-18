@@ -9,6 +9,7 @@ import { TaskRoutingPanel } from '../src/components/registry/TaskRoutingPanel';
 import { CanonicalRouterPanel } from '../src/components/registry/CanonicalRouterPanel';
 import { ModelFamiliesPanel } from '../src/components/registry/ModelFamiliesPanel';
 import { taskStatusLabel } from '../src/components/verification/outcome';
+import { ModelRouterView } from '../src/components/ModelRouterView';
 
 // ---------------------------------------------------------------------------
 // ROUTER + CONTINUITY UI — rendered, with SYNTHETIC fixtures (no production
@@ -163,6 +164,53 @@ describe('Model Registry by family', () => {
     fireEvent.click(screen.getByText('Approve mapping (audited)'));
     await waitFor(() => expect(calls.find((c) => c.url === '/api/registry/route-mappings/approve')!.body).toMatchObject({ providerId: 'synthetic-agg', modelId: 'synthetic-pub/pub-large', canonicalVersionId: 'synthetic-pub/pub-large' }));
     expect(calls.every((c) => c.url.startsWith('/api/registry/'))).toBe(true);
+  });
+});
+
+
+describe('Model Router header — live registry counts, never a stale fallback-router claim', () => {
+  const props = { workspaceId: 'ws-ui', models: {} as any, rules: [], onUpdateRule: () => {}, onAddRule: () => {}, onDeleteRule: () => {}, onSendQuery: async () => '', onSelectTab: () => {} } as any;
+  const registry = (qualifications: any[]) => {
+    routes['/api/registry/models'] = () => ({ success: true, models: [
+      { providerId: 'synthetic-pub', modelId: 'pub-large', displayName: 'pub-large', lifecycle: 'ACTIVE', executable: true, routeKind: 'DIRECT', freeTier: { free: false } },
+      { providerId: 'synthetic-agg', modelId: 'synthetic-pub/pub-large', displayName: 'agg', lifecycle: 'ACTIVE', executable: false, routeKind: 'AGGREGATOR', freeTier: { free: true, guaranteed: false } },
+    ] });
+    routes['/api/registry/qualifications'] = () => ({ success: true, qualifications });
+    routes['/api/registry/identity'] = () => ({ success: true, families: [{ familyId: 'pub-family', versions: [{ canonicalVersionId: 'synthetic-pub/pub-large' }] }] });
+    routes['/api/router'] = () => ({ success: true, policies: [], decisions: [], paused: [] });
+  };
+
+  it('with nothing qualified it says so plainly, with counts read from the registry', async () => {
+    registry([]);
+    render(<ModelRouterView {...props} />);
+    await waitFor(() => expect(screen.getByTestId('router-registry-summary').textContent).toMatch(/No route is qualified yet/));
+    const text = document.body.textContent || '';
+    expect(text).toContain('Canonical Model Router');
+    expect(screen.getByTestId('router-qualified-count').textContent).toBe('NO ROUTES QUALIFIED');
+    expect(screen.getByTestId('router-registry-summary').textContent).toMatch(/1 family, 1 canonical version, 2 provider route offerings \(1 available now, 0 qualified/);
+    expect(text).not.toMatch(/fallback router|29\+ models/i);
+    expect(calls.every((c) => c.url.startsWith('/api/'))).toBe(true);
+  });
+
+  it('a VALID qualification is counted once per route, and the no-qualified message disappears', async () => {
+    registry([
+      { providerId: 'synthetic-pub', modelId: 'pub-large', taskClass: 'content_generation', state: 'VALID' },
+      { providerId: 'synthetic-pub', modelId: 'pub-large', taskClass: 'summarization', state: 'VALID' },
+      { providerId: 'synthetic-agg', modelId: 'synthetic-pub/pub-large', taskClass: 'content_generation', state: 'INVALIDATED' },
+    ]);
+    render(<ModelRouterView {...props} />);
+    await waitFor(() => expect(screen.getByTestId('router-qualified-count').textContent).toBe('1 QUALIFIED ROUTE'));
+    expect(screen.getByTestId('router-registry-summary').textContent).not.toMatch(/No route is qualified yet/);
+  });
+
+  it('the spend panel exposes model-execution and local-$0 switches, both served by the one kill endpoint', () => {
+    const panel = fs.readFileSync(path.join(process.cwd(), 'src/components/SpendControlPanel.tsx'), 'utf8');
+    expect(panel).toContain('data-testid="execution-permissions"');
+    expect(panel).toContain("'model-execution'");
+    expect(panel).toContain("'local-execution'");
+    const server = fs.readFileSync(path.join(process.cwd(), 'server.ts'), 'utf8');
+    expect(server).toContain('scope === "model-execution") partial = { modelExecutionEnabled: enabled }');
+    expect(server).toContain('scope === "local-execution") partial = { localExecutionEnabled: enabled }');
   });
 });
 

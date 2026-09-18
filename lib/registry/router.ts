@@ -34,12 +34,14 @@ import { routeIdentity, deploymentsOf, providerBodyForDeployment, privacyRank, r
 import { findQualification, getTaskClass, type QualificationView } from './qualification';
 import { isRouteStale } from './route-import';
 import { resolveProviderEndpoint } from './endpoints';
+import { getProtocolAdapter } from './protocols';
 import { currentPricing, priceVersionKey } from './pricing';
 import { assessCapacity, type CapacityReport } from '../continuity/capacity';
 import { approvedRouteStats } from './performance';
 import { checkGuardianRules } from '../kil-gate';
 import { resolveProviderState } from '../provider-state';
 import { resolvePlatformSetting } from '../platform-settings';
+import { getSpendPolicy } from '../spend/policy';
 import type { PrivacyClass, RouteKind, ModelManifest, PricingRecord } from './types';
 import bundledPolicies from './data/routing-policies.json';
 
@@ -191,7 +193,9 @@ export function requirementsFor(p: { taskClass: string; outputContract?: string;
     taskClass: tc.taskClassId, outputContract: contract,
     capabilities: [...new Set([...tc.requiredCapabilities, ...(p.extraCapabilities || [])])], modality: tc.modality,
     // ~4 characters per token: an estimate for headroom, not a price.
-    estimatedInputTokens: Math.ceil((p.inputChars ?? 0) / 4), expectedOutputTokens: p.expectedOutputTokens ?? 1024,
+    // Default expected output = what a call will actually request: the spend
+    // policy's per-call output ceiling (never an assumed figure above it).
+    estimatedInputTokens: Math.ceil((p.inputChars ?? 0) / 4), expectedOutputTokens: p.expectedOutputTokens ?? getSpendPolicy().task.maxOutputTokens,
     tools: tc.requiredTools, privacyClass: p.privacyClass ?? 'STANDARD', instruction: p.instruction,
   };
 }
@@ -332,6 +336,7 @@ export function routeTask(req: RouteRequest): RoutingDecision {
   const minReliability = Math.max(constraints.minReliability ?? 0, floor?.minReliability ?? 0, tc.minReliability);
 
   const providers = new Map(listStoredProviders().map((p) => [p.providerId, p]));
+  const outputCeilingNow = getSpendPolicy().task.maxOutputTokens;
   const candidates: Candidate[] = [];
   for (const m of listStoredModels()) {
     const p = providers.get(m.providerId);
@@ -371,6 +376,8 @@ export function routeTask(req: RouteRequest): RoutingDecision {
         if (b.state === 'DEPRECATED' || b.state === 'DEGRADED') continue;
         if (b.state === 'NOT_CONFIGURED' && /credential/.test(b.reason)) { add('INVALID_OR_MISSING_CREDENTIAL', b.reason); continue; }
         if (b.state === 'POLICY_BLOCKED' && /paid execution is switched off/.test(b.reason)) { add('PAID_EXECUTION_DISABLED', b.reason); continue; }
+        if (b.state === 'POLICY_BLOCKED' && /local \$0 execution is switched off/.test(b.reason)) { add('LOCAL_EXECUTION_DISABLED', b.reason); continue; }
+        if (b.state === 'POLICY_BLOCKED' && /all model execution is switched off/.test(b.reason)) { add('MODEL_EXECUTION_DISABLED', b.reason); continue; }
         if (b.state === 'POLICY_BLOCKED' && /spend policy does not enable/.test(b.reason)) { add('PROVIDER_DISABLED', b.reason); continue; }
         if (b.state === 'POLICY_BLOCKED' && /workspace/.test(b.reason)) { add('WORKSPACE_PROHIBITED', b.reason); continue; }
         if (b.state === 'POLICY_BLOCKED' && /output contract/.test(b.reason)) { add('CONTRACT_MISMATCH', b.reason); continue; }
@@ -378,6 +385,10 @@ export function routeTask(req: RouteRequest): RoutingDecision {
         add(VIEW_CODE[b.state] ?? b.state, b.reason);
       }
       if (body.billing !== 'FREE_LOCAL' && isRouteStale(m.providerId)) add('ROUTE_DATA_STALE', `the last ${m.providerId} route import failed; its prices are not trusted until a successful import`);
+      // A managed-agent runtime (EXTERNAL_RUNTIME) is not a model call: it is
+      // eligible only for agent orchestration, never for ordinary model work.
+      const dispatch = getProtocolAdapter(body.protocol)?.dispatch ?? 'NONE';
+      if (dispatch === 'EXTERNAL_RUNTIME' && R.taskClass !== 'agent_orchestration') add('ADAPTER_NOT_A_MODEL_CALL', `${body.protocol} is a managed-agent runtime, not a model call`);
       // 4. available deployments
       if (dep.status !== 'ACTIVE') add('DEPLOYMENT_DISABLED', `deployment ${dep.deploymentId} is ${dep.status}`);
       const ep = resolveProviderEndpoint(providerBodyForDeployment(body, dep));
@@ -391,7 +402,12 @@ export function routeTask(req: RouteRequest): RoutingDecision {
       if (rec.limits.contextTokens != null && needCtx > rec.limits.contextTokens) add('CONTEXT_TOO_SMALL', `needs ~${needCtx} tokens of context; the model has ${rec.limits.contextTokens}`);
       if (floor?.minContextTokens != null && (rec.limits.contextTokens ?? 0) < floor.minContextTokens) add('CONTEXT_WEAKER', `a continuation needs at least ${floor.minContextTokens} context tokens`);
       // A LITERAL/JSON contract cannot be split: the whole answer must fit one response.
-      if (R.outputContract !== 'NARRATIVE' && rec.limits.outputTokens != null && R.expectedOutputTokens > rec.limits.outputTokens) add('OUTPUT_TOO_SMALL', `a ${R.outputContract} answer cannot be segmented; it needs ${R.expectedOutputTokens} output tokens and the model allows ${rec.limits.outputTokens}`);
+      // A contract-atomic answer (LITERAL / JSON, or a non-segmentable class)
+      // cannot be split: the whole answer must fit ONE response — under both
+      // the model's limit and the spend policy's output ceiling.
+      const atomic = R.outputContract !== 'NARRATIVE' || !tc.segmentable;
+      if (atomic && rec.limits.outputTokens != null && R.expectedOutputTokens > rec.limits.outputTokens) add('OUTPUT_TOO_SMALL', `a ${R.outputContract} answer cannot be segmented; it needs ${R.expectedOutputTokens} output tokens and the model allows ${rec.limits.outputTokens}`);
+      if (atomic && R.expectedOutputTokens > outputCeilingNow) add('OUTPUT_POLICY_CEILING', `a contract-atomic answer needs ${R.expectedOutputTokens} output tokens; the spend policy allows ${outputCeilingNow} per call`);
       for (const c of floor?.capabilities || []) if (!rec.capabilities.some((x) => x.id === c && x.supported)) add('CAPABILITY_WEAKER', `the replaced route had ${c}`);
       // budget
       if (body.billing !== 'FREE_LOCAL' && est === null) add('COST_UNBOUNDED', 'no usable price to bound this call');
@@ -455,7 +471,7 @@ export function routeTask(req: RouteRequest): RoutingDecision {
   eligible.sort((a, b) => (acting(a) - acting(b)) || (b.score! - a.score!) || (a.estimatedCostUsd ?? 0) - (b.estimatedCostUsd ?? 0) || a.routeKey.localeCompare(b.routeKey));
 
   if (!eligible.length) {
-    const isBudget = (c: string) => c.startsWith('BUDGET_') || c === 'PAID_EXECUTION_DISABLED' || c === 'PROVIDER_DISABLED';
+    const isBudget = (c: string) => c.startsWith('BUDGET_') || c === 'PAID_EXECUTION_DISABLED' || c === 'LOCAL_EXECUTION_DISABLED' || c === 'MODEL_EXECUTION_DISABLED' || c === 'PROVIDER_DISABLED';
     // ROUTE_EXCLUDED: the route just hit capacity mid-task and cools down
     // before it may be chosen again — waiting, not unqualified.
     const isCapacity = (c: string) => c.startsWith('CONCURRENCY_') || c.startsWith('QUOTA_') || c.startsWith('RATE_') || c === 'UNHEALTHY' || c === 'ROUTE_EXCLUDED';

@@ -16,7 +16,8 @@ import {
   modelsForSeat,
   type CatalogModel,
 } from '../lib/model-catalog';
-import { classifyModelRequest, resolveDefaultOpenAiModel } from '../lib/model-router';
+import { resolveModelIdentity } from '../lib/registry/store';
+import { ensureRegistry } from '../lib/registry';
 
 // ---------------------------------------------------------------------------
 // CATALOG, EXECUTION AND ROUTING ARE THREE SEPARATE FACTS.
@@ -135,7 +136,10 @@ describe('a discovered model can exist with no execution adapter', () => {
 
 describe('routing is its own axis', () => {
   it('an executable model needs a credential before it is routable', () => {
-    const gemini = documentedModelsForProvider('google').find((m) => m.isProviderDefault) as CatalogModel;
+    ensureRegistry();
+    // A catalogued id the model registry actually holds (routability needs registry identity).
+    const gemini = documentedModelsForProvider('google').find((m) => resolveModelIdentity(`gemini/${m.modelId}`).ok) as CatalogModel;
+    expect(gemini, 'at least one documented Gemini id is in the registry').toBeTruthy();
     expect(resolveModelState(gemini, NO_CREDENTIAL).routing).toBe('NOT_ROUTABLE');
     expect(resolveModelState(gemini, CREDENTIALED).routing).toBe('ROUTABLE');
   });
@@ -160,30 +164,22 @@ describe('routing is its own axis', () => {
     expect(resolveModelState(retired, VERIFIED).routing).toBe('NOT_ROUTABLE');
   });
 
-  it('exactly one default per routable provider, and it is what the router resolves', () => {
+  it('no provider has a default model — the canonical router selects among qualified routes', () => {
     for (const provider of CATALOG_PROVIDERS) {
-      const models = documentedModelsForProvider(provider.providerId);
-      const defaults = models.filter((m) => m.isProviderDefault);
-      if (provider.execution !== 'SUPPORTED') {
-        // A default is meaningless where nothing routes.
-        expect(defaults, provider.providerId).toHaveLength(0);
-        continue;
-      }
-      expect(defaults.length, provider.providerId).toBe(1);
-      expect(defaultModelForProvider(provider.providerId)).toBe(defaults[0].modelId);
-    }
-    const routed = classifyModelRequest('gemini');
-    expect(routed.provider).toBe('GEMINI');
-    if (routed.provider === 'GEMINI' || routed.provider === 'OPENAI') {
-      expect(routed.resolvedModel).toBe(defaultModelForProvider('google'));
+      expect(documentedModelsForProvider(provider.providerId).filter((m) => m.isProviderDefault), provider.providerId).toHaveLength(0);
+      expect(defaultModelForProvider(provider.providerId)).toBeNull();
     }
   });
 });
 
 describe('the catalog does not drift from the router', () => {
-  it('every catalogued model agrees with the router about its provider', () => {
+  it('"routes to the router provider" is answered by the model registry, never by a name rule', () => {
+    ensureRegistry();
+    const map: Record<string, string> = { google: 'gemini', openai: 'openai' };
     for (const model of catalogModels()) {
-      expect(catalogAgreesWithRouter(model), `${model.providerId}/${model.modelId}`).toBe(true);
+      const provider = CATALOG_PROVIDERS.find((p) => p.providerId === model.providerId)!;
+      const expected = provider.execution !== 'SUPPORTED' ? true : resolveModelIdentity(`${map[model.providerId]}/${model.modelId}`).ok;
+      expect(catalogAgreesWithRouter(model), `${model.providerId}/${model.modelId}`).toBe(expected);
     }
   });
 
@@ -194,12 +190,12 @@ describe('the catalog does not drift from the router', () => {
         continue;
       }
       expect(provider.routerProvider, provider.providerId).toBeTruthy();
-      expect(documentedModelsForProvider(provider.providerId).length).toBeGreaterThan(0);
     }
   });
 
-  it("OpenAI's default follows configuration rather than a frozen literal", () => {
-    expect(defaultModelForProvider('openai')).toBe(resolveDefaultOpenAiModel());
+  it('OpenAI holds no documented or default ids here: they come from the registry', () => {
+    expect(documentedModelsForProvider('openai')).toEqual([]);
+    expect(defaultModelForProvider('openai')).toBeNull();
   });
 
   it('a provider accepting uncatalogued ids says so, so no list implies exhaustiveness', () => {

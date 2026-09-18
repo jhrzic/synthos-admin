@@ -13,13 +13,10 @@
 //    ExecutionContext; it returns {status, body} instead of calling
 //    res.status().json(). The route in server.ts is now a thin adapter that
 //    does exactly that mapping.
-// 2. The real Gemini call is now made through ctx.invoke("model.gemini",
-//    ...) instead of being called directly. This route never called the
-//    shared generateWithFailover() helper (that is /api/generate and
-//    /api/jarvis/command's helper, not this route's) — it has always had
-//    its own inline multi-candidate retry loop. ctx.invoke() wraps that
-//    exact existing loop unchanged; it does not switch to a different
-//    retry mechanism.
+// 2. The provider call is made through ctx.invoke("model.<provider>", ...),
+//    inside the segment runner (lib/continuity/segment-runner.ts), on the
+//    route the canonical router selected. One dispatch per segment; no
+//    candidate list, no failover.
 //
 // toolsInvoked (the response's `toolCalls` field) is now derived from
 // ctx.getInvocations() — real, observed invocation names — never a
@@ -41,7 +38,7 @@
 // createInitialTask, updateTaskStatus, recordActivityEvent, recordArtifact,
 // runDeterministicAegisVerification, recordQualityReview, canonicalizePayload,
 // signReceiptPayload, verifyReceiptSignature, recordReceipt, verifyTaskAtGate,
-// projectKnowledgeCandidate, indexVaultArtifact, classifyModelRequest,
+// projectKnowledgeCandidate, indexVaultArtifact, the registry router,
 // getTaskWorkspaceId. None of these were reimplemented, wrapped in a new
 // abstraction, or replaced because an architecture document names a
 // different-sounding concept for them.

@@ -22,6 +22,7 @@
 // keep their own existing real entry points, untouched).
 // ---------------------------------------------------------------------------
 
+import { previewRoutedCall } from './routed-call';
 import crypto from 'node:crypto';
 import { resolveCapability } from './registry';
 import { createExecutionContext } from './context';
@@ -907,20 +908,19 @@ async function executeVaultWrite(input: ExecutionEnvelopeInput): Promise<Executi
 async function executeResearch(input: ExecutionEnvelopeInput): Promise<ExecutionEnvelopeResult> {
   const taskId = deriveIdempotentTaskId('research', input.idempotencyKey);
 
-  const apiKey = process.env.GEMINI_API_KEY || '';
-  if (!apiKey) {
-    // A static deployment condition, not an execution race — checked
-    // before the atomic claim so a transient "not configured" state can
-    // never permanently consume a claim under a key the caller might
-    // legitimately retry once the deployment is configured.
-    return { outcome: 'NOT_CONFIGURED', capability: 'research', reason: 'GEMINI_API_KEY is not configured — the synthesis step requires a real Gemini call.' };
+  // Checked before the atomic claim so a "no qualified route" state can never
+  // permanently consume a claim under a key the caller might legitimately
+  // retry once a route is qualified. A routing preview: nothing is sent.
+  const route = previewRoutedCall({ callSite: 'research.synthesis', workspaceId: input.workspaceId });
+  if (!route.ok) {
+    return { outcome: 'NOT_CONFIGURED', capability: 'research', reason: `The synthesis step has no qualified model route: ${route.error}` };
   }
 
   return withAtomicClaim(input, 'research', taskId, async () => {
     const ctx = createExecutionContext({ workspaceId: input.workspaceId });
     let result;
     try {
-      result = await runLiveRepositoryResearch({ apiKey, query: input.rawText }, ctx);
+      result = await runLiveRepositoryResearch({ query: input.rawText, workspaceId: input.workspaceId }, ctx);
     } catch (err: any) {
       // A5 — a GitHub rate-limit exhaustion (or any other real failure,
       // including a failed synthesis call) is reported as a structured,

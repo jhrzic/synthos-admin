@@ -48,6 +48,19 @@ export interface ProviderLimits {
 export interface SpendPolicy {
   /** Master switch. OFF means no paid provider request leaves the process. */
   paidExecutionEnabled: boolean;
+  /**
+   * Master switch for ANY model execution, paid or free. OFF means nothing —
+   * not even a $0 local route — runs. Default ON: the narrower switches below
+   * decide what may run.
+   */
+  modelExecutionEnabled: boolean;
+  /**
+   * Genuinely $0 LOCAL execution (a LOCAL route with an approved, immutable $0
+   * price record). Independent of paidExecutionEnabled: paid OFF blocks every
+   * positive-cost call, not a governed local one. Default OFF. Free external
+   * routes (promotional / aggregator) are NEVER covered by this switch.
+   */
+  localExecutionEnabled: boolean;
   global: { dailyUsd: number; monthlyUsd: number; maxConcurrent: number };
   providers: Record<string, ProviderLimits>;
   workspaceDefault: { dailyUsd: number; maxConcurrent: number };
@@ -78,6 +91,8 @@ const limits = (dailyUsd: number, monthlyUsd: number, maxConcurrent = 1): Provid
 
 export const DEFAULT_SPEND_POLICY: SpendPolicy = {
   paidExecutionEnabled: false,
+  modelExecutionEnabled: true,
+  localExecutionEnabled: false,
   global: { dailyUsd: 5, monthlyUsd: 50, maxConcurrent: 2 },
   providers: {
     openai: limits(2, 20),
@@ -136,6 +151,8 @@ export function validateSpendPolicy(p: any): string[] {
   const int = (path: string, v: unknown, min = 0) => { if (!finite(v) || !Number.isInteger(v) || (v as number) < min) errors.push(`${path} must be a whole number ≥ ${min}`); };
   if (!p || typeof p !== 'object') return ['policy must be an object'];
   if (typeof p.paidExecutionEnabled !== 'boolean') errors.push('paidExecutionEnabled must be true or false');
+  if (typeof p.modelExecutionEnabled !== 'boolean') errors.push('modelExecutionEnabled must be true or false');
+  if (typeof p.localExecutionEnabled !== 'boolean') errors.push('localExecutionEnabled must be true or false');
   num('global.dailyUsd', p.global?.dailyUsd); num('global.monthlyUsd', p.global?.monthlyUsd); int('global.maxConcurrent', p.global?.maxConcurrent);
   const provIds = [...new Set([...PAID_PROVIDERS, ...Object.keys(p.providers || {})])];
   for (const prov of provIds) {
@@ -190,6 +207,8 @@ export function mergePolicy(partial: any): SpendPolicy {
   }
   return {
     paidExecutionEnabled: partial?.paidExecutionEnabled ?? d.paidExecutionEnabled,
+    modelExecutionEnabled: partial?.modelExecutionEnabled ?? d.modelExecutionEnabled,
+    localExecutionEnabled: partial?.localExecutionEnabled ?? d.localExecutionEnabled,
     global: { ...d.global, ...(partial?.global || {}) },
     providers,
     workspaceDefault: { ...d.workspaceDefault, ...(partial?.workspaceDefault || {}) },

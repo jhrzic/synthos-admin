@@ -74,15 +74,24 @@ describe('E4: model-backed skill executability requires a real GEMINI_API_KEY', 
     expect(result.message).toMatch(/hermes/i);
   });
 
-  it('READY when GEMINI_API_KEY is set and the model resolves to Gemini', () => {
+  it('a named model is a pinned route: NOT executable until that route is qualified for its task class, READY once it is', async () => {
     process.env.GEMINI_API_KEY = 'test-key';
     const skill = createSkill({
       workspaceId: WS, name: 'Model Skill Ready', enabled: true,
       executionTargetType: 'model', executionTargetRef: 'gemini-3.1-flash-lite',
     });
-    const result = classifySkillExecutability(skill);
-    expect(result.executable).toBe(true);
-    expect(result.reason).toBe('READY');
+    const before = classifySkillExecutability(skill);
+    expect(before.executable).toBe(false);
+    expect(before.reason).toBe('MISSING_PROVIDER');
+    const { allowPaidExecutionForTest } = await import('./helpers/spend');
+    const { saveSpendPolicy, DEFAULT_SPEND_POLICY } = await import('../lib/spend/policy');
+    allowPaidExecutionForTest([['gemini', 'gemini-3.1-flash-lite']]);
+    try {
+      const result = classifySkillExecutability(skill);
+      expect(result.executable).toBe(true);
+      expect(result.reason).toBe('READY');
+      expect(result.message).toContain('qualified for content_generation');
+    } finally { saveSpendPolicy(DEFAULT_SPEND_POLICY, 'test'); }
   });
 });
 

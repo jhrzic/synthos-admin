@@ -42,9 +42,7 @@ import fs from 'node:fs';
 import { getDatabase, recordActivityEvent } from './persistence';
 import { recordRuntimeEvent, type RuntimeEventStatus } from './runtime-events';
 import { searchWorkspaceMemory, type MemorySearchResult } from './memory-index';
-import { classifyModelRequest, resolveReviewSeatModel, explainUnroutableModel } from './model-router';
-import { resolveModelApiKey } from './model-credentials';
-import { generateViaOpenAI } from './fabric/model-openai';
+import { routedModelCall } from './fabric/routed-call';
 import {
   getWorkspaceExternalExecution, guardianCheckInstruction,
   type ExternalExecutionRecord,
@@ -374,52 +372,42 @@ export async function requestDevelopmentReview(
   const task = getWorkspaceDevelopmentTask(workspaceId, devTaskId);
   if (!task) throw Object.assign(new Error('Development task not found.'), { code: 'NOT_FOUND' });
 
-  const classified = classifyModelRequest(preferredModel || resolveReviewSeatModel());
-  if (classified.provider !== 'OPENAI') {
-    return {
-      outcome: 'NOT_CONFIGURED', provider: null, model: null, reviewText: null, contextItems: 0,
-      reason: explainUnroutableModel(classified, 'the development-loop review seat'),
-    };
-  }
-
-  const { apiKey } = resolveModelApiKey('openai');
-  if (!apiKey) {
-    return {
-      outcome: 'NOT_CONFIGURED', provider: 'openai', model: classified.resolvedModel, reviewText: null, contextItems: 0,
-      reason: 'No OpenAI credential is configured — neither OPENAI_API_KEY nor an encrypted server-side credential row is present. The task keeps its current state; no other provider was substituted.',
-    };
-  }
-
+  // CANONICAL ROUTING — the review seat has no model of its own. A model the
+  // caller names is pinned (validated, never swapped); otherwise the router
+  // selects a route qualified for code_review (development.review). No
+  // credential → the router's reason; never a substitute provider.
   const context = buildDevelopmentContext(workspaceId, `${task.title} ${task.instruction}`);
   const ctx = createExecutionContext({ workspaceId });
-  const generated = await ctx.invoke('model.openai', () => generateViaOpenAI({
-    apiKey,
-    contents: buildReviewPrompt(task, context),
-    candidateModels: [classified.resolvedModel],
+  const routed = await routedModelCall({
+    callSite: 'development.review', workspaceId, taskId: `devreview:${task.dev_task_id}`, model: preferredModel || '',
+    prompt: buildReviewPrompt(task, context),
     // One review per task state: a double-click cannot pay twice.
-    spend: { callSite: 'development.review', workspaceId, idempotencyKey: `devreview:${task.dev_task_id}:${task.updated_at}` },
-  }));
-
-  if (!generated.output.trim()) {
+    idempotencyKey: `devreview:${task.dev_task_id}:${task.updated_at}`, invoke: (name, fn) => ctx.invoke(name, fn),
+  });
+  if (!routed.ok) {
+    const notConfigured = ['NO_QUALIFIED_ROUTE', 'MODEL_NOT_REGISTERED', 'MODEL_AMBIGUOUS', 'TASK_CLASS_UNKNOWN', 'SPEND_BLOCKED', 'ENDPOINT_NOT_APPROVED', 'UNSUPPORTED_BY_ADAPTER'].includes(routed.code);
     return {
-      outcome: 'FAILED', provider: 'openai', model: classified.resolvedModel, reviewText: null, contextItems: context.items.length,
-      reason: generated.lastProviderError || 'The review provider returned no output.',
+      outcome: notConfigured ? 'NOT_CONFIGURED' : 'FAILED', provider: routed.decision?.selected?.providerId ?? null, model: routed.decision?.selected?.modelId ?? null,
+      reviewText: null, contextItems: context.items.length,
+      reason: `${routed.error} The task keeps its current state; no other model was substituted.`,
     };
   }
+  const generated = { output: routed.output, modelUsed: routed.modelUsed };
+  const reviewProvider = routed.providerId;
 
   const now = new Date().toISOString();
-  const modelUsed = generated.modelUsed || classified.resolvedModel;
+  const modelUsed = generated.modelUsed;
   patch(devTaskId, {
-    review_provider: 'openai',
+    review_provider: reviewProvider,
     review_model: modelUsed,
     review_text: generated.output,
     review_at: now,
     state: task.requires_approval ? 'WAITING_FOR_APPROVAL' : 'READY_FOR_EXECUTION',
-    state_reason: `Reviewed by openai/${modelUsed}.`,
+    state_reason: `Reviewed by ${reviewProvider}/${modelUsed}.`,
   });
 
   return {
-    outcome: 'REVIEWED', provider: 'openai', model: modelUsed, reviewText: generated.output,
+    outcome: 'REVIEWED', provider: reviewProvider, model: modelUsed, reviewText: generated.output,
     contextItems: context.items.length,
     reason: `Reviewed against ${context.items.length} scoped context item(s). ${context.reason}`,
   };

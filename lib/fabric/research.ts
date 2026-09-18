@@ -41,7 +41,8 @@
 // ---------------------------------------------------------------------------
 
 import type { ProviderTermination } from './output-contract';
-import { generateViaGemini } from './model-gemini';
+import { routedModelCall } from './routed-call';
+import { requestKey } from '../spend/adapters';
 import type { ExecutionContext } from './types';
 
 export interface ResearchSource {
@@ -97,7 +98,6 @@ function githubApiBase(): string {
   return (process.env.GITHUB_API_BASE_URL || 'https://api.github.com').replace(/\/+$/, '');
 }
 
-const SYNTHESIS_MODEL = 'gemini-3.1-flash-lite';
 
 // Stripped before building a search query: task-framing words from the raw
 // request text (verbs like "research"/"compare", scaffolding like "the
@@ -279,7 +279,7 @@ export async function discoverLiveRepositories(query: string, ctx: ExecutionCont
 }
 
 export async function runLiveRepositoryResearch(
-  params: { apiKey: string; query: string; maxRepos?: number },
+  params: { query: string; workspaceId?: string | null; maxRepos?: number },
   ctx: ExecutionContext
 ): Promise<ResearchResult> {
   const maxRepos = params.maxRepos ?? 5;
@@ -307,12 +307,13 @@ ${evidenceBlock}
 
 Write a concise synthesis (3-5 sentences) comparing these repositories and explaining their relevance to a company building an agentic marketing operating system. Use ONLY the facts given above — no invented stars, dates, or claims.`;
 
-  const synthesisResult = await ctx.invoke('model.gemini', () =>
-    generateViaGemini({ apiKey: params.apiKey, contents: synthesisPrompt, candidateModels: [SYNTHESIS_MODEL], spend: { callSite: 'research.synthesis' } })
-  );
-  if (!synthesisResult.output) {
-    throw new Error(synthesisResult.lastProviderError || 'Gemini synthesis returned an empty response.');
-  }
+  // ONE routed call (research_synthesis): no hardcoded model, no fallback.
+  const routed = await routedModelCall({
+    callSite: 'research.synthesis', workspaceId: params.workspaceId ?? null, prompt: synthesisPrompt,
+    idempotencyKey: requestKey('research.synthesis'), invoke: (name, fn) => ctx.invoke(name, fn),
+  });
+  if (!routed.ok) throw new Error(`${routed.code}: ${routed.error}`);
+  const synthesisResult = { output: routed.output, termination: routed.termination };
 
   const reportMarkdown = buildReportMarkdown(params.query, repos, sources, synthesisResult.output, searchQueriesUsed);
 

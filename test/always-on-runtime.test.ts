@@ -13,7 +13,7 @@ process.env.SYNTHOS_SIGNING_KEY_DIR = path.join(TMP, 'keys');
 import { getRuntimeStatus, resetIntegrityCacheForTests } from '../lib/runtime-status';
 import { startScheduler, stopScheduler, getSchedulerHealth, resetSchedulerHealthForTests } from '../lib/fabric/scheduler';
 import { getDatabase } from '../lib/persistence';
-import { classifyModelRequest } from '../lib/model-router';
+import { resolveRoute } from '../lib/registry';
 
 // ---------------------------------------------------------------------------
 // ALWAYS-ON RUNTIME — the core runtime has to be able to prove it is up.
@@ -262,43 +262,26 @@ describe('the core in-process subsystems each have a row and prove themselves by
   });
 
   it('the model router is reported separately from the providers, and is never HEALTHY on configuration alone', async () => {
-    const originalGemini = process.env.GEMINI_API_KEY;
-    const originalOpenAi = process.env.OPENAI_API_KEY;
+    // A credential alone qualifies nothing: the canonical router can only
+    // select a route with a VALID task qualification.
+    const original = process.env.GEMINI_API_KEY;
     process.env.GEMINI_API_KEY = 'test-key';
-    delete process.env.OPENAI_API_KEY;
     try {
       const report = await getRuntimeStatus();
       const router = report.systems.find((s) => s.system === 'Model Router');
       expect(router, 'the model router has no row in the runtime status report').toBeDefined();
-      // A resolved credential is not a proven one, and no billable call is
-      // made to find out — so this can never be HEALTHY here.
       expect(router?.status).not.toBe('HEALTHY');
-      expect(router?.status).toBe('UNKNOWN');
       expect(router?.evidenceSource).toBe('configuration_only');
-      expect(router?.detail).toContain('gemini');
     } finally {
-      if (originalGemini === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = originalGemini;
-      if (originalOpenAi !== undefined) process.env.OPENAI_API_KEY = originalOpenAi;
+      if (original === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = original;
     }
   });
 
-  it('with no provider credential at all, the router is UNCONFIGURED rather than silently fine', async () => {
-    const saved: Record<string, string | undefined> = {
-      GEMINI_API_KEY: process.env.GEMINI_API_KEY,
-      OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-    };
-    delete process.env.GEMINI_API_KEY;
-    delete process.env.OPENAI_API_KEY;
-    try {
-      const report = await getRuntimeStatus();
-      const router = report.systems.find((s) => s.system === 'Model Router');
-      expect(router?.status).toBe('NOT_CONFIGURED');
-      expect(router?.detail).toContain('no provider credential resolves');
-    } finally {
-      for (const [k, v] of Object.entries(saved)) {
-        if (v === undefined) delete process.env[k]; else process.env[k] = v;
-      }
-    }
+  it('with no qualified route, the router is NOT_CONFIGURED and says every model task waits', async () => {
+    const report = await getRuntimeStatus();
+    const router = report.systems.find((s) => s.system === 'Model Router');
+    expect(router?.status).toBe('NOT_CONFIGURED');
+    expect(router?.detail).toContain('no route is qualified');
   });
 });
 
@@ -306,7 +289,9 @@ describe('NOT_IMPLEMENTED is reserved for things that genuinely are not implemen
   // The allowlist is the point. NOT_IMPLEMENTED is a real and useful status,
   // but it is only honest where the repo contains no implementation — and
   // the entry below is proven by the test underneath it, not asserted here.
-  const PROVABLY_UNIMPLEMENTED = ['OpenRouter Provider'];
+  // OpenRouter used to be listed here; it is now an implemented aggregator
+  // route (NOT_CONFIGURED until an offering is imported and qualified).
+  const PROVABLY_UNIMPLEMENTED: string[] = [];
 
   it('only a provably-unimplemented subsystem may claim NOT_IMPLEMENTED', async () => {
     const report = await getRuntimeStatus();
@@ -320,11 +305,10 @@ describe('NOT_IMPLEMENTED is reserved for things that genuinely are not implemen
     ).toEqual([]);
   });
 
-  it('OpenRouter really has no execution mapping, which is what earns it the NOT_IMPLEMENTED label', () => {
-    // Repo evidence, not opinion: the router itself refuses to route it, so
-    // a credential would change nothing.
-    const classification = classifyModelRequest('openrouter/some-model');
-    expect(classification.provider).toBe('UNSUPPORTED');
+  it('OpenRouter runs nothing until an offering is imported: a credential alone routes nothing', () => {
+    // Repo evidence, not opinion: the registry holds no OpenRouter offering
+    // until a route document is imported, so the router cannot route one.
+    expect(resolveRoute('openrouter/some-model')).toMatchObject({ ok: false, code: 'MODEL_NOT_REGISTERED' });
   });
 
   it('the core subsystems appear ahead of the optional integrations, so "is the runtime up" is answerable at a glance', async () => {

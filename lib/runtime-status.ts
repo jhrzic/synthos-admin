@@ -10,6 +10,8 @@ import { getModelCredentialStatus, SUPPORTED_MODEL_PROVIDERS } from './model-cre
 import { getSchedulerHealth } from './fabric/scheduler';
 import { checkGuardianRules } from './kil-gate';
 import { VAULT_ROOT } from './vault';
+import { listQualifications } from './registry/qualification';
+import { listModelViews } from './registry';
 import { hermesLocalHealth, isHermesLocalConfigured, isHermesLocalEnabled } from './hermes-local-runtime';
 import { resolveProviderState, type ProviderState, type ProviderStateReport } from './provider-state';
 import { health as antigravityHealth, isAntigravityConfigured, isAntigravityEnabled } from './antigravity-client';
@@ -167,15 +169,21 @@ function openAiStatus(): RuntimeSystemReport {
 }
 
 function openRouterStatus(): RuntimeSystemReport {
+  // OpenRouter is an AGGREGATOR route in the model registry, dispatched by the
+  // shared chat-completions adapter. What it can run is what an operator
+  // imported, mapped to a canonical version and qualified.
   const configured = !!process.env.OPENROUTER_API_KEY;
+  let offerings = 0; let qualified = 0;
+  try {
+    offerings = listModelViews().filter((m) => m.providerId === 'openrouter' && m.lifecycle !== 'REMOVED').length;
+    qualified = new Set(listQualifications({ providerId: 'openrouter' }).filter((q) => q.state === 'VALID').map((q) => q.modelId)).size;
+  } catch { /* registry not initialised */ }
   return {
     system: 'OpenRouter Provider',
-    status: 'NOT_IMPLEMENTED',
+    status: 'NOT_CONFIGURED',
     evidenceSource: 'configuration_only',
     lastCheck: null,
-    detail: configured
-      ? 'OPENROUTER_API_KEY is set, but no execution mapping is wired for it (classifyModelRequest reports it UNSUPPORTED — see lib/model-router.ts).'
-      : 'OPENROUTER_API_KEY is not configured, and no execution mapping exists for it regardless.',
+    detail: `Aggregator route (shared chat-completions adapter). ${offerings} imported offering(s), ${qualified} qualified. Credential ${configured ? 'present' : 'not set (OPENROUTER_API_KEY)'}. It runs nothing until an offering is imported, mapped and qualified.`,
   };
 }
 
@@ -705,24 +713,24 @@ function aegisStatus(): RuntimeSystemReport {
 }
 
 /**
- * The model router itself, as distinct from the individual provider rows
- * above. The routing table is code and is always present; what varies is
- * whether ANY executable provider has a credential, because with none the
- * router is present and every dispatch still fails.
- *
- * Never HEALTHY on configuration alone — a resolved credential is not a
- * proven one, and this makes no billable call to find out.
+ * The CANONICAL model router (lib/registry/router.ts). It can only select a
+ * route that holds a VALID task qualification, so its readiness is the count
+ * of qualified routes — not whether some credential exists. Never HEALTHY on
+ * configuration alone, and no billable call is made to find out.
  */
 function modelRouterStatus(): RuntimeSystemReport {
-  const now = new Date().toISOString();
-  const configured = SUPPORTED_MODEL_PROVIDERS.filter((provider) => getModelCredentialStatus(provider).apiKeyPresent);
-  if (configured.length === 0) {
+  let valid: Array<{ providerId: string; modelId: string; taskClass: string }> = [];
+  try {
+    valid = listQualifications().filter((q) => q.state === 'VALID');
+  } catch { /* registry not initialised: treated as none */ }
+  const routes = new Set(valid.map((q) => `${q.providerId}/${q.modelId}`));
+  if (routes.size === 0) {
     return {
       system: 'Model Router',
       status: 'NOT_CONFIGURED',
       evidenceSource: 'configuration_only',
       lastCheck: null,
-      detail: `Routing is implemented for ${SUPPORTED_MODEL_PROVIDERS.join(', ')}, but no provider credential resolves. Every model-backed dispatch will fail until one is set.`,
+      detail: 'The canonical router is running, but no route is qualified for any task class, so every model-backed task waits (paused, not failed) until an operator qualifies one.',
     };
   }
   return {
@@ -730,7 +738,7 @@ function modelRouterStatus(): RuntimeSystemReport {
     status: 'UNKNOWN',
     evidenceSource: 'configuration_only',
     lastCheck: null,
-    detail: `Routable provider(s) with a resolved credential: ${configured.join(', ')}. Configured is not proven — no billable call is made on a status check; see the individual provider rows.`,
+    detail: `${routes.size} qualified route(s) across ${new Set(valid.map((q) => q.taskClass)).size} task class(es). Qualified is not proven live — see the individual provider rows.`,
   };
 }
 

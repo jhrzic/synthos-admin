@@ -1,4 +1,7 @@
 import crypto from 'node:crypto';
+import { resolveTaskClass } from './registry/qualification';
+import { routeTask, requirementsFor } from './registry/router';
+import { runWithRouteContext } from './registry/route-context';
 import { getDatabase } from './persistence';
 import {
   createInitialTask,
@@ -282,10 +285,18 @@ async function dispatchAntigravityInteraction(
   const maxTotalTokens = Math.min(requested, policyMax);
 
   const ctx = createExecutionContext({ workspaceId });
+  // CANONICAL ROUTER: the configured agent is a PINNED route; the router
+  // records (before dispatch) whether it is qualified for agent_orchestration
+  // and refuses it if not. Nothing is substituted.
+  const tc = resolveTaskClass({ callSite: 'runtime.antigravity' });
+  const req = tc ? requirementsFor({ taskClass: tc.taskClassId, instruction, inputChars: instruction.length }) : null;
+  if (!tc || !req || 'error' in req) return { ok: false, remoteJobId: null, error: 'No task class is registered for runtime.antigravity; nothing was sent.' };
+  const decision = routeTask({ workspaceId, taskId: spend.taskId ?? null, requirements: req, constraints: { pinnedRoute: { providerId: 'antigravity', modelId: agent }, mode: 'PINNED_ROUTE' } });
+  if (!decision.selected) return { ok: false, remoteJobId: null, error: `NO_QUALIFIED_ROUTE: ${decision.explanation}` };
   // SPEND GUARD: per-run ceiling, budgets, concurrency, and the one-request
   // permit. A successful submission stays DISPATCHED in the usage ledger — the
   // remote agent is still running — and is settled by the sweep.
-  const guarded = await guardedPaidCall({
+  const guarded = await runWithRouteContext({ taskClass: tc.taskClassId, deploymentId: decision.selected.deploymentId, canonicalVersionId: decision.selected.canonicalVersionId, routingDecisionId: decision.decisionId }, () => guardedPaidCall({
     provider: 'antigravity', model: agent, callSite: 'runtime.antigravity',
     workspaceId, taskId: spend.taskId ?? null, correlationId: spend.correlationId,
     idempotencyKey: `ag:${spend.correlationId}`, inputChars: instruction.length,
@@ -296,7 +307,7 @@ async function dispatchAntigravityInteraction(
     const cap = Math.min(maxTotalTokens, grant.maxTotalTokens ?? maxTotalTokens);
     const r = await ctx.invoke('runtime.antigravity', () => antigravityClient.submitInteraction({ instruction, agent, tools, maxTotalTokens: cap }));
     return { ok: r.ok, value: r, usage: r.remoteJobId ? { providerRequestId: r.remoteJobId } : null };
-  });
+  }));
   if (!guarded.permitted) return { ok: false, remoteJobId: null, error: `BLOCKED_BUDGET (${guarded.code}): ${guarded.reason}` };
   return guarded.outcome.value ?? { ok: false, remoteJobId: null, error: 'Antigravity submission produced no result.' };
 }

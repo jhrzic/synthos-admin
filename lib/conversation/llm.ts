@@ -28,8 +28,8 @@
 // that is never asked cannot answer from its own priors.
 // ---------------------------------------------------------------------------
 
-import { guardedGeminiGenerate, requestKey, type SpendContext } from '../spend/adapters';
-import { classifyModelRequest, explainUnroutableModel, generateWithFailover, type FailoverAttemptLog } from '../model-router';
+import { requestKey } from '../spend/adapters';
+import { routedModelCall, previewRoutedCall } from '../fabric/routed-call';
 import type { BusinessProfile, ConversationMessage } from './engine';
 import type { ScopedMemoryResult } from '../memory-index';
 import { resolveModelApiKey } from '../model-credentials';
@@ -43,45 +43,20 @@ export interface EvidenceItem {
 
 export type LlmAvailability =
   | { available: true; provider: string; candidateModels: string[] }
-  | { available: false; reason: 'NO_PROVIDER_CONFIGURED' | 'MODEL_UNSUPPORTED'; detail: string };
+  | { available: false; reason: 'NO_PROVIDER_CONFIGURED' | 'MODEL_UNSUPPORTED' | 'NO_QUALIFIED_ROUTE'; detail: string };
 
 /**
- * Which conversation provider, if any, this install can actually call.
- *
- * Resolved through the existing SynthOS model routing rather than a private
- * `if (OPENAI_API_KEY)` ladder — the router already owns provider identity,
- * supported-model mapping and the circuit breaker, and a second opinion about
- * which models exist is exactly how the two drift apart.
+ * Whether a model can phrase this workspace's answers right now: the
+ * canonical router's preview for the "conversation" task class
+ * (concierge.reply). Nothing is persisted or sent. A route is only eligible
+ * if an operator qualified it for conversation — which is where the grounding
+ * rules get tested against a specific model, instead of hardcoding one.
  */
-export function resolveConversationProvider(preferredModel?: string): LlmAvailability {
-  // Environment first, then the encrypted server-side store. Enabling
-  // conversational phrasing must not require editing a .env file and
-  // rebuilding a container — the same argument that produced the voice
-  // credential store, applied to the model key.
-  const { apiKey } = resolveModelApiKey('gemini');
-  if (!apiKey) {
-    return {
-      available: false,
-      reason: 'NO_PROVIDER_CONFIGURED',
-      detail: 'No conversation model provider is configured. Add a Gemini API key in the Business Assistant settings, or set GEMINI_API_KEY in the environment.',
-    };
-  }
-  const classified = classifyModelRequest(preferredModel);
-  if (classified.provider !== 'GEMINI') {
-    // PUSH 1 — the customer-facing conversation engine stays Gemini-only on
-    // purpose. Its grounding rules, refusal logic and evidence boundary were
-    // built and tested against one provider; quietly widening them because a
-    // second provider became executable elsewhere in the platform would
-    // change what a customer's chat window can say without anyone having
-    // verified it. The message names the real reason rather than claiming an
-    // unsupported provider.
-    return {
-      available: false,
-      reason: 'MODEL_UNSUPPORTED',
-      detail: explainUnroutableModel(classified, 'the customer conversation engine'),
-    };
-  }
-  return { available: true, provider: 'gemini', candidateModels: [classified.resolvedModel] };
+export function resolveConversationProvider(workspaceId: string | null = null): LlmAvailability {
+  const p = previewRoutedCall({ callSite: 'concierge.reply', workspaceId });
+  if (!p.ok) return { available: false, reason: 'NO_QUALIFIED_ROUTE', detail: p.error };
+  const sel = p.decision.selected!;
+  return { available: true, provider: sel.providerId, candidateModels: [sel.modelId] };
 }
 
 /** Trim a passage so a long document cannot crowd the whole prompt. */
@@ -232,9 +207,8 @@ export interface LlmReplyResult {
   text?: string;
   provider?: string;
   modelUsed?: string | null;
-  attempts?: FailoverAttemptLog[];
   /** Why the LLM path did not produce a usable reply. Never a silent downgrade. */
-  failureReason?: 'NO_PROVIDER_CONFIGURED' | 'MODEL_UNSUPPORTED' | 'PROVIDER_FAILED' | 'EMPTY_RESPONSE' | 'UNGROUNDED_OUTPUT';
+  failureReason?: 'NO_PROVIDER_CONFIGURED' | 'MODEL_UNSUPPORTED' | 'NO_QUALIFIED_ROUTE' | 'PROVIDER_FAILED' | 'EMPTY_RESPONSE' | 'UNGROUNDED_OUTPUT';
   failureDetail?: string;
 }
 
@@ -248,41 +222,46 @@ export interface LlmReplyResult {
 export async function generateGroundedReply(params: {
   prompt: GroundedPrompt;
   evidence: EvidenceItem[];
-  preferredModel?: string;
+  /**
+   * TEST SEAM for the grounding checker: replaces dispatch with a pure,
+   * caller-supplied function (it cannot reach a provider). Never set in
+   * production — asserted by test/canonical-router-entrypoints.test.ts.
+   */
   callModel?: (model: string, prompt: GroundedPrompt) => Promise<string>;
   /** SPEND GUARD — one customer turn is one logical execution. */
   spend?: { workspaceId?: string | null; idempotencyKey?: string };
 }): Promise<LlmReplyResult> {
-  const availability = resolveConversationProvider(params.preferredModel);
-  if (availability.available !== true) {
-    return { ok: false, failureReason: availability.reason, failureDetail: availability.detail };
+  let text = '';
+  let provider: string | undefined;
+  let modelUsed: string | null = null;
+  if (params.callModel) {
+    // The seam replaces DISPATCH only: a qualified route must still exist, so
+    // it can never report a success no real route could have produced.
+    const availability = resolveConversationProvider(params.spend?.workspaceId ?? null);
+    if (availability.available !== true) return { ok: false, failureReason: availability.reason === 'NO_QUALIFIED_ROUTE' ? 'NO_PROVIDER_CONFIGURED' : availability.reason, failureDetail: availability.detail };
+    try { text = String(await params.callModel(availability.candidateModels[0], params.prompt)).trim(); } catch (e: any) {
+      return { ok: false, provider: availability.provider, modelUsed: null, failureReason: 'PROVIDER_FAILED', failureDetail: e?.message || String(e) };
+    }
+    provider = availability.provider;
+    modelUsed = availability.candidateModels[0];
+  } else {
+    // ONE routed call: task class "conversation" → qualified route → Guardian
+    // → spend guard. No default model, no fallback.
+    const r = await routedModelCall({
+      callSite: 'concierge.reply', workspaceId: params.spend?.workspaceId ?? null,
+      messages: [{ role: 'system', content: params.prompt.system }, { role: 'user', content: params.prompt.user }],
+      maxOutputTokens: 400, idempotencyKey: params.spend?.idempotencyKey || requestKey('concierge.reply'),
+    });
+    if (!r.ok) {
+      return { ok: false, provider: r.decision?.selected?.providerId, modelUsed: null, failureReason: r.code === 'NO_QUALIFIED_ROUTE' ? 'NO_QUALIFIED_ROUTE' : 'PROVIDER_FAILED', failureDetail: r.error };
+    }
+    text = r.output.trim();
+    provider = r.providerId;
+    modelUsed = r.modelUsed;
   }
 
-  // The key is fixed for the whole turn, so no retry below can pay twice and
-  // no second model can be tried (lib/spend/guard.ts: FALLBACK_REFUSED).
-  const spend = { callSite: 'concierge.reply', workspaceId: params.spend?.workspaceId ?? null, idempotencyKey: params.spend?.idempotencyKey || requestKey('concierge.reply') };
-  const call = params.callModel ?? ((model: string, prompt: GroundedPrompt) => defaultGeminiCall(model, prompt, spend));
-  const result = await generateWithFailover(
-    // NO_PAID_FALLBACK: the first available model only.
-    availability.candidateModels.slice(0, 1),
-    (model) => call(model, params.prompt),
-    { maxRetriesPerModel: 0 }
-  );
-
-  if (!result.success || !result.text) {
-    return {
-      ok: false, provider: availability.provider, modelUsed: result.modelUsed, attempts: result.attempts,
-      failureReason: 'PROVIDER_FAILED',
-      failureDetail: result.finalError || 'The conversation model produced no result.',
-    };
-  }
-
-  const text = result.text.trim();
   if (!text) {
-    return {
-      ok: false, provider: availability.provider, modelUsed: result.modelUsed, attempts: result.attempts,
-      failureReason: 'EMPTY_RESPONSE', failureDetail: 'The model returned an empty reply.',
-    };
+    return { ok: false, provider, modelUsed, failureReason: 'EMPTY_RESPONSE', failureDetail: 'The model returned an empty reply.' };
   }
 
   const check = checkGroundedOutput(text, params.evidence);
@@ -290,29 +269,9 @@ export async function generateGroundedReply(params: {
     // The model produced something it was not entitled to say. The reply is
     // discarded rather than shown with a warning — a customer reading a
     // fabricated price is harmed whether or not a label sits beside it.
-    return {
-      ok: false, provider: availability.provider, modelUsed: result.modelUsed, attempts: result.attempts,
-      failureReason: 'UNGROUNDED_OUTPUT', failureDetail: check.violation,
-    };
+    return { ok: false, provider, modelUsed, failureReason: 'UNGROUNDED_OUTPUT', failureDetail: check.violation };
   }
 
-  return { ok: true, text, provider: availability.provider, modelUsed: result.modelUsed, attempts: result.attempts };
+  return { ok: true, text, provider, modelUsed };
 }
 
-/** The one real provider call. Imported lazily so tests never need the SDK. */
-async function defaultGeminiCall(model: string, prompt: GroundedPrompt, spend: SpendContext): Promise<string> {
-  const { apiKey } = resolveModelApiKey('gemini');
-  if (!apiKey) throw new Error('No Gemini API key is configured.');
-  const { GoogleGenAI } = await import('@google/genai');
-  const ai = new GoogleGenAI({ apiKey });
-  const response = await guardedGeminiGenerate(ai, {
-    model,
-    contents: prompt.user,
-    config: {
-      systemInstruction: prompt.system,
-      temperature: 0.3,          // phrasing, not invention
-      maxOutputTokens: 400,
-    },
-  }, { ...spend, maxOutputTokens: 400 });
-  return String((response as any)?.text ?? '').trim();
-}

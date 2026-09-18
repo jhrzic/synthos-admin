@@ -108,14 +108,14 @@ describe('4 & workspace switch: Jarvis admin queries respect the active workspac
 });
 
 describe('5. conversational prompts remain on real generic chat — no broad keyword hijacking of ordinary conversation', () => {
-  it('the else-branch of ADMIN_*_QUERY classification still calls a real Gemini model, unchanged', () => {
+  it('the else-branch of ADMIN_*_QUERY classification still makes a real model call — through the canonical router', () => {
     const route = serverContent.slice(
       serverContent.indexOf('app.post("/api/jarvis/command"'),
       serverContent.indexOf('app.get("/api/apollo/status"')
     );
-    expect(route).toContain('Natural Language Directive via Live Model');
-    // Still a real Gemini call — now through the spend guard.
-    expect(route).toContain('guardedGeminiGenerate(ai, {');
+    expect(route).toContain('Natural Language Directive via a routed model call');
+    // A real model call — router → Guardian → spend guard → adapter.
+    expect(route).toContain('routedModelCall({');
   });
 
   it('STEP 6: routing is now classifier-driven (lib/fabric/intent.ts), not lower.includes() substring matching — the old collision-prone routing is gone', () => {

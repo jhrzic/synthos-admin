@@ -27,7 +27,10 @@ function sdkBaseUrl(baseUrl: string): string {
 
 export interface GenerateViaGeminiParams {
   apiKey: string;
-  contents: string;
+  /** A prompt, or role-separated turns ({ role: 'user' | 'model', parts }). */
+  contents: string | Array<{ role: string; parts: Array<{ text: string }> }>;
+  /** systemInstruction / responseMimeType / tools, from the protocol adapter. */
+  config?: Record<string, unknown>;
   candidateModels: string[];
   /** SPEND GUARD — required. Every Gemini generation is a paid call; see lib/spend/guard.ts. */
   spend: SpendContext;
@@ -45,6 +48,8 @@ export interface GenerateViaGeminiResult {
   spendBlockedCode?: string | null;
   /** How the provider says the response ended (candidates[0].finishReason). */
   termination?: ProviderTermination;
+  /** The provider payload (grounding metadata). Never placed in a prompt. */
+  raw?: unknown;
 }
 
 export async function generateViaGemini(params: GenerateViaGeminiParams): Promise<GenerateViaGeminiResult> {
@@ -58,6 +63,7 @@ export async function generateViaGemini(params: GenerateViaGeminiParams): Promis
   let lastProviderError: string | null = null;
   let spendBlockedCode: string | null = null;
   let termination: ProviderTermination = { status: 'NOT_REPORTED', providerStatus: null, reason: null };
+  let raw: unknown = null;
 
   if (!m) return { output, modelUsed, providerUsageMetadata, hadProviderError: true, lastProviderError: 'No model was selected for this Gemini call.' };
 
@@ -79,7 +85,8 @@ export async function generateViaGemini(params: GenerateViaGeminiParams): Promis
       // The SDK appends its own API version path to the host.
       httpOptions: { headers: { "User-Agent": "aistudio-build" }, baseUrl: sdkBaseUrl(baseUrl) },
     });
-    const resp = await guardedGeminiGenerate(ai, { model: m, contents, config: { temperature: 0.2 } }, params.spend);
+    const resp = await guardedGeminiGenerate(ai, { model: m, contents, config: { temperature: 0.2, ...(params.config || {}) } }, params.spend);
+    raw = resp;
     termination = geminiTermination(resp, outputCeiling(params.spend));
     if (resp?.text && resp.text.trim().length > 0) {
       output = resp.text;
@@ -96,5 +103,5 @@ export async function generateViaGemini(params: GenerateViaGeminiParams): Promis
     console.warn(`[Gemini] '${m}':`, lastProviderError);
   }
 
-  return { output, modelUsed, providerUsageMetadata, hadProviderError, lastProviderError, spendBlockedCode, termination };
+  return { output, modelUsed, providerUsageMetadata, hadProviderError, lastProviderError, spendBlockedCode, termination, raw };
 }

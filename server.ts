@@ -6,7 +6,6 @@ import fs from "fs";
 import crypto from "node:crypto";
 import { exec, spawn } from "child_process";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
 import { 
   createInitialTask, 
@@ -55,7 +54,6 @@ import {
   type ScheduleStatus
 } from "./lib/persistence";
 import { hermesAdapter } from "./src/services/hermesAdapter";
-import { classifyModelRequest, explainUnroutableModel, generateWithFailover, type FailoverResult, DEFAULT_CANDIDATE_MODELS } from "./lib/model-router";
 import { verifyTaskAtGate, checkGuardianRules } from "./lib/kil-gate";
 import { buildTonReadiness } from "./lib/ton-readiness";
 import { probeTonReadiness } from "./lib/ton-probe";
@@ -69,6 +67,8 @@ import {
 import { effectiveModelsForProvider, lastRefresh } from "./lib/model-discovery";
 import { installBundledPlugins } from "./lib/registry/install";
 import { resolveTaskClass } from "./lib/registry/qualification";
+import { routedModelCall, previewRoutedCall } from "./lib/fabric/routed-call";
+import { getMembership } from "./lib/workspaces";
 import { routeIdentity, listFamiliesAndVersions, approveRouteMapping } from "./lib/registry/identity";
 import { runRouteImport, refreshRoute, listRouteImportStatus, getRouteRefreshSettings, setRouteRefreshSettings } from "./lib/registry/route-import";
 import { listTaskClasses, upsertTaskClass, listQualifications, startQualificationRun, recordCaseResult, evaluateRun, approveQualification, revokeQualification, getRun as getQualificationRun } from "./lib/registry/qualification";
@@ -208,7 +208,7 @@ import { resolveProviderState } from "./lib/provider-state";
 import { resolvePublicBaseUrl } from "./lib/public-url";
 import { requireAuth, requireWorkspaceMember, requireWorkspaceAdmin, requirePlatformAdmin, requireSameOrigin, getRequestUser, fromBody, fromQuery, fromBodyOrQuery, authorizedWorkspaceId, AuthedRequest } from "./lib/authorization";
 import { recordAdminAuditEvent, listRecentAdminAuditEvents } from "./lib/audit";
-import { guardedGeminiGenerate, guardedSpeech, requestKey } from "./lib/spend/adapters";
+import { guardedSpeech, requestKey } from "./lib/spend/adapters";
 import { getSpendStatus } from "./lib/spend/status";
 import { getSpendPolicy, saveSpendPolicy, PAID_PROVIDERS, type PaidProvider } from "./lib/spend/policy";
 import { listCatalogPrices, priceHistory } from "./lib/pricing/catalog";
@@ -219,7 +219,6 @@ import { runScopedAegis, receiptOutcomeFields, commitContentFailure, isContentFa
 import { resolveRoute, credentialForTarget, credentialHint, primaryCredentialEnvVar, evaluateModel } from "./lib/registry";
 import { listUsageForKey } from "./lib/spend/ledger";
 import { createExecutionContext } from "./lib/fabric/context";
-import { generateViaGemini } from "./lib/fabric/model-gemini";
 import { classifyIntent } from "./lib/fabric/intent";
 import { executeEnvelope } from "./lib/fabric/envelope";
 import {
@@ -282,10 +281,6 @@ const terminalSessions = new Map<string, ServerTerminalSession>([
 // above instead of declared locally. The three real call sites
 // (/api/terminal/guardian-check, /api/terminal/exec, /api/terminal/stream)
 // and the E2E self-test below are unchanged.
-
-// STEP 1b — relocated to lib/model-router.ts (same value) so
-// lib/fabric/kernel.ts has a real shared source instead of a duplicated
-// literal; imported here now instead of declared locally.
 
 // ---------------------------------------------------------------------------
 // Workspace isolation on read paths.
@@ -551,138 +546,58 @@ async function startServer() {
   // paid provider call), not an invented workspace/billing role.
   app.post(["/api/generate"], requireAuth, rateLimit("EXPENSIVE_EXECUTION", byUserOrIp, "generate"), async (req, res) => {
     try {
-      const { model: requestedModel = "gemini-3.7-flash", prompt = "", systemInstruction, temperature = 0.7 } = req.body || {};
-      // Registry selectors send canonical "provider/model" ids. This chat route
-      // dispatches Gemini only; a registry Gemini id is unwrapped to its model
-      // id, and any other provider's id is refused below by the same classifier.
-      if (typeof requestedModel === "string" && !requestedModel.trim()) {
-        return res.status(200).json({ success: false, status: "DEGRADED", reason: "MODEL_NOT_SELECTED", error: "No model selected. Choose one from the model registry; nothing was run.", modelUsed: null, timestamp: new Date().toISOString() });
+      // CANONICAL ROUTING — no default model, no prefix classification, no
+      // candidate list. A model the caller names is a pinned route (validated,
+      // never swapped); otherwise the router picks a route qualified for the
+      // "conversation" task class (api.generate in the task-class data).
+      const { model: requestedModel = "", prompt = "", systemInstruction } = req.body || {};
+      // A workspace is honoured only when the signed-in user is a member of
+      // it — otherwise its routing prohibitions could be dodged by naming it.
+      const claimedWs = typeof req.body?.workspaceId === "string" && req.body.workspaceId ? String(req.body.workspaceId) : null;
+      const authUser = getRequestUser(req);
+      if (claimedWs && (!authUser || !getMembership(authUser.user_id, claimedWs))) {
+        return res.status(403).json({ success: false, status: "DEGRADED", reason: "WORKSPACE_NOT_AUTHORIZED", error: "You are not a member of that workspace; nothing was run.", modelUsed: null, timestamp: new Date().toISOString() });
       }
-      const registryRoute = typeof requestedModel === "string" && requestedModel.includes("/") ? resolveRoute(requestedModel) : null;
-      const model = registryRoute && registryRoute.ok && registryRoute.protocol === "gemini.generate_content" ? registryRoute.modelId : requestedModel;
-      const apiKey = process.env.GEMINI_API_KEY;
-
-      if (!apiKey) {
-        return res.status(200).json({
-          success: false,
-          status: "DEGRADED",
-          reason: "API_KEY_NOT_CONFIGURED",
-          error: "GEMINI_API_KEY environment variable is not configured. Set it in .env or the deployment shell's environment.",
-          modelUsed: model,
-          timestamp: new Date().toISOString(),
-        });
-      }
-
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: {
-          headers: {
-            "User-Agent": "aistudio-build",
-          },
-        },
+      const workspaceId = claimedWs;
+      const messages = [
+        ...(systemInstruction ? [{ role: "system" as const, content: String(systemInstruction) }] : []),
+        { role: "user" as const, content: String(prompt) },
+      ];
+      const routed = await routedModelCall({
+        callSite: "api.generate", workspaceId, model: typeof requestedModel === "string" ? requestedModel : "",
+        messages, idempotencyKey: requestKey("api.generate"),
       });
-
-      const classification = classifyModelRequest(model);
-      // PUSH 1 — this route holds a GoogleGenAI client, so the ONLY safe
-      // classification to continue on is GEMINI. Before OpenAI became
-      // executable, "not UNSUPPORTED" and "is Gemini" were the same
-      // statement; they no longer are, and continuing on the old check
-      // would hand an OpenAI model id to Gemini — the precise silent
-      // substitution lib/model-router.ts exists to prevent.
-      if (classification.provider !== "GEMINI") {
+      if (!routed.ok) {
         return res.status(200).json({
-          success: false,
-          status: "DEGRADED",
-          reason: classification.provider === "UNSUPPORTED" ? classification.reason : "MODEL_MAPPING_NOT_FOUND",
-          error: explainUnroutableModel(classification, "POST /api/generate"),
-          requestedModel: classification.requestedModel,
-          modelUsed: null,
-          timestamp: new Date().toISOString(),
+          success: false, status: "DEGRADED", reason: routed.code, error: routed.error,
+          waitState: routed.waitState ?? null, routingDecisionId: routed.decision?.decisionId ?? null,
+          requestedModel: requestedModel || null, modelUsed: null, timestamp: new Date().toISOString(),
         });
       }
-
-      const targetModel = classification.resolvedModel;
-      const enhancedPrompt = `[Model: ${targetModel.toUpperCase()}]\n${systemInstruction ? `System Prompt: ${systemInstruction}\n` : ""}\nUser Query: ${prompt}`;
-
-      // Pass X follow-up (Jarvis routing stabilization) — unified onto the
-      // same real retry/failover helper as /api/jarvis/command rather than
-      // keeping a second, divergent candidate-loop implementation here.
-      // This route's own loop previously retried every error identically
-      // (no retryable/non-retryable distinction, no backoff, no circuit
-      // breaker) — now shares one tested implementation.
-      const candidateModels = [targetModel, ...DEFAULT_CANDIDATE_MODELS].filter((v, i, a) => a.indexOf(v) === i);
-      let usageMetadata: any = null;
-
-      // One HTTP request = one logical execution: every retry/candidate below shares this key, so none can pay twice (lib/spend/guard.ts).
-      const generateSpendKey = requestKey('api.generate');
-      const failoverResult = await generateWithFailover(candidateModels, async (candidate) => {
-        const response = await guardedGeminiGenerate(ai, {
-          model: candidate,
-          contents: enhancedPrompt,
-          config: {
-            temperature: Number(temperature),
+      const usageMetadata: any = routed.usageMetadata;
+      const taskId = req.body?.taskId || `chat-${Date.now()}`;
+      const agentId = req.body?.agentId || "hermes";
+      let eventId = "";
+      try {
+        const act = recordActivityEvent({
+          taskId, agentId, eventType: "PROMPT_COMPLETED",
+          payload: {
+            promptLength: String(prompt).length, requestedModel: requestedModel || null, modelUsed: routed.modelUsed,
+            provider: routed.providerId, canonicalVersionId: routed.canonicalVersionId, routingDecisionId: routed.decision.decisionId,
+            usageId: routed.usageId, replyLength: routed.output.length, usageMetadata, workspaceId,
           },
-        }, { callSite: 'api.generate', idempotencyKey: generateSpendKey });
-        if (!response.text) {
-          throw new Error("Model returned an empty response.");
-        }
-        usageMetadata = response.usageMetadata || null;
-        return response.text;
-      });
-
-      const generatedText = failoverResult.success ? failoverResult.text! : "";
-      const modelUsed = failoverResult.modelUsed || candidateModels[0];
-
-      if (generatedText) {
-        const taskId = req.body?.taskId || `chat-${Date.now()}`;
-        const agentId = req.body?.agentId || "hermes";
-        let eventId = "";
-        try {
-          const act = recordActivityEvent({
-            taskId,
-            agentId,
-            eventType: "PROMPT_COMPLETED",
-            payload: {
-              promptLength: prompt.length,
-              requestedModel: targetModel,
-              modelUsed,
-              fallbackUsed: failoverResult.fallbackUsed,
-              provider: "google-genai",
-              replyLength: generatedText.length,
-              usageMetadata,
-              promptTokens: usageMetadata?.promptTokenCount,
-              candidatesTokens: usageMetadata?.candidatesTokenCount,
-              totalTokens: usageMetadata?.totalTokenCount,
-              workspaceId: req.body?.workspaceId || "ws-synthos-primary"
-            }
-          });
-          eventId = act.event_id;
-        } catch {
-          // ignore ledger write failure
-        }
-        return res.json({
-          success: true,
-          status: "SUCCESS",
-          reply: generatedText,
-          modelUsed,
-          fallbackUsed: failoverResult.fallbackUsed,
-          taskId,
-          eventId,
-          usageMetadata,
-          promptTokens: usageMetadata?.promptTokenCount,
-          candidatesTokens: usageMetadata?.candidatesTokenCount,
-          totalTokens: usageMetadata?.totalTokenCount,
-          timestamp: new Date().toISOString(),
         });
+        eventId = act.event_id;
+      } catch {
+        // ignore ledger write failure
       }
-
-      return res.status(200).json({
-        success: false,
-        status: "DEGRADED",
-        reason: "MODEL_PROVIDER_UNAVAILABLE",
-        error: failoverResult.finalError || "Upstream model provider is currently unavailable or rate limited.",
-        modelUsed: model,
-        attempts: failoverResult.attempts,
+      return res.json({
+        success: true, status: "SUCCESS", reply: routed.output, modelUsed: routed.modelUsed,
+        provider: routed.providerId, canonicalVersionId: routed.canonicalVersionId, routingDecisionId: routed.decision.decisionId,
+        fallbackUsed: false, taskId, eventId, usageMetadata,
+        promptTokens: usageMetadata?.promptTokenCount ?? usageMetadata?.input_tokens ?? usageMetadata?.prompt_tokens,
+        candidatesTokens: usageMetadata?.candidatesTokenCount ?? usageMetadata?.output_tokens ?? usageMetadata?.completion_tokens,
+        totalTokens: usageMetadata?.totalTokenCount ?? usageMetadata?.total_tokens,
         timestamp: new Date().toISOString(),
       });
     } catch (err: any) {
@@ -700,7 +615,9 @@ async function startServer() {
   // Julian Goldie 4-Day YouTube Intelligence Audit API Endpoint
   app.post("/api/youtube/julian-goldie-audit", requireAuth, async (req, res) => {
     try {
-      const apiKey = process.env.GEMINI_API_KEY;
+      // Refuse early and truthfully when no qualified route can run the
+      // analysis (a routing preview: nothing persisted, nothing sent).
+      const auditRoute = previewRoutedCall({ callSite: "youtube.audit", workspaceId: null });
       const today = new Date();
       const cutoff = new Date(today.getTime() - (96 * 60 * 60 * 1000)); // 96 hours cutoff
       const dateRangeStr = `${cutoff.toISOString().split('T')[0]} to ${today.toISOString().split('T')[0]}`;
@@ -710,12 +627,12 @@ async function startServer() {
 
       console.log(`[YouTube Audit] Initiating authoritative audit for ${channelHandle} (${channelId}) between ${dateRangeStr}...`);
 
-      if (!apiKey) {
+      if (!auditRoute.ok) {
         return res.status(200).json({
           success: false,
           status: "BLOCKED",
-          reason: "API_KEY_NOT_CONFIGURED",
-          error: "GEMINI_API_KEY environment variable is not configured.",
+          reason: auditRoute.code,
+          error: auditRoute.error,
           honestyStatus: {
             videoDiscovery: "FAILED",
             transcriptIngestion: "NOT_CONNECTED",
@@ -935,42 +852,13 @@ async function startServer() {
         };
       });
 
-      // STEP 11: MODEL ROUTER WITH FAILOVER & EXPONENTIAL BACKOFF (Handles 503 / 429 / UNAVAILABLE)
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: { headers: { "User-Agent": "aistudio-build" } },
-      });
-
-      async function generateContentWithFailover(prompt: string, options: any = {}) {
-        const auditSpendKey = requestKey('youtube.audit');
-        const candidateModels = DEFAULT_CANDIDATE_MODELS;
-        let lastError: any = null;
-
-        for (let attempt = 0; attempt < candidateModels.length; attempt++) {
-          const modelName = candidateModels[attempt];
-          try {
-            console.log(`[Model Router] Executing prompt with model '${modelName}' (Attempt ${attempt + 1}/${candidateModels.length})...`);
-            const response = await guardedGeminiGenerate(ai, {
-              model: modelName,
-              contents: prompt,
-              config: options.config || { temperature: 0.2 }
-            }, { callSite: 'youtube.audit', idempotencyKey: auditSpendKey });
-
-            if (response && response.text) {
-              console.log(`[Model Router] Model '${modelName}' succeeded on attempt ${attempt + 1}.`);
-              return { text: response.text, modelUsed: modelName };
-            }
-          } catch (err: any) {
-            console.warn(`[Model Router] Model '${modelName}' failed (attempt ${attempt + 1}): ${err?.message}`);
-            lastError = err;
-            if (attempt < candidateModels.length - 1) {
-              const backoffMs = 1000;
-              console.log(`[Model Router] Backing off ${backoffMs}ms before model failover...`);
-              await new Promise(res => setTimeout(res, backoffMs));
-            }
-          }
-        }
-        throw lastError || new Error("All model router failovers exhausted.");
+      // STEP 11: ONE routed call — the canonical router selects a route
+      // qualified for summarization (youtube.audit). No candidate list, no
+      // failover, no backoff loop: one decision, one dispatch, one ledger row.
+      async function generateRouted(prompt: string) {
+        const r = await routedModelCall({ callSite: "youtube.audit", workspaceId: null, prompt, responseFormat: "json", idempotencyKey: requestKey("youtube.audit") });
+        if (!r.ok) throw new Error(`${r.code}: ${r.error}`);
+        return { text: r.output, modelUsed: r.modelUsed };
       }
 
       // STEP 10: Perform Analysis using Gemini on Real Discovered Videos
@@ -1029,11 +917,9 @@ Produce a structured JSON response with these keys:
 `;
 
       let modelOutputText = "";
-      let modelUsed = "gemini-3.6-flash";
+      let modelUsed = "";
       try {
-        const modelRes = await generateContentWithFailover(analysisPrompt, {
-          config: { temperature: 0.2, responseMimeType: "application/json" }
-        });
+        const modelRes = await generateRouted(analysisPrompt);
         modelOutputText = modelRes.text;
         modelUsed = modelRes.modelUsed;
       } catch (err: any) {
@@ -1042,7 +928,7 @@ Produce a structured JSON response with these keys:
           success: false,
           status: "FAILED",
           reason: "MODEL_EXECUTION_FAILED",
-          error: `Model router failover exhausted: ${err?.message}`,
+          error: `Model execution did not complete (no fallback was attempted): ${err?.message}`,
           honestyStatus: {
             videoDiscovery: "COMPLETE",
             transcriptIngestion: "METADATA_ONLY",
@@ -1197,7 +1083,7 @@ ${finalMatrix.map((m: any) => `- **${m.idea}**: ${m.whatItDoes} (Priority: \`${m
   // GENERAL YOUTUBE VIDEO INTELLIGENCE INGESTION
   app.post("/api/youtube/ingest", requireAuth, async (req, res) => {
     try {
-      const { url = "", model = "gemini-3.6-flash" } = req.body || {};
+      const { url = "", model = "" } = req.body || {};
       const trimmedUrl = url.trim();
       if (!trimmedUrl) {
         return res.status(400).json({ success: false, error: "Missing YouTube URL." });
@@ -1237,14 +1123,9 @@ ${finalMatrix.map((m: any) => `- **${m.idea}**: ${m.whatItDoes} (Priority: \`${m
       }
 
       // Step 2: Scout Agent Analysis via Live Gemini Model
-      const apiKey = process.env.GEMINI_API_KEY || "";
       let analysis = "";
-      const ingestClassification = classifyModelRequest(model);
-      if (apiKey && ingestClassification.provider === "GEMINI") {
-        const ai = new GoogleGenAI({
-          apiKey,
-          httpOptions: { headers: { "User-Agent": "aistudio-build" } }
-        });
+      let analysisStatus: { code: string; error: string } | null = null;
+      {
         const prompt = `You are the Hermes Scout YouTube Intelligence Agent.
 Video Title: "${title || 'YouTube Video ' + videoId}"
 Channel: "${authorName || 'YouTube Creator'}"
@@ -1253,15 +1134,11 @@ Video ID: "${videoId}"
 
 Analyze this video topic for technical intelligence, agent workflow implications, and architectural takeaways in concise Markdown.`;
 
-        const modelRes = await guardedGeminiGenerate(ai, {
-          model: ingestClassification.resolvedModel,
-          contents: prompt
-        }, { callSite: 'youtube.ingest' });
-        analysis = modelRes.text || "";
-      } else if (apiKey && ingestClassification.provider === "UNSUPPORTED") {
-        // Never silently substitute Gemini for a non-Gemini model request — skip
-        // analysis and log why, rather than routing to the wrong provider.
-        console.warn(`[YouTube Ingest] Skipping analysis: ${ingestClassification.message}`);
+        // A model the caller named is pinned (validated, never swapped);
+        // otherwise the router selects a route qualified for summarization.
+        const routed = await routedModelCall({ callSite: "youtube.ingest", workspaceId: null, model: typeof model === "string" ? model : "", prompt, idempotencyKey: requestKey("youtube.ingest") });
+        if (routed.ok) analysis = routed.output;
+        else analysisStatus = { code: routed.code, error: routed.error };
       }
 
       const taskId = `yt-ingest-${Date.now()}`;
@@ -1281,6 +1158,8 @@ Analyze this video topic for technical intelligence, agent workflow implications
         authorName,
         url: trimmedUrl,
         analysis,
+        // Why there is no analysis, when there is none — never a silent blank.
+        analysisStatus,
         timestamp: new Date().toISOString()
       });
     } catch (err: any) {
@@ -1290,6 +1169,7 @@ Analyze this video topic for technical intelligence, agent workflow implications
   });
 
   // ORCHESTRATOR DECOMPOSITION ENGINE
+  const ROUTER_SELECTS = "Selected at execution by the canonical router from routes qualified for this task's class";
   app.post("/api/orchestrator/decompose", requireAuth, async (req, res) => {
     try {
       const { rawInput = "", inputType = "text", url = "", files = [] } = req.body || {};
@@ -1299,16 +1179,11 @@ Analyze this video topic for technical intelligence, agent workflow implications
 
       console.log(`[Orchestrator] Decomposing triage request: "${trimmed.slice(0, 80)}..."`);
 
-      const apiKey = process.env.GEMINI_API_KEY || "";
       let aiDecomposition: any = null;
+      let decomposeRouting: { code: string; error: string } | null = null;
 
-      if (apiKey) {
+      {
         try {
-          const ai = new GoogleGenAI({
-            apiKey,
-            httpOptions: { headers: { "User-Agent": "aistudio-build" } },
-          });
-
           const decomposePrompt = `You are the Hermes AgentOS Master Orchestrator. Decompose this user directive into a multi-agent DAG task workflow:
 DIRECTIVE: "${trimmed}"
 URL: "${url}"
@@ -1328,8 +1203,6 @@ Return JSON matching this exact structure:
       "description": "Clear functional description of the specialist task",
       "stage": "Stage 1: Discovery" | "Stage 2: Analysis" | "Stage 3: Implementation" | "Stage 4: Verification",
       "assignedAgent": "scout" | "scribe" | "reach" | "dev" | "analytics" | "orchestrator",
-      "assignedModel": "gemini-3.6-flash" | "perplexity" | "deepseek" | "claudecode" | "chatgpt" | "claude",
-      "modelSelectionReason": "Why this model was arbitrated for this specialist role",
       "priority": "critical" | "high" | "medium",
       "estimatedHours": "1.5h",
       "prerequisiteKeys": [],
@@ -1340,22 +1213,13 @@ Return JSON matching this exact structure:
 }
 Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis, Engineering/Strategy, Synthesis, and Verification. The root task MUST have empty prerequisiteKeys.`;
 
-          const decomposeSpendKey = requestKey('orchestrator.decompose');
-          const candidateModels = DEFAULT_CANDIDATE_MODELS;
-          for (const m of candidateModels) {
-            try {
-              const resp = await guardedGeminiGenerate(ai, {
-                model: m,
-                contents: decomposePrompt,
-                config: { responseMimeType: "application/json", temperature: 0.2 }
-              }, { callSite: 'orchestrator.decompose', idempotencyKey: decomposeSpendKey });
-              if (resp?.text) {
-                aiDecomposition = JSON.parse(resp.text);
-                break;
-              }
-            } catch (mErr: any) {
-              console.warn(`[Orchestrator Decompose] Model '${m}' failover:`, mErr?.message);
-            }
+          // ONE routed call for the planning task class; no candidate list.
+          const routed = await routedModelCall({ callSite: "orchestrator.decompose", workspaceId: null, prompt: decomposePrompt, responseFormat: "json", idempotencyKey: requestKey("orchestrator.decompose") });
+          if (routed.ok) {
+            try { aiDecomposition = JSON.parse(routed.output); } catch { aiDecomposition = null; }
+          } else {
+            decomposeRouting = { code: routed.code, error: routed.error };
+            console.warn(`[Orchestrator Decompose] ${routed.code}: ${routed.error}`);
           }
         } catch (genErr) {
           console.warn("[Orchestrator Decompose] AI Generation bypassed to deterministic swarm decomposition:", genErr);
@@ -1378,8 +1242,8 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
                 description: "Scrape YouTube channel RSS feed for @JulianGoldieSEO covering the last 96 hours. Ingest video metadata, captions, and publication timestamps.",
                 stage: "Stage 1: Discovery",
                 assignedAgent: "scout",
-                assignedModel: "gemini-3.6-flash",
-                modelSelectionReason: "Optimized for high-throughput video metadata parsing & search grounding",
+                assignedModel: "",
+                modelSelectionReason: ROUTER_SELECTS,
                 priority: "critical",
                 estimatedHours: "1.5h",
                 prerequisiteKeys: [],
@@ -1392,8 +1256,8 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
                 description: "Deep semantic claim extraction across discovered videos. Classify AI search optimization techniques, Perplexity citation tactics, and AI agent frameworks.",
                 stage: "Stage 2: Analysis",
                 assignedAgent: "scribe",
-                assignedModel: "deepseek-r1",
-                modelSelectionReason: "Deep chain-of-thought analysis for semantic claim extraction and proof-checking",
+                assignedModel: "",
+                modelSelectionReason: ROUTER_SELECTS,
                 priority: "high",
                 estimatedHours: "2.0h",
                 prerequisiteKeys: ["task-1"],
@@ -1406,8 +1270,8 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
                 description: "Architect full-stack TypeScript adapters for tools and frameworks highlighted in the videos (e.g. OpenClaw browser execution, headless scraping, citation crawlers).",
                 stage: "Stage 3: Implementation",
                 assignedAgent: "dev",
-                assignedModel: "claudecode-3.7",
-                modelSelectionReason: "Specialized in sandbox engineering, TypeScript systems, and sub-50ms execution latency",
+                assignedModel: "",
+                modelSelectionReason: ROUTER_SELECTS,
                 priority: "critical",
                 estimatedHours: "2.5h",
                 prerequisiteKeys: ["task-2"],
@@ -1420,8 +1284,8 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
                 description: "Compose comprehensive investment thesis and architectural roadmap at [[Startup-Theses/Julian-Goldie-Audit]] with 15+ bidirectional wikilinks.",
                 stage: "Stage 3: Implementation",
                 assignedAgent: "scribe",
-                assignedModel: "claude-3-7-sonnet",
-                modelSelectionReason: "Long-form high fidelity structured technical writing and knowledge graph mesh construction",
+                assignedModel: "",
+                modelSelectionReason: ROUTER_SELECTS,
                 priority: "high",
                 estimatedHours: "1.5h",
                 prerequisiteKeys: ["task-2", "task-3"],
@@ -1434,8 +1298,8 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
                 description: "Verify all claims against raw transcripts, perform zero-hallucination validation, compute Aegis score, and sign cryptographic execution receipt.",
                 stage: "Stage 4: Verification",
                 assignedAgent: "orchestrator",
-                assignedModel: "hermes-3-70b",
-                modelSelectionReason: "Fleet Commander governance, permanent operating rules audit, and cryptographic verification sign-off",
+                assignedModel: "",
+                modelSelectionReason: ROUTER_SELECTS,
                 priority: "critical",
                 estimatedHours: "1.0h",
                 prerequisiteKeys: ["task-4"],
@@ -1458,8 +1322,8 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
                 description: `Gather raw intelligence, API documentation, repository trends, and customer pain points for: "${trimmed}".`,
                 stage: "Stage 1: Discovery",
                 assignedAgent: "scout",
-                assignedModel: "perplexity",
-                modelSelectionReason: "Perplexity Sonar selected for real-time web discovery & search grounding",
+                assignedModel: "",
+                modelSelectionReason: ROUTER_SELECTS,
                 priority: "high",
                 estimatedHours: "1.5h",
                 prerequisiteKeys: [],
@@ -1472,8 +1336,8 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
                 description: `Perform unit economics, TAM modeling, and technical feasibility validation for ${trimmed.slice(0, 30)}.`,
                 stage: "Stage 2: Analysis",
                 assignedAgent: "analytics",
-                assignedModel: "deepseek",
-                modelSelectionReason: "DeepSeek R1 reasoning for quantitative optimization and latency modeling",
+                assignedModel: "",
+                modelSelectionReason: ROUTER_SELECTS,
                 priority: "medium",
                 estimatedHours: "1.5h",
                 prerequisiteKeys: ["task-1"],
@@ -1486,8 +1350,8 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
                 description: `Build functional prototype, tool definitions, and API test harness for the requested workflow.`,
                 stage: "Stage 3: Implementation",
                 assignedAgent: "dev",
-                assignedModel: "claudecode",
-                modelSelectionReason: "Claude Code 3.7 for robust TypeScript/Python systems and automated test harnesses",
+                assignedModel: "",
+                modelSelectionReason: ROUTER_SELECTS,
                 priority: "critical",
                 estimatedHours: "2.0h",
                 prerequisiteKeys: ["task-2"],
@@ -1500,8 +1364,8 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
                 description: `Synthesize findings into Obsidian knowledge graph and sign Guardian Aegis verification receipt.`,
                 stage: "Stage 4: Verification",
                 assignedAgent: "orchestrator",
-                assignedModel: "hermes",
-                modelSelectionReason: "Nous Hermes 3 for master orchestration, board.db governance, and vault vectorization",
+                assignedModel: "",
+                modelSelectionReason: ROUTER_SELECTS,
                 priority: "critical",
                 estimatedHours: "1.0h",
                 prerequisiteKeys: ["task-3"],
@@ -1528,7 +1392,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         description: `**Parent Directive**: "${trimmed}"\n\n**Origin**: ${inputType.toUpperCase()}\n**Source URL**: ${url || "N/A"}\n\n**Orchestrator Plan**: Decomposed into ${aiDecomposition.tasks.length} specialized agent tasks across ${aiDecomposition.tasks.map((t: any) => t.stage).filter((v: any, i: any, a: any) => a.indexOf(v) === i).join(" → ")}.`,
         column: "triage",
         assignedAgent: "orchestrator",
-        assignedModel: "hermes",
+        assignedModel: "",
         priority: "critical",
         tags: ["triage-parent", aiDecomposition.category || "startup-curation", "hermes-orchestrated"],
         obsidianWikilinks: aiDecomposition.wikilinks || ["Startup-Theses/Master-Plan"],
@@ -1562,8 +1426,10 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
           // Root discovery tasks with no prerequisites become READY; downstream tasks wait in TODO
           column: isRoot ? "ready" : "todo",
           assignedAgent: t.assignedAgent || "scout",
-          assignedModel: t.assignedModel || "gemini-3.6-flash",
-          modelSelectionReason: t.modelSelectionReason || "Specialized for this workflow step",
+          // No model is chosen here: the canonical router selects a route
+          // qualified for the task's class when the task executes.
+          assignedModel: "",
+          modelSelectionReason: ROUTER_SELECTS,
           priority: t.priority || (idx === 0 ? "critical" : "high"),
           tags: t.tags || ["multi-agent-dag"],
           obsidianWikilinks: aiDecomposition.wikilinks || [],
@@ -1587,7 +1453,11 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         parentTask,
         childTasks,
         totalTasks: childTasks.length,
-        orchestratorDecision: parentTask.orchestratorDecision
+        orchestratorDecision: parentTask.orchestratorDecision,
+        // Whether a model produced this plan, or the deterministic template
+        // did because no qualified route could run it (and why).
+        decompositionSource: decomposeRouting ? "DETERMINISTIC_TEMPLATE" : "ROUTED_MODEL",
+        decompositionRouting: decomposeRouting,
       });
     } catch (err: any) {
       console.error("[Orchestrator Decompose Error]:", err);
@@ -2191,8 +2061,8 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
 
   // Real, evidenced pre-execution estimate for a candidate graph — the node
   // count that will actually be dispatched and each node's real provider
-  // routing status (classifyModelRequest, the same gate every real
-  // generateContent() call site uses). No dollar figure is ever invented:
+  // routing status (the model registry every real dispatch resolves
+  // through). No dollar figure is ever invented:
   // this deployment has no live per-token pricing wired to real usage
   // accounting, so cost is honestly reported ESTIMATE_UNAVAILABLE. This is
   // a read-only, non-billing endpoint — it never dispatches anything.
@@ -2262,12 +2132,9 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       // rather than silently ignored.
       const nodeContracts = new Map<string, OutputContract>();
       for (const n of nodes) {
-        // A native COMPUTE node must name its model. There is no default: a
-        // model nobody selected would be a silent fallback.
-        const isNative = n.type !== "capability" && !(n.runtime === "windmill" && typeof n.windmillTargetId === "string" && n.windmillTargetId.trim());
-        if (isNative && !String(n.assignedModel || "").trim()) {
-          return res.status(400).json({ success: false, code: "MODEL_NOT_SELECTED", nodeId: n.id, error: `Node "${n.id}" has no model selected. Choose one from the model registry; nothing was run.` });
-        }
+        // A native COMPUTE node with no model is routed by the canonical
+        // router (a route qualified for the node's task class); a node that
+        // names one is a pinned route. There is no default model either way.
         const parsed = normalizeOutputContract(n.outputContract);
         if (!parsed.ok) {
           return res.status(400).json({ success: false, code: "INVALID_OUTPUT_CONTRACT", nodeId: n.id, error: `Node "${n.id}": ${parsed.error}` });
@@ -2569,15 +2436,19 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
           // Every output — passing or failing — is persisted as the node's own
           // artifact, hashed, and given its own scoped Aegis review before the
           // graph may build on it.
-          const route = resolveRoute(nodeModel);
-          const nodeCredential = route.ok ? credentialForTarget(route.providerId) : "";
+          // A named model is a pinned route, checked here first so its exact
+          // refusal (unknown id, contract, credential) is reported; an empty
+          // model goes straight to the router.
+          const pinned = nodeModel.trim() !== "";
+          const route = pinned ? resolveRoute(nodeModel) : null;
+          const nodeCredential = route && route.ok ? credentialForTarget(route.providerId) : "";
           const nodeContractMode = (nodeContracts.get(currentNode.id) || { mode: "NARRATIVE" as const }).mode;
-          const nodeModelView = route.ok ? evaluateModel(route.providerId, route.modelId, { workspaceId }) : null;
-          if (!route.ok) {
+          const nodeModelView = route && route.ok ? evaluateModel(route.providerId, route.modelId, { workspaceId }) : null;
+          if (route && !route.ok) {
             nodeExecData = { success: false, status: "FAILED", reason: route.code, error: route.reason };
-          } else if (nodeModelView && !nodeModelView.outputContracts.includes(nodeContractMode)) {
+          } else if (route && route.ok && nodeModelView && !nodeModelView.outputContracts.includes(nodeContractMode)) {
             nodeExecData = { success: false, status: "FAILED", reason: "MODEL_TASK_INCOMPATIBLE", error: `${route.providerId}/${route.modelId} does not declare the ${nodeContractMode} output contract this node requires. It was not run.` };
-          } else if (!nodeCredential) {
+          } else if (route && route.ok && !nodeCredential) {
             nodeExecData = {
               success: false,
               status: "BLOCKED",
@@ -2587,39 +2458,35 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
           } else {
             const nodeContract = nodeContracts.get(currentNode.id) || { mode: "NARRATIVE" as const };
             const nodeSpendKey = `graph:${runId}:${currentNode.id}`;
-            const genResult = await graphRunCtx.invoke(`model.${route.providerId}`, async () => {
-              // A persona prompt may never override a LITERAL / JSON_OBJECT
-              // contract — same rule as the kernel.
-              const rolePrompt = nodeContract.mode === "NARRATIVE"
-                ? buildAgentRolePrompt({ assignedAgent: nodeAgent, taskTitle, description: nodeDescription, inputs: previousOutput })
-                : buildContractPrompt(nodeContract, taskTitle, nodeDescription);
-              // ROUTING EVIDENCE — the node's model is a pinned route. The
-              // router records (before dispatch) whether it is qualified for
-              // the node's task class and why; the spend guard's gate then
-              // enforces that qualification. Nothing is substituted.
-              const nodeTaskClass = resolveTaskClass({ taskClass: (currentNode as any)?.data?.taskClass ?? null, outputContract: nodeContract.mode });
-              const nodeReq = nodeTaskClass ? requirementsFor({ taskClass: nodeTaskClass.taskClassId, outputContract: nodeContract.mode, inputChars: rolePrompt.length }) : null;
-              const nodeDecision = nodeReq && !('error' in nodeReq)
-                ? routeTask({ workspaceId, taskId: `graph:${runId}:${currentNode.id}`, requirements: nodeReq, constraints: { pinnedRoute: { providerId: route.providerId, modelId: route.modelId }, mode: 'PINNED_ROUTE' } })
-                : null;
-              // Keyed per run+node, so a graph resume cannot pay for the same node twice.
-              return runWithRouteContext(
-                { taskClass: nodeTaskClass?.taskClassId ?? null, outputContract: nodeContract.mode, routingDecisionId: nodeDecision?.decisionId ?? null, canonicalVersionId: nodeDecision?.selected?.canonicalVersionId ?? null, deploymentId: nodeDecision?.selected?.deploymentId ?? null },
-                () => route.adapter.call!({ providerId: route.providerId, modelId: route.modelId, apiKey: nodeCredential, baseUrl: route.baseUrl, contents: rolePrompt, spend: { callSite: 'graph.node', workspaceId, idempotencyKey: nodeSpendKey } }),
-              );
+            // A persona prompt may never override a LITERAL / JSON_OBJECT
+            // contract — same rule as the kernel.
+            const rolePrompt = nodeContract.mode === "NARRATIVE"
+              ? buildAgentRolePrompt({ assignedAgent: nodeAgent, taskTitle, description: nodeDescription, inputs: previousOutput })
+              : buildContractPrompt(nodeContract, taskTitle, nodeDescription);
+            // ONE routed call: requirements → qualification → canonical router
+            // (decision persisted first) → Guardian → spend guard → adapter.
+            // Keyed per run+node, so a graph resume cannot pay for the same node twice.
+            const routed = await routedModelCall({
+              callSite: "graph.node", workspaceId, taskId: `graph:${runId}:${currentNode.id}`,
+              taskClass: (currentNode as any)?.data?.taskClass ?? null, outputContract: nodeContract.mode,
+              model: nodeModel, prompt: rolePrompt, idempotencyKey: nodeSpendKey, invoke: (name, fn) => graphRunCtx.invoke(name, fn),
             });
+            const genResult = routed.ok
+              ? { output: routed.output, hadProviderError: false, lastProviderError: null as string | null, termination: routed.termination, modelUsed: routed.modelUsed, providerId: routed.providerId, modelId: routed.modelId }
+              : { output: "", hadProviderError: true, lastProviderError: routed.error, termination: undefined, modelUsed: null, providerId: null, modelId: null, refusal: routed.code };
             if (!genResult.output) {
+              const refusal = (genResult as any).refusal as string | undefined;
               nodeExecData = {
                 success: false,
-                status: "FAILED",
-                reason: genResult.hadProviderError ? "MODEL_PROVIDER_UNAVAILABLE" : "EMPTY_PROVIDER_RESPONSE",
+                status: refusal === "NO_QUALIFIED_ROUTE" || refusal === "GUARDIAN_REFUSED" ? "BLOCKED" : "FAILED",
+                reason: refusal === "NO_QUALIFIED_ROUTE" || refusal === "GUARDIAN_REFUSED" || refusal === "OUTCOME_UNKNOWN" ? refusal : genResult.hadProviderError ? "MODEL_PROVIDER_UNAVAILABLE" : "EMPTY_PROVIDER_RESPONSE",
                 error: genResult.lastProviderError || "Model provider returned an empty or unparseable response",
               };
             } else {
               const termination: ProviderTermination = genResult.termination || { status: "NOT_REPORTED", providerStatus: null, reason: null };
-              const modelUsed = genResult.modelUsed || route.modelId;
+              const modelUsed = genResult.modelUsed || genResult.modelId!;
               const usageRow = listUsageForKey(nodeSpendKey).filter((r) => r.status === "SUCCESS").pop() ?? null;
-              const registry = { registryProviderId: route.providerId, canonicalModelId: route.modelId, priceVersion: usageRow?.price_version ?? null, usageId: usageRow?.usage_id ?? null };
+              const registry = { registryProviderId: genResult.providerId!, canonicalModelId: genResult.modelId!, priceVersion: usageRow?.price_version ?? null, usageId: usageRow?.usage_id ?? null };
               const node = commitNodeArtifact({
                 taskId: `task-${runId}-${currentNode.id}`, workspaceId,
                 title: `Graph node — ${taskTitle}`, description: nodeDescription.slice(0, 2000),
@@ -4312,7 +4179,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       // of producing a reply; used both to log the real failure and to
       // return an honest DEGRADED response instead of a fabricated success.
       let degraded: { reason: string; error: string; attempts?: unknown } | null = null;
-      let jarvisFailover: FailoverResult | null = null;
+      let jarvisFailover: { success: boolean; text: string | null; modelUsed: string | null; provider: string | null; routingDecisionId: string | null; fallbackUsed: boolean; attempts: any[]; finalError: string | null; refusal?: string } | null = null;
       // Conversation-context provenance (Jarvis memory task) — populated
       // only by the natural-language branch below; real either way, never
       // fabricated. contextInjected stays false whenever no session was
@@ -4472,35 +4339,9 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
           spokenSummary = "That didn't complete successfully.";
         }
       } else {
-        // Natural Language Directive via Live Model — Pass X follow-up
-        // (Jarvis routing stabilization). Real bounded retry + real
-        // model-level failover via generateWithFailover(); no cross-
-        // provider fallback exists because no second provider is
-        // configured in this deployment (see lib/model-router.ts header —
-        // Claude/DeepSeek/Hermes/OpenAI are recognized by name but have no
-        // configured execution mapping here, so a "provider fallback"
-        // would be fictitious).
-        //
-        // Two real fabrications fixed here, not just a missing retry:
-        // (1) this branch used to return success:true with a hand-authored
-        // acknowledgment claiming a directive was dispatched, when
-        // GEMINI_API_KEY was unset and nothing was ever called. (2) an
-        // empty model response used to silently fall back to a similarly
-        // fabricated acknowledgment string. Both now fail honestly instead.
-        const apiKey = process.env.GEMINI_API_KEY || "";
-        // Jarvis routing audit follow-up — the model was previously a raw
-        // hardcoded string literal here ("gemini-3.7-flash"), bypassing
-        // classifyModelRequest() entirely (the same central classifier
-        // /api/generate already uses). Jarvis's preferred model is still
-        // "gemini-3.7-flash" — that product choice is unchanged, not a
-        // redesign — but it now goes THROUGH the router instead of being a
-        // second, independent hardcoded copy of the provider decision. No
-        // behavioral effect today (Gemini is the only configured provider —
-        // see lib/model-router.ts's header), but Jarvis now asks the router
-        // rather than assuming the answer, so it follows whatever the
-        // router resolves to if that ever changes, with no Jarvis-specific
-        // edit required.
-        const jarvisClassification = classifyModelRequest("gemini-3.7-flash");
+        // Natural Language Directive via a routed model call: the canonical
+        // router selects a route qualified for "conversation"; one dispatch,
+        // no failover, no cross-provider substitution.
 
         // Conversation memory (Jarvis context-retrieval task) — real,
         // bounded, workspace+user-scoped prior turns from the same real
@@ -4537,39 +4378,10 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
           }
         }
 
-        if (!apiKey) {
-          degraded = {
-            reason: "API_KEY_NOT_CONFIGURED",
-            error: "GEMINI_API_KEY is not configured in this deployment. No directive was processed.",
-          };
-        } else if (jarvisClassification.provider !== "GEMINI") {
-          // Structurally unreachable today (the literal above always
-          // classifies GEMINI) — kept so a future change to the classifier
-          // can't silently make Jarvis assume a provider that isn't
-          // actually configured.
-          //
-          // PUSH 1 — `reason` and `message` no longer exist on every
-          // non-Gemini classification, because OPENAI is now an executable
-          // provider rather than an unsupported one. The reason code is
-          // fixed here instead of read off the union, and the sentence comes
-          // from the one helper that knows the difference between "no
-          // provider can run this" and "this surface does not run it".
-          degraded = {
-            reason: "MODEL_MAPPING_NOT_FOUND",
-            error: explainUnroutableModel(jarvisClassification, "the Jarvis command route"),
-          };
-        } else {
-          const ai = new GoogleGenAI({
-            apiKey,
-            httpOptions: { headers: { "User-Agent": "aistudio-build" } }
-          });
-          // TTS/speech separation (P3) — Jarvis's full answer and what gets
-          // read aloud are not the same text. Asking the model for both in
-          // one structured response (rather than deriving spokenSummary
-          // with a second call, or a client-side heuristic over prose that
-          // was never written to be truncated) keeps it to the one call
-          // this route already made, and lets the model itself distinguish
-          // "the outcome" from "the method" — a truncation heuristic can't.
+        {
+          // CANONICAL ROUTING: one routed call for the "conversation" task
+          // class (jarvis.command in the task-class data). No hardcoded
+          // model, no prefix classification, no failover candidates.
           const jarvisSystemInstruction = `You are Jarvis, the SynthOS Global System Service and Administrative Assistant. Answer concisely and factually based on SynthOS architecture, agent coordination, and system governance.
 
 Respond with ONLY a JSON object of this exact shape, no other text before or after it:
@@ -4580,42 +4392,27 @@ Rules for spokenSummary specifically:
 - Never include raw error text, stack traces, JSON, markdown, or code.
 - The user already gave a command if this is a directive rather than a question — never end with "Would you like me to...". Say what happened, not what could happen next.
 - If completing the request needs a live capability (web research, file access, an external API) that is not actually available in this call, spokenSummary must say so plainly rather than presenting model-training-era knowledge as current information.`;
-          const candidateModels = [jarvisClassification.resolvedModel, ...DEFAULT_CANDIDATE_MODELS].filter((v, i, a) => a.indexOf(v) === i);
-
           // Native chat-role turns, never flattened into the system prompt.
-          // Historical user content stays role:"user"; historical assistant
-          // content stays role:"model" (Gemini's own name for it) — never
-          // elevated to system authority. This is the structural prompt-
-          // injection guard: no keyword/pattern scanner exists anywhere in
-          // this codebase to "reuse" (verified — promptInjectionDefense is
-          // a UI-only settings field, never read server-side), so the
-          // guard here is the API's own role separation, not an invented
-          // security subsystem.
-          const conversationContents = [
-            ...priorTurns.map((m) => ({
-              role: m.role === "assistant" ? "model" : "user",
-              parts: [{ text: m.content }],
-            })),
-            { role: "user", parts: [{ text: trimmed }] },
+          // Historical user content stays role "user"; historical assistant
+          // content stays role "assistant" — never elevated to system
+          // authority. This role separation is the structural prompt-
+          // injection guard, and the protocol adapters preserve it.
+          const conversationMessages = [
+            { role: "system" as const, content: jarvisSystemInstruction },
+            ...priorTurns.map((m) => ({ role: (m.role === "assistant" ? "assistant" : "user") as "assistant" | "user", content: m.content })),
+            { role: "user" as const, content: trimmed },
           ];
-
-          const jarvisSpendKey = requestKey('jarvis.command');
-          jarvisFailover = await generateWithFailover(candidateModels, async (candidateModel) => {
-            const response = await guardedGeminiGenerate(ai, {
-              model: candidateModel,
-              contents: conversationContents,
-              config: { systemInstruction: jarvisSystemInstruction, responseMimeType: "application/json" },
-            }, { callSite: 'jarvis.command', workspaceId: (req as AuthedRequest).authWorkspaceId ?? null, idempotencyKey: jarvisSpendKey });
-            if (!response.text) {
-              // A real failure of this candidate, not a fabricated success — lets
-              // failover try the next candidate model instead of faking a reply.
-              throw new Error("Model returned an empty response.");
-            }
-            return response.text;
+          const jarvisRouted = await routedModelCall({
+            callSite: "jarvis.command", workspaceId: (req as AuthedRequest).authWorkspaceId ?? null,
+            messages: conversationMessages, responseFormat: "json", instruction: trimmed, idempotencyKey: requestKey("jarvis.command"),
           });
+          const jf = jarvisRouted.ok
+            ? { success: true, text: jarvisRouted.output, modelUsed: jarvisRouted.modelUsed, provider: jarvisRouted.providerId, routingDecisionId: jarvisRouted.decision.decisionId, fallbackUsed: false, attempts: [], finalError: null }
+            : { success: false, text: null, modelUsed: null, provider: null, routingDecisionId: jarvisRouted.decision?.decisionId ?? null, fallbackUsed: false, attempts: [], finalError: jarvisRouted.error, refusal: jarvisRouted.code };
+          jarvisFailover = jf;
 
-          if (jarvisFailover.success) {
-            const rawText = jarvisFailover.text!;
+          if (jf.success) {
+            const rawText = jf.text!;
             try {
               const parsed = JSON.parse(rawText);
               if (parsed && typeof parsed.reply === "string" && parsed.reply.trim()) {
@@ -4637,9 +4434,9 @@ Rules for spokenSummary specifically:
             }
           } else {
             degraded = {
-              reason: "MODEL_PROVIDER_UNAVAILABLE",
-              error: jarvisFailover.finalError || "Upstream model provider is currently unavailable or rate limited.",
-              attempts: jarvisFailover.attempts,
+              reason: jf.refusal === "NO_QUALIFIED_ROUTE" ? "NO_QUALIFIED_ROUTE" : "MODEL_PROVIDER_UNAVAILABLE",
+              error: jf.finalError || "The model call did not complete.",
+              attempts: jf.attempts,
             };
           }
         }
@@ -4650,8 +4447,8 @@ Rules for spokenSummary specifically:
       // exception messages, HTTP status text), which is real and useful in
       // the visible transcript but not something to read aloud verbatim.
       if (degraded) {
-        spokenSummary = degraded.reason === "API_KEY_NOT_CONFIGURED"
-          ? "I can't process that — the model service isn't configured on this deployment."
+        spokenSummary = degraded.reason === "API_KEY_NOT_CONFIGURED" || degraded.reason === "NO_QUALIFIED_ROUTE"
+          ? "I can't process that — no qualified model route is available on this deployment."
           : "I can't process that right now — the model provider is unavailable.";
       }
 
@@ -4673,7 +4470,8 @@ Rules for spokenSummary specifically:
                 command: trimmed,
                 intent,
                 replyPreview: reply.slice(0, 100),
-                requestedModel: jarvisFailover?.requestedModel,
+                provider: jarvisFailover?.provider ?? null,
+                routingDecisionId: jarvisFailover?.routingDecisionId ?? null,
                 modelUsed: jarvisFailover?.modelUsed,
                 fallbackUsed: jarvisFailover?.fallbackUsed ?? false,
                 context: contextProvenance,
@@ -7502,7 +7300,7 @@ Rules for spokenSummary specifically:
       const result = saveSpendPolicy(req.body?.policy ?? {}, actor);
       if (!result.ok) return res.status(400).json({ success: false, error: "Invalid spend policy.", errors: result.errors });
       recordAdminAuditEvent({ actorUserId: actor, eventType: "SPEND_POLICY_CHANGED", targetType: "platform_setting", targetId: "spend.policy",
-        detail: { paidExecutionEnabled: { from: before.paidExecutionEnabled, to: result.policy.paidExecutionEnabled }, changed: req.body?.policy ?? {} } });
+        detail: { paidExecutionEnabled: { from: before.paidExecutionEnabled, to: result.policy.paidExecutionEnabled }, modelExecutionEnabled: { from: before.modelExecutionEnabled, to: result.policy.modelExecutionEnabled }, localExecutionEnabled: { from: before.localExecutionEnabled, to: result.policy.localExecutionEnabled }, changed: req.body?.policy ?? {} } });
       return res.json({ success: true, status: getSpendStatus() });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: String(err?.message || "Failed to save the spend policy").slice(0, 200) });
@@ -7517,8 +7315,10 @@ Rules for spokenSummary specifically:
       const enabled = req.body.enabled as boolean;
       let partial: any;
       if (scope === "all") partial = { paidExecutionEnabled: enabled };
+      else if (scope === "model-execution") partial = { modelExecutionEnabled: enabled };
+      else if (scope === "local-execution") partial = { localExecutionEnabled: enabled };
       else if ((PAID_PROVIDERS as readonly string[]).includes(scope)) partial = { providers: { [scope]: { ...getSpendPolicy().providers[scope as PaidProvider], enabled } } };
-      else return res.status(400).json({ success: false, error: `scope must be "all" or one of ${PAID_PROVIDERS.join(", ")}.` });
+      else return res.status(400).json({ success: false, error: `scope must be "all", "model-execution", "local-execution" or one of ${PAID_PROVIDERS.join(", ")}.` });
       const result = saveSpendPolicy(partial, actor);
       if (!result.ok) return res.status(400).json({ success: false, error: "Invalid change.", errors: result.errors });
       recordAdminAuditEvent({ actorUserId: actor, eventType: "SPEND_POLICY_CHANGED", targetType: "spend_switch", targetId: scope, detail: { enabled } });
@@ -7744,119 +7544,24 @@ Rules for spokenSummary specifically:
 
   // 4. Real Provider Test Probe
   app.post("/api/master-admin/provider/test", requirePlatformAdmin, async (req, res) => {
-    const { provider = "gemini" } = req.body || {};
+    // A provider probe is a real, spend-guarded model call, so it goes through
+    // the canonical router like any other: restricted to the named provider,
+    // on a route qualified for literal_transformation. No hardcoded model, no
+    // direct fetch to a provider.
+    const aliases: Record<string, string> = { Google: "gemini", google: "gemini", OpenRouter: "openrouter" };
+    const requested = String(req.body?.provider || "");
+    const providerId = aliases[requested] || requested;
     const startTime = Date.now();
-
-    if (provider === "gemini" || provider === "Google") {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        return res.json({
-          success: false,
-          status: "NOT_CONFIGURED",
-          provider: "Google Gemini",
-          error: "GEMINI_API_KEY environment variable is not configured in .env.local",
-          latencyMs: 0
-        });
-      }
-
-      try {
-        const ai = new GoogleGenAI({ apiKey });
-        const response = await guardedGeminiGenerate(ai, {
-          model: "gemini-3.1-flash-lite",
-          contents: "ping: respond with 'pong' only",
-        }, { callSite: 'admin.provider_test', maxOutputTokens: 16 });
-
-        const latencyMs = Date.now() - startTime;
-        return res.json({
-          success: true,
-          status: "PASS",
-          provider: "Google Gemini",
-          model: "gemini-3.1-flash-lite",
-          reply: response.text?.trim() || "pong",
-          latencyMs,
-          usage: response.usageMetadata ? `${response.usageMetadata.totalTokenCount || 0} tokens` : "Usage metadata returned",
-          timestamp: new Date().toISOString()
-        });
-      } catch (err: any) {
-        return res.json({
-          success: false,
-          status: "FAIL",
-          provider: "Google Gemini",
-          error: err.message,
-          latencyMs: Date.now() - startTime,
-          timestamp: new Date().toISOString()
-        });
-      }
-    }
-
-    if (provider === "openrouter" || provider === "OpenRouter") {
-      const apiKey = process.env.OPENROUTER_API_KEY;
-      if (!apiKey) {
-        return res.json({
-          success: false,
-          status: "NOT_CONFIGURED",
-          provider: "OpenRouter",
-          error: "OPENROUTER_API_KEY environment variable is not configured",
-          latencyMs: 0
-        });
-      }
-
-      try {
-        const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${apiKey}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            model: "nousresearch/hermes-3-llama-3.1-405b",
-            messages: [{ role: "user", content: "ping" }],
-            max_tokens: 5
-          })
-        });
-
-        const latencyMs = Date.now() - startTime;
-        if (resp.ok) {
-          const data: any = await resp.json();
-          return res.json({
-            success: true,
-            status: "PASS",
-            provider: "OpenRouter",
-            model: "nousresearch/hermes-3-llama-3.1-405b",
-            reply: data?.choices?.[0]?.message?.content || "pong",
-            latencyMs,
-            timestamp: new Date().toISOString()
-          });
-        } else {
-          const errText = await resp.text();
-          return res.json({
-            success: false,
-            status: "FAIL",
-            provider: "OpenRouter",
-            error: `OpenRouter HTTP ${resp.status}: ${errText}`,
-            latencyMs,
-            timestamp: new Date().toISOString()
-          });
-        }
-      } catch (err: any) {
-        return res.json({
-          success: false,
-          status: "FAIL",
-          provider: "OpenRouter",
-          error: err.message,
-          latencyMs: Date.now() - startTime,
-          timestamp: new Date().toISOString()
-        });
-      }
-    }
-
-    return res.json({
-      success: false,
-      status: "NOT_CONFIGURED",
-      provider,
-      error: `Live probing for provider ${provider} requires configured credentials.`,
-      latencyMs: 0
+    if (!providerId) return res.status(400).json({ success: false, status: "NOT_CONFIGURED", error: "provider is required", latencyMs: 0 });
+    const r = await routedModelCall({
+      callSite: "admin.provider_test", workspaceId: null, prompt: "Reply with exactly: pong", maxOutputTokens: 16,
+      routing: { permittedProviders: [providerId], permittedAggregators: [providerId] }, idempotencyKey: requestKey("admin.provider_test"),
     });
+    const latencyMs = Date.now() - startTime;
+    if (!r.ok) {
+      return res.json({ success: false, status: r.code === "NO_QUALIFIED_ROUTE" ? "NOT_CONFIGURED" : "FAIL", provider: providerId, reason: r.code, error: r.error, routingDecisionId: r.decision?.decisionId ?? null, latencyMs, timestamp: new Date().toISOString() });
+    }
+    return res.json({ success: true, status: "PASS", provider: r.providerId, model: r.modelId, canonicalVersionId: r.canonicalVersionId, reply: r.output.trim(), routingDecisionId: r.decision.decisionId, usageId: r.usageId, latencyMs, timestamp: new Date().toISOString() });
   });
 
   // 5. Authentic End-to-End Diagnostic Pipeline Check
@@ -7918,81 +7623,13 @@ Rules for spokenSummary specifically:
       });
     }
 
-    // 4. Model Provider
-    if (process.env.GEMINI_API_KEY) {
-      try {
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        const probeRes = await guardedGeminiGenerate(ai, {
-          model: "gemini-3.1-flash-lite",
-          contents: "ping",
-        }, { callSite: 'admin.e2e_test', maxOutputTokens: 16 });
-        if (probeRes.text) {
-          results.push({
-            step: 4,
-            name: "Frontier Model Provider (Gemini)",
-            status: "PASS",
-            details: "Live generateContent probe succeeded on gemini-3.1-flash-lite."
-          });
-        } else {
-          results.push({
-            step: 4,
-            name: "Frontier Model Provider (Gemini)",
-            status: "FAIL",
-            details: "Gemini provider returned empty response payload."
-          });
-        }
-      } catch (probeErr: any) {
-        results.push({
-          step: 4,
-          name: "Frontier Model Provider (Gemini)",
-          status: "FAIL",
-          details: `Gemini live probe error: ${probeErr.message}`
-        });
-      }
-    } else if (process.env.OPENROUTER_API_KEY) {
-      try {
-        const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            model: "nousresearch/hermes-3-llama-3.1-405b",
-            messages: [{ role: "user", content: "ping" }],
-            max_tokens: 5
-          })
-        });
-        if (resp.ok) {
-          results.push({
-            step: 4,
-            name: "Frontier Model Provider (OpenRouter)",
-            status: "PASS",
-            details: "OpenRouter probe succeeded on nousresearch/hermes-3-llama-3.1-405b."
-          });
-        } else {
-          results.push({
-            step: 4,
-            name: "Frontier Model Provider (OpenRouter)",
-            status: "FAIL",
-            details: `OpenRouter probe returned status ${resp.status}.`
-          });
-        }
-      } catch (probeErr: any) {
-        results.push({
-          step: 4,
-          name: "Frontier Model Provider (OpenRouter)",
-          status: "FAIL",
-          details: `OpenRouter probe error: ${probeErr.message}`
-        });
-      }
-    } else {
-      results.push({
-        step: 4,
-        name: "Frontier Model Provider",
-        status: "NOT_CONNECTED",
-        details: "No model provider API keys configured in environment."
-      });
+    // 4. Model Provider — one routed probe (canonical router → Guardian →
+    // spend guard). With nothing qualified this is NOT_CONNECTED, truthfully.
+    {
+      const r = await routedModelCall({ callSite: "admin.e2e_test", workspaceId: null, prompt: "Reply with exactly: pong", maxOutputTokens: 16, idempotencyKey: requestKey("admin.e2e_test") });
+      results.push(r.ok
+        ? { step: 4, name: "Model Provider (canonical router)", status: "PASS", details: `Routed probe succeeded on ${r.canonicalVersionId ?? `${r.providerId}/${r.modelId}`} via ${r.providerId} (decision ${r.decision.decisionId}).` }
+        : { step: 4, name: "Model Provider (canonical router)", status: r.code === "NO_QUALIFIED_ROUTE" || r.code === "SPEND_BLOCKED" ? "NOT_CONNECTED" : "FAIL", details: `${r.code}: ${r.error}` });
     }
 
     // 5. Hermes Adapter Runtime

@@ -204,7 +204,7 @@ const localRuntime: RouteImporter = {
   providerId: 'local-runtime',
   description: 'A self-hosted OpenAI-compatible runtime\'s model list (GET /models). Free, local, no credential. Offerings map to a canonical version only by operator approval.',
   metadataPath: '/models',
-  parse(payload) {
+  parse(payload, { now, previous }) {
     const list = (payload as any)?.data ?? (payload as any)?.models;
     if (!Array.isArray(list)) return { error: 'Expected { "data": [ { "id": ... } ] } (or { "models": [ { "name": ... } ] }).' };
     const warnings: string[] = [];
@@ -217,7 +217,9 @@ const localRuntime: RouteImporter = {
         ...baseModel(id, id),
         capabilities: [cap('text.input', src), cap('text.output', src)],
         outputContracts: ['NARRATIVE', 'LITERAL'],
-        pricing: [],
+        // A $0 record the OPERATOR must approve: unknown pricing is never
+        // treated as free, so an unreviewed local model cannot run.
+        pricing: [importedPricing({ input: 0, output: 0, cachedInput: null }, src, false, now, previous.get(id))].map((r) => ({ ...r, staleAfter: hoursFrom(now, 24 * 365), reasoningTokens: 'NOT_BILLED' as const })),
         freeTier: { free: true, guaranteed: true },
       });
     }

@@ -2182,7 +2182,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
             />
           )}
 
-          {/* Model Router & OpenRouter Hub View */}
+          {/* Canonical Model Router view */}
           {activeTab === 'model-router' && (
             <ModelRouterView
               workspaceId={activeWorkspaceId}

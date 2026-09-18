@@ -52,8 +52,6 @@ export interface TaskClass {
   requiredTools: string[];
   callSites: string[];
   defaultForContracts: string[];
-  /** How many continuation segments a truncated NARRATIVE may use (each a separate spend-guarded call). */
-  maxContinuations?: number;
 }
 
 export interface EvalCase { caseId: string; prompt: string; check: EvalCheck }
@@ -132,7 +130,6 @@ export function upsertTaskClass(c: TaskClass, actor: string): { ok: true } | { o
     segmentable: !!c.segmentable, evalSuiteId: c.evalSuiteId, minQuality: c.minQuality, minReliability: c.minReliability,
     qualificationValidityDays: Math.max(1, Math.min(365, Number(c.qualificationValidityDays) || 60)), minContextTokens: c.minContextTokens ?? null,
     requiredTools: [...(c.requiredTools || [])], callSites: [...(c.callSites || [])], defaultForContracts: [...(c.defaultForContracts || [])],
-    maxContinuations: Math.max(0, Math.min(6, Number(c.maxContinuations ?? (c.segmentable ? 2 : 0)) || 0)),
   };
   getDatabase().prepare(`INSERT INTO registry_task_classes (task_class_id, record_json, record_hash, source, data_version, updated_by, updated_at) VALUES (?, ?, ?, 'ADMIN', 'admin', ?, ?)
     ON CONFLICT(task_class_id) DO UPDATE SET record_json = excluded.record_json, record_hash = excluded.record_hash, source = 'ADMIN', updated_by = excluded.updated_by, updated_at = excluded.updated_at`)

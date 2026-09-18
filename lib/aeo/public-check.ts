@@ -12,9 +12,8 @@
 // ---------------------------------------------------------------------------
 
 import type { Express, Request, Response, RequestHandler } from 'express';
-import { GoogleGenAI } from '@google/genai';
-import { guardedGeminiGenerate } from '../spend/adapters';
-import { GEO_MODEL, isSourceHost, runGeoProbe, type GroundingChunk } from './geo-probe';
+import { previewRoutedCall } from '../fabric/routed-call';
+import { GEO_PINNED_MODEL, askGrounded, isSourceHost, runGeoProbe } from './geo-probe';
 
 const PER_IP_PER_DAY = 3;
 const QUESTIONS = 3;
@@ -65,25 +64,18 @@ export function registerPublicVisibilityCheck(
     if (!businessName || !location || !service) {
       return res.status(400).json({ success: false, error: 'Business name, town or city, and what you sell are all needed.' });
     }
-    const apiKey = process.env.GEMINI_API_KEY?.trim();
-    if (!apiKey) return res.status(503).json({ success: false, error: 'The free check is not switched on yet.' });
+    // A routing preview before anything is consumed or spent: with no
+    // qualified web-search route the check is simply not available.
+    const route = previewRoutedCall({ callSite: 'aeo.public_check', workspaceId: null, model: GEO_PINNED_MODEL, tools: ['web_search'] });
+    if (!route.ok) return res.status(503).json({ success: false, error: 'The free check is not switched on yet.' });
     const ip = ipOf(req);
     const refused = capReason(ip, Number(process.env.PUBLIC_CHECK_DAILY_CAP) || 150);
     if (refused) return res.status(429).json({ success: false, error: refused });
     consume(ip);
 
-    const ai = new GoogleGenAI({ apiKey });
     const geo = await runGeoProbe(
       { businessName, domain: website || businessName, location, targetService: service },
-      async (query) => {
-        const response = await guardedGeminiGenerate(
-          ai,
-          { model: GEO_MODEL, contents: query, config: { tools: [{ googleSearch: {} }], maxOutputTokens: 900 } },
-          { callSite: 'aeo.public_check', maxOutputTokens: 900 },
-        );
-        const chunks: GroundingChunk[] = response?.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
-        return { text: typeof response?.text === 'string' ? response.text : '', chunks };
-      },
+      (query) => askGrounded(query, { callSite: 'aeo.public_check', workspaceId: null, maxOutputTokens: 900 }),
     );
     const queries = geo.queries.slice(0, QUESTIONS);
     if (geo.providerStatus !== 'USED' || queries.length === 0) {

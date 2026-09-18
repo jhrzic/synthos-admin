@@ -897,7 +897,7 @@ export const HermesManageView: React.FC<HermesManageViewProps> = ({
               {[
                 { key: 'telegram', label: 'Telegram Bot API Bridge', details: 'Thread router and channel publishers (101-106)' },
                 { key: 'discord', label: 'Discord Swarm Gateway', details: 'Active duplex voice bridge integration' },
-                { key: 'openrouter', label: 'OpenRouter Model Arbitration', details: 'Router fallback waterfall and key sync' },
+                { key: 'openrouter', label: 'OpenRouter (aggregator route)', details: 'Imported offerings, mapped and qualified in the Model Registry' },
                 { key: 'obsidian', label: 'Obsidian Bidirectional Synapse', details: 'Local wiki memory graph sync' },
                 { key: 'airbyte', label: 'Airbyte Telemetry Pipeline', details: 'Telemetry ledger streaming analytics' }
               ].map((conn) => (

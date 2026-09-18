@@ -428,7 +428,16 @@ describe('10: provider failures degrade honestly, never silently', () => {
     expect(r.text).toBeUndefined();
   });
 
-  it('an ungrounded model reply is discarded, not shown with a warning', async () => {
+  // A qualified "conversation" route must exist for the model path to be
+  // available at all; the injected callModel then stands in for dispatch.
+  const withQualifiedConversationRoute = async (fn: () => Promise<void>) => {
+    const { allowPaidExecutionForTest } = await import('./helpers/spend');
+    const { saveSpendPolicy, DEFAULT_SPEND_POLICY } = await import('../lib/spend/policy');
+    allowPaidExecutionForTest([['gemini', 'gemini-3.1-flash-lite']]);
+    try { await fn(); } finally { saveSpendPolicy(DEFAULT_SPEND_POLICY, 'test'); }
+  };
+
+  it('an ungrounded model reply is discarded, not shown with a warning', async () => withQualifiedConversationRoute(async () => {
     const prior = process.env.GEMINI_API_KEY;
     process.env.GEMINI_API_KEY = 'test-key-not-used-because-callModel-is-injected';
     try {
@@ -443,9 +452,9 @@ describe('10: provider failures degrade honestly, never silently', () => {
     } finally {
       if (prior === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = prior;
     }
-  });
+  }));
 
-  it('a grounded model reply is used and its provenance recorded', async () => {
+  it('a grounded model reply is used and its provenance recorded', async () => withQualifiedConversationRoute(async () => {
     const prior = process.env.GEMINI_API_KEY;
     process.env.GEMINI_API_KEY = 'test-key-not-used-because-callModel-is-injected';
     try {
@@ -461,9 +470,9 @@ describe('10: provider failures degrade honestly, never silently', () => {
     } finally {
       if (prior === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = prior;
     }
-  });
+  }));
 
-  it('a provider error falls back to the same evidence rather than to a worse answer', async () => {
+  it('a provider error falls back to the same evidence rather than to a worse answer', async () => withQualifiedConversationRoute(async () => {
     const prior = process.env.GEMINI_API_KEY;
     process.env.GEMINI_API_KEY = 'test-key-not-used-because-callModel-is-injected';
     try {
@@ -477,7 +486,7 @@ describe('10: provider failures degrade honestly, never silently', () => {
     } finally {
       if (prior === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = prior;
     }
-  });
+  }));
 });
 
 describe('11: prompt injection cannot widen the boundary', () => {

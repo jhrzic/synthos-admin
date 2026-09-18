@@ -9,7 +9,7 @@ import {
   lastRefresh,
 } from '../lib/model-discovery';
 import { defaultModelForProvider, documentedModelsForProvider } from '../lib/model-catalog';
-import { classifyModelRequest } from '../lib/model-router';
+import { resolveRoute } from '../lib/registry';
 
 // ---------------------------------------------------------------------------
 // CATALOG SYNC MUST BE FREE, HONEST WHEN IT FAILS, AND MUST NOT TOUCH ROUTING.
@@ -201,7 +201,7 @@ describe('discovery records a diff without changing routing', () => {
   it('a new model does not become the routed default', async () => {
     withTestCredentials();
     const defaultBefore = defaultModelForProvider('openai');
-    const routedBefore = classifyModelRequest('openai');
+    const routedBefore = resolveRoute('openai/gpt-9-supreme');
 
     globalThis.fetch = vi.fn(async (input: any) => {
       const url = typeof input === 'string' ? input : String(input?.url ?? '');
@@ -215,14 +215,9 @@ describe('discovery records a diff without changing routing', () => {
 
     // Routing is unchanged. Discovery informs; the router decides.
     expect(defaultModelForProvider('openai')).toBe(defaultBefore);
-    const routedAfter = classifyModelRequest('openai');
-    expect(routedAfter.provider).toBe(routedBefore.provider);
-    if (
-      (routedAfter.provider === 'OPENAI' || routedAfter.provider === 'GEMINI')
-      && (routedBefore.provider === 'OPENAI' || routedBefore.provider === 'GEMINI')
-    ) {
-      expect(routedAfter.resolvedModel).toBe(routedBefore.resolvedModel);
-    }
+    // A discovered id is a candidate, never a registered (routable) model.
+    expect(routedBefore).toMatchObject({ ok: false, code: 'MODEL_NOT_REGISTERED' });
+    expect(resolveRoute('openai/gpt-9-supreme')).toMatchObject({ ok: false, code: 'MODEL_NOT_REGISTERED' });
     // And a discovered id is not silently promoted to default.
     const stored = storedModelsForProvider('openai');
     expect(stored.find((m) => m.modelId === 'gpt-9-supreme')?.isProviderDefault ?? false).toBe(false);

@@ -6,10 +6,7 @@ import os from 'node:os';
 const TEST_DB_PATH = path.join(os.tmpdir(), `synthos-openai-provider-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
 process.env.SYNTHOS_DB_PATH = TEST_DB_PATH;
 
-import {
-  classifyModelRequest, normalizeOpenAiModel, resolveDefaultOpenAiModel,
-  explainUnroutableModel, DEFAULT_OPENAI_MODEL,
-} from '../lib/model-router';
+import { resolveRoute } from '../lib/registry';
 import { generateViaOpenAI, extractOpenAiText, scrubSecrets, resolveOpenAiBaseUrl } from '../lib/fabric/model-openai';
 import { getModelCredentialStatus, saveModelCredential, deleteModelCredential } from '../lib/model-credentials';
 import { listCapabilities } from '../lib/fabric/registry';
@@ -95,37 +92,13 @@ beforeEach(() => {
   behaviour = { status: 200, body: {} };
 });
 
-describe('1. PROVIDER IDENTITY — OpenAI is recognized as itself and never as another provider', () => {
-  it('a bare provider alias resolves to the configured default model, not to a Gemini id', () => {
-    const result = classifyModelRequest('openai');
-    expect(result.provider).toBe('OPENAI');
-    expect(result.provider === 'OPENAI' && result.resolvedModel).toBe(DEFAULT_OPENAI_MODEL);
+describe('1. PROVIDER IDENTITY — resolved by the model registry, never by a name rule or a default', () => {
+  it('a bare provider alias names no model: there is no default to resolve to', () => {
+    expect(resolveRoute('openai')).toMatchObject({ ok: false, code: 'MODEL_NOT_REGISTERED' });
   });
 
-  it('a specific model id is preserved exactly — the router never rewrites a caller\'s explicit choice', () => {
-    const result = classifyModelRequest('gpt-6-astra');
-    expect(result.provider).toBe('OPENAI');
-    expect(result.provider === 'OPENAI' && result.resolvedModel).toBe('gpt-6-astra');
-  });
-
-  it('OPENAI_MODEL overrides the default, so an operator can move off a retired snapshot without a code change', () => {
-    process.env.OPENAI_MODEL = 'gpt-5.6-luna';
-    try {
-      expect(resolveDefaultOpenAiModel()).toBe('gpt-5.6-luna');
-      expect(normalizeOpenAiModel('openai')).toBe('gpt-5.6-luna');
-    } finally {
-      delete process.env.OPENAI_MODEL;
-    }
-    expect(resolveDefaultOpenAiModel()).toBe(DEFAULT_OPENAI_MODEL);
-  });
-
-  it('a Gemini-only surface refuses an OpenAI model with a truthful, actionable message — never an "unsupported provider" lie', () => {
-    const message = explainUnroutableModel(classifyModelRequest('gpt-4o'), 'POST /api/generate');
-    expect(message).toContain('OPENAI');
-    expect(message).toContain('POST /api/execute-agent-task');
-    expect(message).toContain('no substitute was used');
-    // The one thing it must never say about a provider this platform runs.
-    expect(message).not.toContain('is not a recognized provider');
+  it('an id the registry does not hold is refused — a gpt-looking name is not routed by its prefix', () => {
+    expect(resolveRoute('gpt-9-unregistered-fixture')).toMatchObject({ ok: false, code: 'MODEL_NOT_REGISTERED' });
   });
 });
 

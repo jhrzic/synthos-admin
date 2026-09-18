@@ -34,16 +34,27 @@ import { getDatabase, updateTaskStatus, recordActivityEvent, canonicalizePayload
 import { recordRegistryEvent } from '../registry/store';
 import type { RoutingDecision, ContinuationFloor } from '../registry/router';
 import type { PrivacyClass } from '../registry/types';
+import continuationPolicyData from '../registry/data/continuation-policy.json';
 
-export const PAUSE_STATES = ['PAUSED_AWAITING_CAPACITY', 'PAUSED_AWAITING_QUALIFIED_CAPACITY', 'PAUSED_AWAITING_BUDGET', 'PAUSED_AWAITING_APPROVAL'] as const;
+export const PAUSE_STATES = ['PAUSED_AWAITING_CAPACITY', 'PAUSED_AWAITING_QUALIFIED_CAPACITY', 'PAUSED_AWAITING_BUDGET', 'PAUSED_AWAITING_APPROVAL', 'PAUSED_AWAITING_REPLAN'] as const;
 export const CONTINUITY_STATES = ['CHECKPOINTING', 'AWAITING_CONTINUATION', 'ROUTE_SWITCHING', 'RESUMING', ...PAUSE_STATES, 'RECONCILING_UNKNOWN_EXECUTION'] as const;
 export type PauseState = (typeof PAUSE_STATES)[number];
 export type ContinuityState = (typeof CONTINUITY_STATES)[number] | 'RUNNING' | 'DONE' | 'INCOMPLETE' | 'FAILED';
 
 /** A route left mid-task is not re-selected for this long (no bouncing). */
 export const ROUTE_RECOVERY_MINUTES = 15;
-/** Upper bound on segments per task; the continuation stops (INCOMPLETE) rather than loop. */
-export const MAX_SEGMENTS = 8;
+/**
+ * CONTINUATION POLICY (data: lib/registry/data/continuation-policy.json).
+ * No fixed segment count ends a task. It continues while each segment makes
+ * verified forward progress and authorised budget remains; it pauses — never
+ * fails, never discards work — when progress stalls (PAUSED_AWAITING_REPLAN),
+ * when its authorised task spend is reached (PAUSED_AWAITING_BUDGET), or at a
+ * very high absolute safety ceiling that only a malfunction could reach.
+ */
+export interface ContinuationPolicy { version: string; maxNoProgressSegments: number; minProgressChars: number; maxShingleOverlap: number; maxTaskSpendUsd: number; safetySegmentCeiling: number }
+export function continuationPolicy(): ContinuationPolicy {
+  return continuationPolicyData as ContinuationPolicy;
+}
 /** Bounded summary carried to a continuation. */
 export const CONTINUATION_TAIL_CHARS = 2000;
 
@@ -84,6 +95,12 @@ export function ensureContinuityTables(): void {
   `);
   const cols = (db.prepare('PRAGMA table_info(task_segments)').all() as any[]).map((c) => c.name);
   if (!cols.includes('output_text')) db.exec('ALTER TABLE task_segments ADD COLUMN output_text TEXT');
+  if (!cols.includes('progress_json')) db.exec('ALTER TABLE task_segments ADD COLUMN progress_json TEXT');
+  const ccols = (db.prepare('PRAGMA table_info(task_continuity)').all() as any[]).map((c) => c.name);
+  if (!ccols.includes('no_progress_count')) db.exec('ALTER TABLE task_continuity ADD COLUMN no_progress_count INTEGER NOT NULL DEFAULT 0');
+  // Authorised spend for this task's continuation; an operator's resume after a
+  // spend pause adds one more policy increment (explicit authorisation).
+  if (!ccols.includes('spend_allowance_usd')) db.exec('ALTER TABLE task_continuity ADD COLUMN spend_allowance_usd REAL');
   ensured = true;
 }
 
@@ -113,6 +130,10 @@ export interface ContinuityRecord {
   lastCheckpointId: string | null;
   excludedRoutes: Record<string, { since: string; reason: string }>;
   privacyClass: PrivacyClass;
+  /** Consecutive continuation segments that made no verified forward progress. */
+  noProgressCount: number;
+  /** Authorised spend for this task (USD); null → the policy default. */
+  spendAllowanceUsd: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -122,7 +143,7 @@ function fromRow(r: any): ContinuityRecord {
     taskId: r.task_id, workspaceId: r.workspace_id, taskClass: r.task_class, contract: JSON.parse(r.contract_json), requirements: JSON.parse(r.requirements_json),
     constraints: JSON.parse(r.constraints_json), state: r.state, stateReason: r.state_reason, segmentCount: r.segment_count, currentSegmentId: r.current_segment_id,
     currentDecisionId: r.current_decision_id, currentRouteKey: r.current_route_key, lastCheckpointId: r.last_checkpoint_id,
-    excludedRoutes: JSON.parse(r.excluded_routes_json || '{}'), privacyClass: r.privacy_class, createdAt: r.created_at, updatedAt: r.updated_at,
+    excludedRoutes: JSON.parse(r.excluded_routes_json || '{}'), privacyClass: r.privacy_class, noProgressCount: r.no_progress_count ?? 0, spendAllowanceUsd: r.spend_allowance_usd ?? null, createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
 
@@ -142,7 +163,38 @@ export function openContinuity(p: { taskId: string; workspaceId: string; taskCla
   return getContinuity(p.taskId)!;
 }
 
-function patchContinuity(taskId: string, patch: Partial<{ state: ContinuityState; state_reason: string | null; segment_count: number; current_segment_id: string | null; current_decision_id: string | null; current_route_key: string | null; last_checkpoint_id: string | null; excluded_routes_json: string }>): void {
+export function grantSpendAllowance(taskId: string, extraUsd: number): number {
+  const c = getContinuity(taskId);
+  if (!c) return 0;
+  const next = (c.spendAllowanceUsd ?? continuationPolicy().maxTaskSpendUsd) + extraUsd;
+  getDatabase().prepare('UPDATE task_continuity SET spend_allowance_usd = ?, updated_at = ? WHERE task_id = ?').run(next, new Date().toISOString(), taskId);
+  return next;
+}
+
+export function updateRequirements(taskId: string, requirements: object): void {
+  ensureContinuityTables();
+  getDatabase().prepare('UPDATE task_continuity SET requirements_json = ?, updated_at = ? WHERE task_id = ?').run(JSON.stringify(requirements), new Date().toISOString(), taskId);
+}
+
+export function setNoProgressCount(taskId: string, n: number): void {
+  ensureContinuityTables();
+  patchContinuity(taskId, { no_progress_count: n });
+}
+
+/** Task spend so far (ledger), for the continuation budget. */
+export function taskSpendUsd(taskId: string): number {
+  try {
+    const r = getDatabase().prepare("SELECT COALESCE(SUM(COALESCE(actual_cost_usd, estimated_cost_usd, 0)), 0) AS s FROM provider_usage WHERE task_id = ? AND status NOT IN ('BLOCKED', 'PRE_DISPATCH_FAILURE', 'OPERATOR_CLEARED')").get(taskId) as any;
+    return r?.s ?? 0;
+  } catch { return 0; }
+}
+
+export function recordSegmentProgress(segmentId: string, progress: unknown): void {
+  ensureContinuityTables();
+  getDatabase().prepare('UPDATE task_segments SET progress_json = ? WHERE segment_id = ?').run(JSON.stringify(progress), segmentId);
+}
+
+function patchContinuity(taskId: string, patch: Partial<{ no_progress_count: number; state: ContinuityState; state_reason: string | null; segment_count: number; current_segment_id: string | null; current_decision_id: string | null; current_route_key: string | null; last_checkpoint_id: string | null; excluded_routes_json: string }>): void {
   const keys = Object.keys(patch);
   if (!keys.length) return;
   getDatabase().prepare(`UPDATE task_continuity SET ${keys.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE task_id = ?`)
@@ -190,7 +242,7 @@ export interface SegmentRecord {
   receiptId: string | null;
   artifactHashes: string[];
   outputHash: string | null;
-  status: 'RUNNING' | 'COMPLETED' | 'INCOMPLETE' | 'BLOCKED' | 'FAILED' | 'UNKNOWN' | 'NOT_ACCEPTED' | 'ACCEPTED_BY_RECONCILIATION';
+  status: 'RUNNING' | 'COMPLETED' | 'INCOMPLETE' | 'NO_PROGRESS' | 'BLOCKED' | 'FAILED' | 'UNKNOWN' | 'NOT_ACCEPTED' | 'ACCEPTED_BY_RECONCILIATION';
   statusReason: string | null;
   startedAt: string;
   completedAt: string | null;

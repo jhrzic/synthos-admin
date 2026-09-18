@@ -17,9 +17,8 @@
 // ---------------------------------------------------------------------------
 
 import crypto from 'node:crypto';
-import { GoogleGenAI } from '@google/genai';
-import { guardedGeminiGenerate } from '../spend/adapters';
-import { GEO_ENGINE, GEO_MODEL, runGeoProbe, type GroundingChunk } from './geo-probe';
+import { previewRoutedCall } from '../fabric/routed-call';
+import { GEO_ENGINE, GEO_PINNED_MODEL, askGrounded, runGeoProbe } from './geo-probe';
 import {
   createInitialTask,
   updateTaskStatus,
@@ -63,43 +62,24 @@ export type AeoAuditResult =
  * Which AI/search provider (if any) can answer visibility questions right now.
  * Named credentials, never a silent downgrade.
  */
-export function resolveGeoProvider(): { providerStatus: 'USED' | 'NOT_CONFIGURED' | 'UNAVAILABLE'; providerDetail: string } {
-  const candidates: Array<[string, string | undefined]> = [
-    ['GEMINI_API_KEY', process.env.GEMINI_API_KEY],
-    ['SERPAPI_KEY', process.env.SERPAPI_KEY],
-    ['DATAFORSEO_LOGIN', process.env.DATAFORSEO_LOGIN],
-    ['BRIGHTDATA_API_KEY', process.env.BRIGHTDATA_API_KEY],
-    ['OPENSEO_API_KEY', process.env.OPENSEO_API_KEY],
-  ];
-  const present = candidates.filter(([, v]) => Boolean(v && String(v).trim()));
-  if (present.length === 0) {
-    return {
-      providerStatus: 'NOT_CONFIGURED',
-      providerDetail:
-        'No AI/search visibility provider is configured (checked GEMINI_API_KEY, SERPAPI_KEY, DATAFORSEO_LOGIN, BRIGHTDATA_API_KEY, OPENSEO_API_KEY).',
-    };
+export function resolveGeoProvider(workspaceId: string | null = null): { providerStatus: 'USED' | 'NOT_CONFIGURED' | 'UNAVAILABLE'; providerDetail: string } {
+  // The canonical router decides — a preview for research_synthesis with the
+  // web-search tool. Nothing persisted, nothing sent.
+  const p = previewRoutedCall({ callSite: 'aeo.geo_probe', workspaceId, model: GEO_PINNED_MODEL, tools: ['web_search'] });
+  if (!p.ok) {
+    return { providerStatus: p.code === 'NO_QUALIFIED_ROUTE' ? 'NOT_CONFIGURED' : 'UNAVAILABLE', providerDetail: `No qualified web-search model route can answer visibility questions: ${p.error}` };
   }
-  if (process.env.GEMINI_API_KEY?.trim()) {
-    return {
-      providerStatus: 'USED',
-      providerDetail: `GEMINI_API_KEY present: audits ask a disclosed panel of local questions via ${GEO_ENGINE} (${GEO_MODEL}), each call spend-guarded.`,
-    };
-  }
-  return {
-    providerStatus: 'UNAVAILABLE',
-    providerDetail: `Credential present (${present.map(([k]) => k).join(', ')}) but no visibility query adapter is wired for it in this build, so no AI query was executed. Set GEMINI_API_KEY to enable the Gemini + Google Search probe.`,
-  };
+  const sel = p.decision.selected!;
+  return { providerStatus: 'USED', providerDetail: `Audits ask a disclosed panel of local questions via ${sel.canonicalVersionId ?? `${sel.providerId}/${sel.modelId}`} (${GEO_ENGINE}), each call routed and spend-guarded.` };
 }
 
 /**
  * Real AI-visibility evidence for one audit, or the honest reason there is none.
- * Each question is one guarded, Google-Search-grounded Gemini call.
+ * Each question is one routed, web-search-grounded call.
  */
 async function gatherGeoEvidence(params: AeoAuditParams): Promise<GeoEvidence> {
-  const provider = resolveGeoProvider();
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (provider.providerStatus !== 'USED' || !apiKey) return { queries: [], ...provider };
-  const ai = new GoogleGenAI({ apiKey });
+  const provider = resolveGeoProvider(params.workspaceId);
+  if (provider.providerStatus !== 'USED') return { queries: [], ...provider };
   return runGeoProbe(
     {
       businessName: params.businessName,
@@ -108,15 +88,7 @@ async function gatherGeoEvidence(params: AeoAuditParams): Promise<GeoEvidence> {
       targetService: params.targetService,
       targetKeywords: params.targetKeywords,
     },
-    async (query) => {
-      const response = await guardedGeminiGenerate(
-        ai,
-        { model: GEO_MODEL, contents: query, config: { tools: [{ googleSearch: {} }], maxOutputTokens: 1200 } },
-        { callSite: 'aeo.geo_probe', workspaceId: params.workspaceId, maxOutputTokens: 1200 },
-      );
-      const chunks: GroundingChunk[] = response?.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
-      return { text: typeof response?.text === 'string' ? response.text : '', chunks };
-    },
+    (query) => askGrounded(query, { callSite: 'aeo.geo_probe', workspaceId: params.workspaceId, maxOutputTokens: 1200 }),
   );
 }
 

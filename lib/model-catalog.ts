@@ -34,17 +34,18 @@
 //                      when no credential or no discovery endpoint is
 //                      available — which is the Anthropic case today.
 //
-// THIS IS NOT A SECOND ROUTER
-// The catalog answers "what exists and what is its state". lib/model-router.ts
-// decides where a call goes, and is unchanged.
+// THIS IS NOT A ROUTER
+// The catalog answers "what exists and what is its state" (reference only).
+// Where a call goes is decided by the canonical router (lib/registry/router.ts)
+// over the model registry. There is no provider "default" model: nothing here
+// selects anything, and nothing here is read at execution time.
 // ---------------------------------------------------------------------------
 
-import {
-  DEFAULT_OPENAI_MODEL,
-  resolveDefaultOpenAiModel,
-  classifyModelRequest,
-  type ExecutableProvider,
-} from './model-router';
+import { resolveModelIdentity } from './registry/store';
+
+/** Which registry provider a catalog provider corresponds to (a label, not a route). */
+export type ExecutableProvider = 'OPENAI' | 'GEMINI';
+const REGISTRY_PROVIDER: Record<ExecutableProvider, string> = { OPENAI: 'openai', GEMINI: 'gemini' };
 
 export type CatalogProviderId =
   | 'openai'
@@ -348,23 +349,14 @@ function toCatalogModel(
  */
 export function documentedModelsForProvider(providerId: CatalogProviderId): CatalogModel[] {
   if (providerId === 'google') {
-    return DOCUMENTED_GEMINI.map((d) => toCatalogModel('google', d, 'DOCUMENTED_CATALOG', 'gemini-3.1-flash-lite'));
+    // No default: the canonical router selects among QUALIFIED routes.
+    return DOCUMENTED_GEMINI.map((d) => toCatalogModel('google', d, 'DOCUMENTED_CATALOG', null));
   }
   if (providerId === 'openai') {
-    const configured = resolveDefaultOpenAiModel();
-    const docs: DocumentedModel[] = [{
-      modelId: configured,
-      displayName: configured,
-      capabilityTags: ['text', 'default'],
-    }];
-    if (configured !== DEFAULT_OPENAI_MODEL) {
-      docs.push({
-        modelId: DEFAULT_OPENAI_MODEL,
-        displayName: `${DEFAULT_OPENAI_MODEL} (built-in fallback)`,
-        capabilityTags: ['text', 'fallback'],
-      });
-    }
-    return docs.map((d) => toCatalogModel('openai', d, 'DOCUMENTED_CATALOG', configured));
+    // No documented or default OpenAI ids are held here any more: which
+    // OpenAI models exist comes from the model registry (manifests), and
+    // which one runs is the canonical router's decision.
+    return [];
   }
   const docs = DOCUMENTED_MODELS[providerId] ?? [];
   return docs.map((d) => toCatalogModel(providerId, d, 'DOCUMENTED_CATALOG', null));
@@ -384,9 +376,12 @@ export function catalogModels(): CatalogModel[] {
   return documentedCatalog();
 }
 
-/** The provider's default routed model id, or null when it has none. */
-export function defaultModelForProvider(providerId: CatalogProviderId): string | null {
-  return documentedModelsForProvider(providerId).find((m) => m.isProviderDefault)?.modelId ?? null;
+/**
+ * Always null: no provider has a default model. Kept so the reference API
+ * states that explicitly instead of omitting the field.
+ */
+export function defaultModelForProvider(_providerId: CatalogProviderId): string | null {
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -457,8 +452,10 @@ export function isModelUsable(state: ResolvedModelState): boolean {
  */
 export function catalogAgreesWithRouter(model: CatalogModel): boolean {
   const provider = getCatalogProvider(model.providerId);
-  if (!provider || provider.execution !== 'SUPPORTED') return true;
-  return classifyModelRequest(model.modelId).provider === provider.routerProvider;
+  if (!provider || provider.execution !== 'SUPPORTED' || !provider.routerProvider) return true;
+  // The router routes only what the registry holds, under its canonical provider.
+  const id = resolveModelIdentity(`${REGISTRY_PROVIDER[provider.routerProvider]}/${model.modelId}`);
+  return id.ok && id.providerId === REGISTRY_PROVIDER[provider.routerProvider];
 }
 
 // ---------------------------------------------------------------------------

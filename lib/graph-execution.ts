@@ -6,8 +6,8 @@
 // accounting (server.ts's own post-execution `costEstimate` field is `null`
 // for the same reason — see /api/execute-agent-task). So "the best available
 // execution estimate" this module can honestly produce is real provider
-// ROUTING status per node (via the same classifyModelRequest() every real
-// generateContent() call site gates on) — never an invented dollar figure.
+// ROUTING status per node (via the model registry that every real dispatch
+// resolves through) — never an invented dollar figure.
 //
 // Pure, side-effect-free (no server.ts import) so it's importable directly
 // in tests without triggering server.ts's self-executing startServer().

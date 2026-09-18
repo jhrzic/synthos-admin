@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import http from 'node:http';
 import path from 'node:path';
+import fs from 'node:fs';
 import os from 'node:os';
 
 const TEST_DB_PATH = path.join(os.tmpdir(), `synthos-devloop-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
@@ -12,7 +13,6 @@ import {
   reconcileDevelopmentTask, buildDevelopmentContext, buildReviewPrompt,
   MAX_CONTEXT_ITEMS, MAX_CONTEXT_CHARS_PER_ITEM, REVIEW_SEAT_DIRECTIVE,
 } from '../lib/development-loop';
-import { DEFAULT_OPENAI_REVIEW_MODEL, resolveReviewSeatModel } from '../lib/model-router';
 import { advanceDueExternalExecutions, getWorkspaceExternalExecution } from '../lib/external-executions';
 import { getDatabase, getTaskArtifacts, getTaskReceipts, getTaskQualityReviews, verifyReceipt } from '../lib/persistence';
 import { allowPaidExecutionForTest } from './helpers/spend';
@@ -119,6 +119,9 @@ afterAll(async () => {
 });
 
 beforeEach(() => {
+  // Provider health is ledger state: a deliberate 401 in one test must not
+  // cool the route down (router UNHEALTHY) for the next.
+  try { getDatabase().exec("DELETE FROM runtime_events WHERE target_type = 'provider'"); } catch { /* not created yet */ }
   oaCalls = 0;
   oaBehaviour = { status: 200, body: { model: 'gpt-5.6-terra-2026-08-01', output_text: REAL_REVIEW, usage: { total_tokens: 500 } } };
 });
@@ -214,8 +217,9 @@ describe('3. OPENAI SEAT — absent credential degrades honestly and never subst
 
     expect(r.outcome).toBe('NOT_CONFIGURED');
     expect(r.reviewText).toBeNull();
-    expect(r.reason).toContain('OPENAI_API_KEY');
-    expect(r.reason).toContain('no other provider was substituted');
+    // The router's own reason: the only qualified routes lack a credential.
+    expect(r.reason).toContain('INVALID_OR_MISSING_CREDENTIAL');
+    expect(r.reason).toContain('no other model was substituted');
     expect(oaCalls).toBe(0);
 
     // State preserved — a missing key must not advance or fail the task.
@@ -267,15 +271,11 @@ describe('3. OPENAI SEAT — absent credential degrades honestly and never subst
 });
 
 describe('3b. THE REVIEW SEAT is a SynthOS reviewer, not a generic API call', () => {
-  it('runs on the flagship reasoning model, kept separate from the general worker default', () => {
-    expect(DEFAULT_OPENAI_REVIEW_MODEL).toBe('gpt-5.6-sol');
-    expect(resolveReviewSeatModel()).toBe('gpt-5.6-sol');
-  });
-
-  it('the seat model is configurable, so a retired snapshot is an env change not a code change', () => {
-    process.env.OPENAI_REVIEW_MODEL = 'gpt-6-astra';
-    try { expect(resolveReviewSeatModel()).toBe('gpt-6-astra'); }
-    finally { delete process.env.OPENAI_REVIEW_MODEL; }
+  it('has no model of its own: the canonical router selects a route qualified for code_review', () => {
+    const src = fs.readFileSync(path.join(process.cwd(), 'lib/development-loop.ts'), 'utf8');
+    expect(src).toContain("callSite: 'development.review'");
+    expect(src).toContain('routedModelCall({');
+    expect(src).not.toMatch(/gpt-\d|resolveReviewSeatModel|OPENAI_REVIEW_MODEL/);
   });
 
   it('the directive names the role and the things this project actually gets wrong', () => {

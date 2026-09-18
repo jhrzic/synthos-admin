@@ -73,7 +73,7 @@ describe('2: internal planning narration is instructed out of spokenSummary at t
 
   it('the model is asked for structured JSON output, not free-form prose, on the natural-language branch', () => {
     const slice = jarvisCommandRouteSlice();
-    expect(slice).toContain('responseMimeType: "application/json"');
+    expect(slice).toContain('responseFormat: "json"');
   });
 });
 

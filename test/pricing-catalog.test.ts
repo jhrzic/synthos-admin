@@ -22,13 +22,12 @@ import {
   parseOpenAiPricingMarkdown, parseOpenAiLongContextThreshold, parseGeminiPricingMarkdown, parseGeminiCell,
   parseAntigravityUnderlyingModel, ratesAt,
 } from '../lib/pricing/parse';
-import { listTaskClasses, insertQualificationForTest } from '../lib/registry/qualification';
+import { listTaskClasses, insertQualificationForTest, listQualifications } from '../lib/registry/qualification';
 import { refreshPricingCatalog, getCatalogPrice, priceHistory, listPricingSources, PRICING_SOURCES, type TextFetcher } from '../lib/pricing/catalog';
 import { saveSpendPolicy, DEFAULT_SPEND_POLICY, getModelPrice } from '../lib/spend/policy';
 import { estimateMaxCostUsd, ANTIGRAVITY_OVERSHOOT_MARGIN } from '../lib/spend/guard';
 import { ensureUsageTable, listUsageForKey, spentSince, periodStarts } from '../lib/spend/ledger';
 import { generateViaOpenAI } from '../lib/fabric/model-openai';
-import { resolveDefaultOpenAiModel } from '../lib/model-router';
 import { getSpendStatus } from '../lib/spend/status';
 import { registerModelViaAdmin, qualifyModel, enableModel } from '../lib/registry';
 import { applyCatalogPricesToRegistry } from '../lib/registry/catalog-bridge';
@@ -342,7 +341,6 @@ describe('SPEND GUARD ON REGISTRY PRICES', () => {
 
   it('a price increase un-qualifies the SELECTED model; after re-qualification the ceiling blocks it — never swapped', async () => {
     openPolicy({ task: { maxEstimatedUsd: 0.01, maxInputChars: 60_000, maxOutputTokens: 1000, maxTier: 'PREMIUM' } });
-    const selectedBefore = resolveDefaultOpenAiModel();
     expect((await call('fx-flat')).output).toBe('ok');                     // $0.0031 max — fits
     await refreshPricingCatalog('TEST', { ...fetcher(standardDocs(openaiDoc().replace('| fx-flat | $1.00 | - | - | $3.00 |', '| fx-flat | $1.00 | - | - | $30.00 |'))), antigravityAgentId: 'fx-agent' });
     // The refresh alone changes nothing that executes.
@@ -357,7 +355,6 @@ describe('SPEND GUARD ON REGISTRY PRICES', () => {
     for (const tc of listTaskClasses()) insertQualificationForTest({ providerId: 'openai', modelId: 'fx-flat', taskClass: tc.taskClassId });
     const r = await call('fx-flat');                                          // now $0.0301 max — does not
     expect(r.lastProviderError).toMatch(/TASK_CEILING_EXCEEDED/);
-    expect(resolveDefaultOpenAiModel()).toBe(selectedBefore);
     expect(calls).toBe(2);
   });
 
@@ -460,13 +457,23 @@ describe('ADMIN VISIBILITY', () => {
   it('shows each source\'s freshness and every selected model\'s price state and eligibility', () => {
     const s = getSpendStatus();
     expect(s.pricing.sources.map((x: any) => x.sourceId).sort()).toEqual(['antigravity', 'gemini', 'openai']);
-    const openaiDefault = s.pricing.selectedModels.find((m: any) => m.role === 'OpenAI default')!;
-    // The routed default is priced from its bundled registry manifest (not the
-    // scraped catalog), and is not spendable: paid execution is off and the
-    // model has not been qualified.
-    expect(openaiDefault.priceSource).toBe('REGISTRY');
-    expect(openaiDefault.price!.versionKey).toMatch(/^registry:openai:/);
-    expect(['CURRENT', 'PRICE_STALE']).toContain(openaiDefault.priceState);
-    expect(openaiDefault.eligibility).toMatch(/PAID_EXECUTION_DISABLED|MODEL_UNQUALIFIED/);
+    // There is no provider "default" model any more: the rows are the routes
+    // with a VALID task qualification (none here) plus the non-registry
+    // speech and managed-agent rows.
+    const rows = s.pricing.selectedModels as any[];
+    expect(rows.some((m) => /default/i.test(m.role))).toBe(false);
+    const valid = listQualifications().filter((q) => q.state === 'VALID');
+    const distinct = new Set(valid.map((q) => `${q.providerId}/${q.modelId}`));
+    const qualifiedRows = rows.filter((m) => m.role.startsWith('Qualified route'));
+    expect(new Set(qualifiedRows.map((m) => `${m.provider}/${m.model}`))).toEqual(distinct);
+    expect(rows.filter((m) => !m.role.startsWith('Qualified route')).map((m) => m.role).sort()).toEqual(['Antigravity agent', 'OpenAI speech']);
+    for (const m of rows) {
+      // Every row states its price state, where the price came from, and why it can or cannot spend.
+      expect(['CURRENT', 'PRICE_STALE', 'PRICE_UNKNOWN']).toContain(m.priceState);
+      expect('priceSource' in m).toBe(true);
+      expect(typeof m.eligibility).toBe('string');
+      // Paid execution is off, so nothing here is spendable.
+      expect(m.eligibility).not.toBe('ELIGIBLE');
+    }
   });
 });

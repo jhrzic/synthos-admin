@@ -22,14 +22,32 @@ import { getStoredProvider } from './store';
 
 export const PROTOCOL_ADAPTER_VERSION = '1.0.0';
 
+export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
+
 export interface ModelCallParams {
   providerId: string;
   modelId: string;
   apiKey: string;
   baseUrl: string;
+  /** Single-turn prompt. Ignored when `messages` is given. */
   contents: string;
+  /**
+   * Multi-turn input with ROLE SEPARATION preserved (system / user /
+   * assistant are never flattened into one string — that separation is a
+   * prompt-injection guard for conversation history).
+   */
+  messages?: ChatMessage[];
+  /** Ask the provider for a JSON object response where it supports that. */
+  responseFormat?: 'json';
+  /** Provider-side tools. Only adapters that declare a tool may be sent it. */
+  tools?: Array<'web_search'>;
   spend: SpendContext;
   timeoutMs?: number;
+}
+
+/** Characters actually sent — what the spend guard prices and the network guard re-checks. */
+export function inputCharsOf(p: Pick<ModelCallParams, 'contents' | 'messages'>): number {
+  return p.messages ? p.messages.reduce((n, m) => n + m.content.length, 0) : p.contents.length;
 }
 
 export interface ModelCallResult {
@@ -41,6 +59,8 @@ export interface ModelCallResult {
   spendBlockedCode?: string | null;
   termination?: ProviderTermination;
   latencyMs?: number | null;
+  /** The provider's own payload (e.g. Gemini grounding metadata). Never placed in a prompt. */
+  raw?: unknown;
 }
 
 export interface ProtocolAdapter {
@@ -55,6 +75,8 @@ export interface ProtocolAdapter {
   normalizeError(httpStatus: number | null, body: string): string;
   extractText(payload: unknown): string;
   call?(p: ModelCallParams): Promise<ModelCallResult>;
+  /** Provider-side tools this adapter can send. */
+  tools?: Array<'web_search'>;
 }
 
 const NOT_REPORTED: ProviderTermination = { status: 'NOT_REPORTED', providerStatus: null, reason: null };
@@ -70,13 +92,23 @@ function errorFrom(label: string) {
 // ---- OpenAI Responses ------------------------------------------------------
 async function openAiResponsesCall(p: ModelCallParams): Promise<ModelCallResult> {
   const { generateViaOpenAI } = await import('../fabric/model-openai');
-  return generateViaOpenAI({ apiKey: p.apiKey, contents: p.contents, candidateModels: [p.modelId], spend: { ...p.spend, providerId: p.providerId }, baseUrl: p.baseUrl, providerId: p.providerId, timeoutMs: p.timeoutMs });
+  // Responses API: roles travel as input items (system → "developer").
+  const input = p.messages ? p.messages.map((m) => ({ role: m.role === 'system' ? 'developer' : m.role, content: m.content })) : undefined;
+  return generateViaOpenAI({ apiKey: p.apiKey, contents: p.contents, input, candidateModels: [p.modelId], spend: { ...p.spend, providerId: p.providerId }, baseUrl: p.baseUrl, providerId: p.providerId, timeoutMs: p.timeoutMs });
 }
 
 // ---- Gemini generateContent -----------------------------------------------
 async function geminiCall(p: ModelCallParams): Promise<ModelCallResult> {
   const { generateViaGemini } = await import('../fabric/model-gemini');
-  return generateViaGemini({ apiKey: p.apiKey, contents: p.contents, candidateModels: [p.modelId], spend: { ...p.spend, providerId: p.providerId }, baseUrl: p.baseUrl });
+  const system = p.messages?.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+  const contents = p.messages
+    ? p.messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }))
+    : p.contents;
+  const config: Record<string, unknown> = {};
+  if (system) config.systemInstruction = system;
+  if (p.responseFormat === 'json') config.responseMimeType = 'application/json';
+  if (p.tools?.includes('web_search')) config.tools = [{ googleSearch: {} }];
+  return generateViaGemini({ apiKey: p.apiKey, contents, config, candidateModels: [p.modelId], spend: { ...p.spend, providerId: p.providerId }, baseUrl: p.baseUrl });
 }
 
 // ---- OpenAI-compatible chat completions (DeepSeek-style providers) --------
@@ -117,7 +149,7 @@ async function chatCompletionsCall(p: ModelCallParams): Promise<ModelCallResult>
     provider: p.providerId, model: p.modelId, callSite: p.spend.callSite,
     workspaceId: p.spend.workspaceId ?? null, taskId: p.spend.taskId ?? null, correlationId: p.spend.correlationId ?? null,
     idempotencyKey: p.spend.idempotencyKey || requestKey(p.spend.callSite),
-    inputChars: p.contents.length, maxOutputTokens, approvalId: p.spend.approvalId ?? null,
+    inputChars: inputCharsOf(p), maxOutputTokens, approvalId: p.spend.approvalId ?? null,
   }, async () => {
     const started = Date.now();
     const controller = new AbortController();
@@ -133,7 +165,12 @@ async function chatCompletionsCall(p: ModelCallParams): Promise<ModelCallResult>
           // spend ledger holds, so an ambiguous outcome can be looked up rather than re-sent.
           ...(idempotencyHeader(p.providerId) ? { [idempotencyHeader(p.providerId)!]: p.spend.idempotencyKey || '' } : {}),
         },
-        body: JSON.stringify({ model: p.modelId, messages: [{ role: 'user', content: p.contents }], max_tokens: maxOutputTokens }),
+        body: JSON.stringify({
+          model: p.modelId,
+          messages: p.messages ? p.messages.map((m) => ({ role: m.role, content: m.content })) : [{ role: 'user', content: p.contents }],
+          max_tokens: maxOutputTokens,
+          ...(p.responseFormat === 'json' ? { response_format: { type: 'json_object' } } : {}),
+        }),
       });
       const text = (await res.text()).slice(0, 2 * 1024 * 1024);
       out.latencyMs = Date.now() - started;
@@ -230,6 +267,7 @@ export const PROTOCOL_ADAPTERS: Record<ProtocolId, ProtocolAdapter> = {
     normalizeError: errorFrom('Gemini-protocol'),
     extractText: geminiText,
     call: geminiCall,
+    tools: ['web_search'],
   },
   'openai.chat_completions': {
     protocol: 'openai.chat_completions', adapterVersion: PROTOCOL_ADAPTER_VERSION, dispatch: 'MODEL_CALL',

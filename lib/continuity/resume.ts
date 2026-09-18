@@ -13,7 +13,7 @@
 
 import { updateTaskStatus, recordActivityEvent } from '../persistence';
 import { routeTask, type RoutingRequirements } from '../registry/router';
-import { listPausedTasks, transition, floorFrom, getContinuity, type ContinuityRecord } from './controller';
+import { listPausedTasks, transition, floorFrom, getContinuity, setNoProgressCount, grantSpendAllowance, continuationPolicy, type ContinuityRecord } from './controller';
 
 const MIN_RECHECK_MS = 60_000;
 const MAX_PER_TICK = 5;
@@ -21,6 +21,11 @@ const lastChecked = new Map<string, number>();
 
 export function tryResume(c: ContinuityRecord, actor: string, force = false): { resumed: boolean; reason: string } {
   if (c.state === 'PAUSED_AWAITING_APPROVAL' && !force) return { resumed: false, reason: 'waiting for a human approval' };
+  // Stalled progress needs a person: the sweep never resumes it.
+  if (c.state === 'PAUSED_AWAITING_REPLAN' && !force) return { resumed: false, reason: 'progress stalled; waiting for an operator to replan or resume' };
+  if (force && c.state === 'PAUSED_AWAITING_REPLAN') setNoProgressCount(c.taskId, 0);
+  // An operator resuming a spend-allowance pause authorises one more increment.
+  if (force && c.state === 'PAUSED_AWAITING_APPROVAL' && /authorised/.test(c.stateReason || '')) grantSpendAllowance(c.taskId, continuationPolicy().maxTaskSpendUsd);
   if (c.state === 'RECONCILING_UNKNOWN_EXECUTION') return { resumed: false, reason: 'an ambiguous outcome must be reconciled first; it is never retried automatically' };
   if (c.state === 'AWAITING_CONTINUATION') {
     updateTaskStatus(c.taskId, 'READY', undefined, c.workspaceId);

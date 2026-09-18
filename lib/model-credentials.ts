@@ -21,7 +21,6 @@
 
 import { getDatabase } from './persistence';
 import { encryptVoiceSecret, decryptVoiceSecret } from './voice-credentials';
-import { recordProviderAttempt } from './provider-state';
 import { scrubSecrets } from './redact';
 
 /** Providers this build can actually execute. Not a wish list. */
@@ -165,8 +164,15 @@ export function deleteModelCredential(provider: ModelProvider): void {
 }
 
 /**
- * A real call to the provider proving the key works, before a customer ever
- * meets it. Returns the observed model, never the key.
+ * A real call proving the stored key works, before a customer ever meets it.
+ *
+ * It is a paid model call, so it goes through the canonical router like any
+ * other: restricted to this provider, on a route QUALIFIED for
+ * literal_transformation (credential.verify.* in the task-class data), then
+ * Guardian and the spend guard. There is no default "verification model":
+ * with nothing qualified on this provider the answer is that it cannot be
+ * verified by a model call yet — never a guess. Returns the observed model,
+ * never the key.
  */
 export async function verifyModelCredential(provider: ModelProvider): Promise<
   { ok: true; model: string; sample: string } | { ok: false; error: string }
@@ -175,90 +181,19 @@ export async function verifyModelCredential(provider: ModelProvider): Promise<
   // Not an attempt: nothing was sent, so recording a provider failure here
   // would blame the provider for a missing key.
   if (!apiKey) return { ok: false, error: 'No API key is configured for this provider.' };
-
-  if (provider === 'openai') {
-    const startedAt = Date.now();
-    const result = await verifyOpenAiCredential(apiKey);
-    // A spend-guard refusal sent nothing, so it is not evidence about the provider.
-    if (!result.ok && /^BLOCKED_BUDGET \(/.test((result as { error: string }).error)) return result;
-    // PROVIDER STATUS TRUTH — this is a REAL call, so its outcome is the
-    // evidence lib/provider-state.ts reads to decide LIVE_VERIFIED versus
-    // QUOTA_BLOCKED versus PROVIDER_ERROR. Before this, PROVIDER_CALL was a
-    // declared event type that nothing emitted, so "last verified" had no
-    // source and the registry fell back to "a key exists" as if that proved
-    // the provider worked.
-    recordProviderAttempt({
-      provider: 'openai',
-      ok: result.ok,
-      modelUsed: result.ok ? result.model : null,
-      errorMessage: result.ok ? null : (result as { ok: false; error: string }).error,
-      latencyMs: Date.now() - startedAt,
-    });
-    return result;
-  }
-
-  const { normalizeGeminiModel } = await import('./model-router');
-  const model = normalizeGeminiModel();
-  const geminiStartedAt = Date.now();
-  try {
-    const { GoogleGenAI } = await import('@google/genai');
-    const ai = new GoogleGenAI({ apiKey });
-    const { guardedGeminiGenerate } = await import('./spend/adapters');
-    // A verification is a real, paid generation — guarded like any other.
-    const response = await guardedGeminiGenerate(ai, {
-      model,
-      contents: 'Reply with the single word: ready',
-      config: { maxOutputTokens: 10, temperature: 0 },
-    }, { callSite: 'credential.verify.gemini', maxOutputTokens: 10 });
-    const sample = String((response as any)?.text ?? '').trim();
-    if (!sample) {
-      const empty = { ok: false as const, error: 'The provider accepted the key but returned nothing.' };
-      recordProviderAttempt({ provider, ok: false, errorMessage: empty.error, latencyMs: Date.now() - geminiStartedAt });
-      return empty;
-    }
-    recordProviderAttempt({ provider, ok: true, modelUsed: model, latencyMs: Date.now() - geminiStartedAt });
-    return { ok: true, model, sample: sample.slice(0, 80) };
-  } catch (err: any) {
-    // Provider errors can echo the key back in a URL or header dump. Scrub any
-    // long key-shaped token before this reaches a log or a response.
-    // Uses the one shared scrubber (lib/redact.ts) rather than a third local
-    // copy of the pattern list — the divergence Pass 2 consolidated.
-    const safe = scrubSecrets(String(err?.message || 'The provider call failed.'), 300);
-    if (err?.name === 'SpendBlockedError') return { ok: false, error: safe };
-    recordProviderAttempt({ provider, ok: false, errorMessage: safe, latencyMs: Date.now() - geminiStartedAt });
-    return { ok: false, error: safe };
-  }
-}
-
-/**
- * A real OpenAI call proving the key works, before it is ever relied on in
- * a run. Deliberately routed through the SAME adapter the kernel executes
- * with (lib/fabric/model-openai.ts) rather than a private fetch: a
- * verification that exercises a different code path than production can
- * pass while production fails, which is worse than no verification.
- *
- * Returns the model the PROVIDER reported running, never the key.
- */
-async function verifyOpenAiCredential(
-  apiKey: string
-): Promise<{ ok: true; model: string; sample: string } | { ok: false; error: string }> {
-  const { resolveDefaultOpenAiModel } = await import('./model-router');
-  const { generateViaOpenAI } = await import('./fabric/model-openai');
-  const model = resolveDefaultOpenAiModel();
-
-  const result = await generateViaOpenAI({
-    apiKey,
-    contents: 'Reply with the single word: ready',
-    candidateModels: [model],
-    timeoutMs: 20_000,
-    // A verification is a real, paid generation — guarded like any other.
-    spend: { callSite: 'credential.verify.openai', maxOutputTokens: 16 },
+  const { routedModelCall } = await import('./fabric/routed-call');
+  const { requestKey } = await import('./spend/adapters');
+  const r = await routedModelCall({
+    callSite: `credential.verify.${provider}`, workspaceId: null, prompt: 'Reply with exactly: ready', maxOutputTokens: 16,
+    routing: { permittedProviders: [provider] }, idempotencyKey: requestKey(`credential.verify.${provider}`),
   });
-
-  if (!result.output.trim()) {
-    return { ok: false, error: result.lastProviderError || 'The provider accepted the key but returned nothing.' };
+  if (!r.ok) {
+    // Provider errors can echo a key back; the shared scrubber runs first.
+    const safe = scrubSecrets(r.code === 'NO_QUALIFIED_ROUTE' ? `Cannot verify by a model call yet: no ${provider} route is qualified for literal_transformation. ${r.error}` : r.error, 300);
+    return { ok: false, error: r.code === 'SPEND_BLOCKED' ? `BLOCKED_BUDGET (${r.spendCode ?? 'UNKNOWN'}): ${safe}` : safe };
   }
-  return { ok: true, model: result.modelUsed || model, sample: result.output.trim().slice(0, 80) };
+  // routedModelCall records the provider attempt (lib/provider-state.ts evidence).
+  return { ok: true, model: r.modelUsed, sample: r.output.trim().slice(0, 80) };
 }
 
 // ---------------------------------------------------------------------------
