@@ -980,8 +980,45 @@ provenance: "${finalMeta.provenance}"
           })
         });
 
-        if (execRes.ok) {
-          const execData = await execRes.json();
+        // Read the body whatever the HTTP status: a canonical decision can
+        // arrive as 200 (INCOMPLETE / VERIFICATION_FAILED) or 4xx (refused).
+        const execData = await execRes.json().catch(() => null);
+        const verificationOutcome = execData && typeof execData.taskId === 'string' && typeof execData.status === 'string'
+          ? {
+              taskStatus: execData.status,
+              scopes: execData.review?.evidence?.verificationScopes,
+              scopeStatement: execData.review?.evidence?.scopeStatement ?? null,
+              outputContract: execData.review?.evidence?.outputContract,
+              receiptOutcome: execData.receipt?.payload?.outcome ?? null,
+              receiptId: execData.receipt?.receiptId ?? null,
+              retrieval: execData.artifact?.retrieval ?? null,
+            }
+          : undefined;
+        // The canonical fabric DECIDED this task and did not complete it. That
+        // decision is final: no fallback model call, no judge call, no vault
+        // note. Before this, a 200 with success:false silently re-ran the task
+        // through /api/generate and wrote the result into memory — a duplicate
+        // paid call that bypassed scoped verification and quarantine.
+        if (verificationOutcome && !execData.success) {
+          handleUpdateKanbanTask(taskId, {
+            column: 'blocked',
+            verificationOutcome,
+            outputLog: `[Aegis]: ${verificationOutcome.taskStatus}${verificationOutcome.scopeStatement ? ` — ${verificationOutcome.scopeStatement}` : ''}${execData.error ? ` — ${execData.error}` : ''}`,
+            updatedAt: `Just now (${verificationOutcome.taskStatus})`,
+          });
+          synthosControl.logEvent({
+            taskId: task.id,
+            eventType: verificationOutcome.taskStatus === 'INCOMPLETE' ? 'AEGIS_INCOMPLETE' : verificationOutcome.taskStatus === 'VERIFICATION_FAILED' ? 'AEGIS_INSTRUCTION_FAILED' : 'CANONICAL_EXECUTION_FAILED',
+            actorRole: 'orchestrator',
+            actorModel: task.assignedModel,
+            summary: `Canonical execution ended ${verificationOutcome.taskStatus} for "${task.title}". No fallback was run.`,
+            payload: { taskId: execData.taskId, status: verificationOutcome.taskStatus, receiptOutcome: verificationOutcome.receiptOutcome },
+            isSimulated: false,
+          });
+          return;
+        }
+        if (verificationOutcome) handleUpdateKanbanTask(taskId, { verificationOutcome });
+        if (execRes.ok && execData) {
           if (execData.success && execData.artifact) {
             reply = execData.artifact.content;
             toolCalls = execData.artifact.toolsUsed || [];

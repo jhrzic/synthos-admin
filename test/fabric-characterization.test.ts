@@ -458,7 +458,10 @@ describe('STATIC: the success path (VERIFIED) — ordering that Step 3+ must pre
       'writeWorkspaceArtifact({',
       'eventType: "ARTIFACT_SAVED"',
       'updateTaskStatus(taskId, "AWAITING_VERIFICATION", undefined, resolvedWorkspaceId)',
-      'runDeterministicAegisVerification(',
+      // Aegis now runs through the shared scoped authority, which itself
+      // calls runDeterministicAegisVerification (asserted in
+      // test/canonical-scoped-verification.test.ts).
+      'runScopedAegis(',
       'recordQualityReview(',
       'updateTaskStatus(taskId, "AWAITING_RECEIPT", undefined, resolvedWorkspaceId)',
       'eventType: "AEGIS_REVIEWED"',

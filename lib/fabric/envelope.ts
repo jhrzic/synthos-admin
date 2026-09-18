@@ -30,7 +30,6 @@ import {
   createInitialTask,
   updateTaskStatus,
   recordActivityEvent,
-  runDeterministicAegisVerification,
   recordQualityReview,
   recordReceipt,
   canonicalizePayload,
@@ -58,6 +57,8 @@ import * as windmillClient from '../windmill-client';
 import { listWorkspaceExternalExecutions, guardianCheckInstruction, submitExternalExecution } from '../external-executions';
 import { resolveAntigravityAgent } from '../antigravity-client';
 import { scrubSecrets } from '../redact';
+import { normalizeOutputContract, buildContractPrompt, type OutputContract, type ProviderTermination } from './output-contract';
+import { runScopedAegis, receiptOutcomeFields, commitContentFailure, isContentFailure, DETERMINISTIC_COMPLETION } from './scoped-verification';
 import { previewPaidCall, SPEND_WAIT_CODES } from '../spend/guard';
 import { recordRuntimeEvent, type RuntimeEventStatus } from '../runtime-events';
 import { runHermesLocalTask, isHermesLocalConfigured, isHermesLocalEnabled, getHermesCliPath } from '../hermes-local-runtime';
@@ -955,6 +956,7 @@ async function executeResearch(input: ExecutionEnvelopeInput): Promise<Execution
       content: result.reportMarkdown,
       folder: 'Research',
       toolsInvoked: ctx.getInvocations().map((r) => r.name),
+      termination: result.termination ?? { status: 'NOT_REPORTED', providerStatus: null, reason: null },
     });
   });
 }
@@ -1065,6 +1067,11 @@ async function executeHermesTask(input: ExecutionEnvelopeInput): Promise<Executi
       content,
       folder: 'Hermes-Tasks',
       toolsInvoked: ['hermes.cli'],
+      // Hermes output cut at the configured ceiling is the same fact as a
+      // provider hitting its output cap: INCOMPLETE, never a verified answer.
+      termination: run.truncated
+        ? { status: 'INCOMPLETE', providerStatus: 'HERMES_CLI', reason: 'OUTPUT_CEILING' }
+        : { status: 'COMPLETE', providerStatus: 'HERMES_CLI', reason: null },
     });
   });
 }
@@ -1089,6 +1096,15 @@ async function commitEvidencedArtifact(params: {
   content: string;
   folder: string;
   toolsInvoked: string[];
+  /**
+   * Completion evidence for the content. Defaults to DETERMINISTIC_COMPLETION:
+   * every caller except research builds its artifact in code (a transcript, a
+   * tool result, a draft record), so there is no provider that could have cut
+   * it off. Research passes its synthesis call's real termination.
+   */
+  termination?: ProviderTermination;
+  /** Defaults to NARRATIVE — envelope artifacts are reports, not literals. */
+  outputContract?: OutputContract;
 }): Promise<ExecutionEnvelopeResult> {
   const taskId = params.taskId;
   const nowIso = new Date().toISOString();
@@ -1107,7 +1123,7 @@ async function commitEvidencedArtifact(params: {
   recordActivityEvent({ taskId, expectedWorkspaceId: params.workspaceId, eventType: 'AGENT_ASSIGNED', agentId: params.assignedAgent, payload: { agent: params.assignedAgent, model: 'multi', status: 'READY' } });
   updateTaskStatus(taskId, 'RUNNING', undefined, params.workspaceId);
   recordActivityEvent({ taskId, expectedWorkspaceId: params.workspaceId, eventType: 'EXECUTION_STARTED', agentId: params.assignedAgent, payload: { status: 'RUNNING' } });
-  recordActivityEvent({ taskId, expectedWorkspaceId: params.workspaceId, eventType: 'PROVIDER_COMPLETED', agentId: params.assignedAgent, payload: { model: 'multi', outputLength: params.content.length } });
+  recordActivityEvent({ taskId, expectedWorkspaceId: params.workspaceId, eventType: 'PROVIDER_COMPLETED', agentId: params.assignedAgent, payload: { model: 'multi', outputLength: params.content.length, termination: params.termination ?? DETERMINISTIC_COMPLETION, outputContract: params.outputContract ?? { mode: 'NARRATIVE' } } });
 
   const persistedArtifact = writeWorkspaceArtifact({ workspaceId: params.workspaceId, taskId, content: params.content, folder: params.folder, extension: 'md', createdAt: nowIso });
   recordActivityEvent({
@@ -1126,7 +1142,13 @@ async function commitEvidencedArtifact(params: {
   });
 
   updateTaskStatus(taskId, 'AWAITING_VERIFICATION', undefined, params.workspaceId);
-  const aegisResult = runDeterministicAegisVerification(taskId, params.content);
+  const scoped = runScopedAegis({
+    taskId,
+    output: params.content,
+    termination: params.termination ?? DETERMINISTIC_COMPLETION,
+    contract: params.outputContract ?? { mode: 'NARRATIVE' },
+  });
+  const aegisResult = scoped.review;
   const persistedReview = recordQualityReview({
     taskId,
     reviewer: aegisResult.reviewer,
@@ -1137,6 +1159,32 @@ async function commitEvidencedArtifact(params: {
     evidence: aegisResult.evidence,
     createdAt: nowIso,
   });
+
+  if (isContentFailure(scoped.content)) {
+    // Integrity passed but completion / instruction compliance did not: the
+    // same failure branch as the kernel — audit receipt stating the outcome,
+    // artifact quarantined, terminal INCOMPLETE / VERIFICATION_FAILED, no KIL,
+    // no indexing.
+    const failure = commitContentFailure({
+      taskId,
+      workspaceId: params.workspaceId,
+      reviewId: persistedReview.review_id,
+      scoped,
+      artifact: persistedArtifact,
+      identity: { assignedAgent: params.assignedAgent, provider: 'synthos-jarvis-envelope', modelUsed: params.toolsInvoked.join(',') || 'none' },
+      nowIso,
+    });
+    return {
+      outcome: 'FAILED',
+      capability: params.assignedAgent,
+      reason: `Aegis ${failure.status}: ${scoped.content.scopeStatement}`,
+      taskId,
+      artifact: { id: persistedArtifact.artifact_id, path: persistedArtifact.relative_path, contentHash: persistedArtifact.content_hash },
+      aegis: { decision: aegisResult.decision, score: aegisResult.score },
+      ...(failure.receiptId ? { receipt: { receiptId: failure.receiptId, verified: true } } : {}),
+      toolsInvoked: params.toolsInvoked,
+    };
+  }
 
   if (aegisResult.decision !== 'VERIFIED') {
     updateTaskStatus(taskId, 'FAILED', undefined, params.workspaceId);
@@ -1182,6 +1230,7 @@ async function commitEvidencedArtifact(params: {
     artifactHash: persistedArtifact.content_hash,
     aegisDecision: aegisResult.decision,
     aegisMethod: aegisResult.method,
+    ...receiptOutcomeFields(scoped.content),
     createdAt: nowIso,
   };
   const canonicalPayloadStr = canonicalizePayload(canonicalPayload);
@@ -2115,6 +2164,9 @@ async function enforceHumanApproval(
     if (!binding.instruction.trim()) {
       return { refusal: { outcome: 'FAILED', capability: capabilityKey, reason: 'An instruction is required for runtime.antigravity (parameters.instruction, or the task text).', approval: null } };
     }
+    if (binding.contractError) {
+      return { refusal: { outcome: 'FAILED', capability: capabilityKey, reason: `Invalid output contract: ${binding.contractError}`, approval: null } };
+    }
     // Guardian sees the FULL bounded instruction, not the truncated summary,
     // before any approval is even requested.
     const full = guardianCheckInstruction(binding.boundedInstruction);
@@ -3002,6 +3054,10 @@ export interface AntigravityBinding {
   allowedPaths: string[];
   tools: string[];
   maxTotalTokens: number | null;
+  /** The task's output contract (NARRATIVE default); bound into the approval digest. */
+  outputContract: OutputContract;
+  /** Set when parameters.outputContract was supplied but invalid — the gate refuses. */
+  contractError: string | null;
 }
 
 function stringList(v: unknown): string[] {
@@ -3035,7 +3091,12 @@ export function resolveAntigravityBinding(input: ExecutionEnvelopeInput): Antigr
   if (allowedPaths.length > 0) {
     scopeLines.push('', 'SCOPE (approved by a human; do not act outside it):', ...allowedPaths.map((p) => `- ${p}`));
   }
-  const boundedInstruction = `${instruction}${scopeLines.length ? `\n${scopeLines.join('\n')}` : ''}`;
+  const contractCheck = normalizeOutputContract(params.outputContract);
+  const outputContract: OutputContract = contractCheck.ok ? contractCheck.contract : { mode: 'NARRATIVE' };
+  // A LITERAL / JSON_OBJECT contract is stated to the agent explicitly; it is
+  // then enforced at ingestion by the same scoped Aegis as every other path.
+  const contractLines = outputContract.mode === 'NARRATIVE' ? [] : ['', buildContractPrompt(outputContract, 'Antigravity run', instruction).split('\n').slice(-2).join('\n')];
+  const boundedInstruction = `${instruction}${scopeLines.length ? `\n${scopeLines.join('\n')}` : ''}${contractLines.length ? `\n${contractLines.join('\n')}` : ''}`;
 
   return {
     workspaceId: input.workspaceId,
@@ -3049,6 +3110,8 @@ export function resolveAntigravityBinding(input: ExecutionEnvelopeInput): Antigr
     allowedPaths,
     tools,
     maxTotalTokens,
+    outputContract,
+    contractError: contractCheck.ok ? null : contractCheck.error,
   };
 }
 
@@ -3066,6 +3129,7 @@ export function antigravityApprovalDigest(binding: AntigravityBinding): string {
       allowedPaths: binding.allowedPaths,
       tools: binding.tools,
       maxTotalTokens: binding.maxTotalTokens,
+      outputContract: binding.outputContract,
     },
     rawText: '',
   });
@@ -3109,6 +3173,7 @@ async function executeAntigravityRuntime(input: ExecutionEnvelopeInput): Promise
         instruction: binding.boundedInstruction,
         ...(binding.tools.length ? { tools: binding.tools.map((type) => ({ type })) } : {}),
         ...(binding.maxTotalTokens !== null ? { maxTotalTokens: binding.maxTotalTokens } : {}),
+        outputContract: binding.outputContract,
       },
       taskId: binding.taskId ?? undefined,
       // The ledger's own idempotency: a replay of this correlation returns the

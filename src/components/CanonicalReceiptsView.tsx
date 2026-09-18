@@ -3,6 +3,7 @@ import {
   FileCheck, ShieldCheck, ShieldAlert, RefreshCw, Loader2, AlertTriangle,
   ChevronDown, ChevronRight, Key, Hash, Box, Cpu, Search
 } from 'lucide-react';
+import { ReceiptOutcomeBadge, RetrievalBadge } from './verification/outcome';
 
 // ---------------------------------------------------------------------------
 // CANONICAL EXECUTION RECEIPTS — the real, Ed25519-signed receipts the
@@ -34,7 +35,12 @@ interface CanonicalReceipt {
   public_key: string;
   verified: boolean;
   payloadError: string | null;
+  artifactRetrieval?: { status: string; reason: string | null; at: string | null } | null;
   payload: {
+    /** COMPLETED / INCOMPLETE / VERIFICATION_FAILED — absent on receipts signed before outcomes existed. */
+    outcome?: string;
+    /** Plain statement of which scopes this receipt attests. */
+    verificationScope?: string;
     aegisDecision?: string;
     aegisMethod?: string;
     artifactHash?: string;
@@ -223,6 +229,10 @@ export const CanonicalReceiptsView: React.FC<CanonicalReceiptsViewProps> = ({ ac
                     <div className="text-[10px] text-[#6A7097] truncate">task {r.task_id}</div>
                   </div>
 
+                  {/* A valid signature proves the record is authentic, not that the task succeeded — the outcome says that. */}
+                  <ReceiptOutcomeBadge outcome={r.payload.outcome} />
+                  {r.artifactRetrieval?.status === 'QUARANTINED' && <RetrievalBadge retrieval={r.artifactRetrieval} />}
+
                   {decision && (
                     <span className={`text-[10px] font-bold shrink-0 hidden sm:inline ${decision === 'VERIFIED' ? 'text-[#00D26A]' : 'text-[#E8A845]'}`}>
                       AEGIS: {decision}
@@ -251,7 +261,17 @@ export const CanonicalReceiptsView: React.FC<CanonicalReceiptsViewProps> = ({ ac
                       <Field label="Aegis Decision" icon={ShieldCheck} value={r.payload.aegisDecision} />
                       <Field label="Aegis Method" icon={ShieldCheck} value={r.payload.aegisMethod} />
                       <Field label="Artifact ID" icon={Box} value={r.payload.artifactId} />
+                      <Field label="Outcome" icon={FileCheck} value={r.payload.outcome || 'NOT STATED (integrity-only receipt)'} />
                       <Field label="Created" icon={FileCheck} value={new Date(r.created_at).toISOString()} />
+                    </div>
+
+                    <div className="space-y-1 pt-2 border-t border-[#141628] text-[11px]">
+                      <div className="text-[10px] text-[#6A7097] uppercase tracking-wider">Verification scope</div>
+                      <div className="text-white">{r.payload.verificationScope ? String(r.payload.verificationScope) : UNKNOWN}</div>
+                      <div className="pt-1 flex items-center gap-2">
+                        <span className="text-[10px] text-[#6A7097] uppercase tracking-wider">Artifact memory</span>
+                        <RetrievalBadge retrieval={r.artifactRetrieval} />
+                      </div>
                     </div>
 
                     <div className="space-y-2 pt-2 border-t border-[#141628]">

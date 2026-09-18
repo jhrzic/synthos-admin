@@ -23,7 +23,6 @@ import {
   recordActivityEvent,
   recordQualityReview,
   recordReceipt,
-  runDeterministicAegisVerification,
   canonicalizePayload,
   signReceiptPayload,
   verifyReceiptSignature,
@@ -31,6 +30,7 @@ import {
 } from '../persistence';
 import { writeWorkspaceArtifact } from '../vault';
 import { indexVaultArtifact } from '../memory-index';
+import { runScopedAegis, receiptOutcomeFields, commitContentFailure, isContentFailure, DETERMINISTIC_COMPLETION } from '../fabric/scoped-verification';
 import { crawlSite } from './crawler';
 import { analyze, renderReport, type AuditAnalysis } from './analyzer';
 
@@ -158,11 +158,14 @@ export async function runAeoAudit(params: AeoAuditParams): Promise<AeoAuditResul
     workspaceId, taskId, content: frontmatter + report,
     folder: 'AEO-Audits', extension: 'md', createdAt: nowIso,
   });
-  try { indexVaultArtifact(workspaceId, artifact.artifact_id); } catch { /* index best-effort */ }
   recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: 'ARTIFACT_SAVED', agentId: 'aeo-auditor', payload: { artifactId: artifact.artifact_id, relativePath: artifact.relative_path, contentHash: artifact.content_hash }, createdAt: nowIso });
   updateTaskStatus(taskId, 'AWAITING_VERIFICATION', undefined, workspaceId);
 
-  const aegisResult = runDeterministicAegisVerification(taskId, frontmatter + report);
+  // Scoped Aegis. The report is built by SynthOS's own analyzer from real
+  // crawl evidence, so completion is DETERMINISTIC_LOCAL by construction; the
+  // contract is NARRATIVE. Indexing happens only after VERIFIED + receipt.
+  const scoped = runScopedAegis({ taskId, output: frontmatter + report, termination: DETERMINISTIC_COMPLETION, contract: { mode: 'NARRATIVE' } });
+  const aegisResult = scoped.review;
   const persistedReview = recordQualityReview({
     taskId, reviewer: aegisResult.reviewer, method: aegisResult.method, score: aegisResult.score,
     decision: aegisResult.decision, checks: aegisResult.checks, evidence: aegisResult.evidence, createdAt: nowIso,
@@ -178,7 +181,7 @@ export async function runAeoAudit(params: AeoAuditParams): Promise<AeoAuditResul
       assignedAgent: 'aeo-auditor', provider: 'synthos-aeo-audit',
       modelUsed: `crawl:${analysis.crawl.pagesAnalyzed}-pages`,
       artifactId: artifact.artifact_id, artifactHash: artifact.content_hash,
-      aegisDecision: aegisResult.decision, aegisMethod: aegisResult.method, createdAt: nowIso,
+      aegisDecision: aegisResult.decision, aegisMethod: aegisResult.method, ...receiptOutcomeFields(scoped.content), createdAt: nowIso,
     };
     const canonicalPayloadStr = canonicalizePayload(canonicalPayload);
     const { signature, publicKeyPem, algorithm, fingerprint } = signReceiptPayload(canonicalPayloadStr);
@@ -187,8 +190,29 @@ export async function runAeoAudit(params: AeoAuditParams): Promise<AeoAuditResul
       recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: 'RECEIPT_CREATED', agentId: 'guardian', payload: { receiptId: newReceiptId, algorithm, fingerprint, verified: true }, createdAt: nowIso });
       receiptId = newReceiptId;
     }
+  } else if (isContentFailure(scoped.content)) {
+    commitContentFailure({
+      taskId, workspaceId, reviewId: persistedReview.review_id, scoped, artifact,
+      identity: { assignedAgent: 'aeo-auditor', provider: 'synthos-aeo-audit', modelUsed: `crawl:${analysis.crawl.pagesAnalyzed}-pages` }, nowIso,
+    });
+  }
+
+  // DONE only with a verified, signed receipt. Before this the task went DONE
+  // whatever Aegis said, and the report was indexed before Aegis ran.
+  if (!receiptId) {
+    if (!isContentFailure(scoped.content)) {
+      updateTaskStatus(taskId, 'FAILED', undefined, workspaceId);
+      recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: 'AEGIS_REVIEWED', agentId: 'aegis', payload: { reviewId: persistedReview.review_id, decision: aegisResult.decision, verificationScopes: scoped.content.scopes }, createdAt: nowIso });
+    }
+    return {
+      outcome: 'FAILED',
+      reason: 'AEGIS_NOT_VERIFIED',
+      error: `The audit report did not pass scoped verification (${aegisResult.decision}): ${scoped.content.scopeStatement}`,
+      detail: { taskId, artifactId: artifact.artifact_id, reviewId: persistedReview.review_id, decision: aegisResult.decision },
+    };
   }
   updateTaskStatus(taskId, 'DONE', undefined, workspaceId);
+  try { indexVaultArtifact(workspaceId, artifact.artifact_id); } catch { /* index best-effort */ }
 
   return {
     outcome: 'SUCCESS',

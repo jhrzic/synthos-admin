@@ -70,7 +70,11 @@ export interface ActivityLedgerEvent {
     | 'TASK_TRIAGED'
     | 'TASK_PROMOTED'
     | 'BUILDER_ARTIFACT_PRODUCED'
-    | 'JUDGE_EVALUATED';
+    | 'JUDGE_EVALUATED'
+    // Scoped-verification outcomes reported by the canonical fabric.
+    | 'AEGIS_INCOMPLETE'
+    | 'AEGIS_INSTRUCTION_FAILED'
+    | 'CANONICAL_EXECUTION_FAILED';
   actorRole: AgentRole;
   actorModel?: string;
   summary: string;

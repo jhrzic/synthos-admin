@@ -17,6 +17,7 @@ import {
   AlertTriangle, ShieldCheck, FileText, Send, Zap, Globe, Youtube,
   FileCode, Terminal, X, Check, ArrowUpRight
 } from 'lucide-react';
+import { VerificationOutcomePanel, TaskStatusBadge } from './verification/outcome';
 
 interface KanbanViewProps {
   tasks: KanbanTask[];
@@ -1040,6 +1041,17 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
                                 </p>
                               </div>
 
+                              {/* The canonical outcome, when it is not plain DONE — a card in
+                                  BLOCKED must say whether it was INCOMPLETE or broke its contract. */}
+                              {task.verificationOutcome && task.verificationOutcome.taskStatus !== 'DONE' && (
+                                <div className="flex flex-wrap gap-1">
+                                  <TaskStatusBadge status={task.verificationOutcome.taskStatus} />
+                                  {task.verificationOutcome.retrieval?.status === 'QUARANTINED' && (
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold border font-mono bg-[#FF6B6B]/10 border-[#FF6B6B]/40 text-[#FF6B6B]">QUARANTINED</span>
+                                  )}
+                                </div>
+                              )}
+
                               {/* Parent Child Progress Bar */}
                               {isParent && childTasksForParent.length > 0 && (
                                 <div className="space-y-1">
@@ -1298,6 +1310,12 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
             <div className="p-6 overflow-y-auto space-y-4 font-mono text-xs max-h-[60vh]">
               {detailTab === 'overview' && (
                 <div className="space-y-4">
+                  {selectedTaskForDetail.verificationOutcome && (
+                    <div>
+                      <label className="text-[#8E94B8] block mb-1 uppercase text-[10px]">Aegis Verification Outcome</label>
+                      <VerificationOutcomePanel outcome={selectedTaskForDetail.verificationOutcome} />
+                    </div>
+                  )}
                   <div>
                     <label className="text-[#8E94B8] block mb-1 uppercase text-[10px]">Objective Description</label>
                     <div className="p-3.5 bg-[#05060C] border border-[#1C2038] rounded-xl text-gray-200 leading-relaxed">

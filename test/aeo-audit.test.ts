@@ -230,7 +230,7 @@ describe('6: server wiring — persistence, isolation, honest degradation', () =
   });
 
   it('audits persist through the canonical spine — no second report database', () => {
-    for (const fn of ['createInitialTask', 'writeWorkspaceArtifact', 'indexVaultArtifact', 'runDeterministicAegisVerification', 'recordQualityReview', 'recordReceipt']) {
+    for (const fn of ['createInitialTask', 'writeWorkspaceArtifact', 'indexVaultArtifact', 'runScopedAegis', 'recordQualityReview', 'recordReceipt']) {
       expect(serviceSrc).toContain(fn);
     }
     expect(serverContent).not.toContain('CREATE TABLE IF NOT EXISTS aeo_audits');

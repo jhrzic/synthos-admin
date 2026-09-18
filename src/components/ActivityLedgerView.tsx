@@ -56,16 +56,19 @@ export const ActivityLedgerView: React.FC<ActivityLedgerViewProps> = ({ events }
             events.map((evt) => {
               const isPassed = evt.eventType.includes('PASSED') || evt.eventType.includes('SUCCESS') || evt.eventType.includes('VERIFIED') || evt.eventType.includes('ISSUED');
               const isRejected = evt.eventType.includes('REJECTED') || evt.eventType.includes('FAILED');
+              // INCOMPLETE is its own state: unfinished output, evidence kept — not a pass, not an error.
+              const isIncomplete = evt.eventType.includes('INCOMPLETE');
 
               return (
                 <div key={evt.id} className="p-4 hover:bg-[#141628]/60 transition flex flex-col md:flex-row md:items-center justify-between gap-4">
                   <div className="flex items-start gap-3.5">
                     <div className={`mt-0.5 p-1.5 rounded-lg ${
+                      isIncomplete ? 'bg-[#E8A845]/15 text-[#E8A845] border border-[#E8A845]/30' :
                       isPassed ? 'bg-[#00D26A]/15 text-[#00D26A] border border-[#00D26A]/30' :
                       isRejected ? 'bg-[#FF4D4D]/15 text-[#FF4D4D] border border-[#FF4D4D]/30' :
                       'bg-[#615EFF]/15 text-[#8C8AFF] border border-[#615EFF]/30'
                     }`}>
-                      {isPassed ? <CheckCircle2 className="w-4 h-4" /> : isRejected ? <AlertCircle className="w-4 h-4" /> : <Layers className="w-4 h-4" />}
+                      {isIncomplete ? <AlertCircle className="w-4 h-4" /> : isPassed ? <CheckCircle2 className="w-4 h-4" /> : isRejected ? <AlertCircle className="w-4 h-4" /> : <Layers className="w-4 h-4" />}
                     </div>
 
                     <div>

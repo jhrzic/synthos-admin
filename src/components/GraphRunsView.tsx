@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { ActiveTab } from '../types';
 import { Clock, Activity, GitMerge, Loader2, AlertTriangle, RefreshCw, Database } from 'lucide-react';
+import { TaskStatusBadge, ReceiptOutcomeBadge, ScopeChips, Badge, contractLabel } from './verification/outcome';
 
 interface GraphRunsViewProps {
   onSelectTab?: (tab: ActiveTab) => void;
@@ -22,7 +23,7 @@ interface GraphRunEntry {
     completedNodeIds?: string[];
     totalCompletedNodes?: number;
     completedAt?: string;
-    graphRunReceipt?: { receiptId?: string; taskId?: string; artifactId?: string; artifactPath?: string; aegisDecision?: string; aegisScore?: number | null } | null;
+    graphRunReceipt?: { receiptId?: string; taskId?: string; artifactId?: string; artifactPath?: string; aegisDecision?: string; aegisScore?: number | null; outcome?: string; verificationScope?: string } | null;
     error?: string;
   };
   created_at: string;
@@ -245,6 +246,10 @@ export const GraphRunsView: React.FC<GraphRunsViewProps> = ({ onSelectTab, activ
                             <span className="text-[10px] text-[#7A82A6] block">Run Artifact</span>
                             <span className="text-xs font-bold text-white truncate block">{receipt.artifactPath || receipt.artifactId || 'UNKNOWN'}</span>
                           </div>
+                          <div className="col-span-2 sm:col-span-3 flex flex-wrap items-center gap-2 text-[10px] text-[#7A82A6]">
+                            <ReceiptOutcomeBadge outcome={receipt.outcome} />
+                            <span>{receipt.verificationScope || 'Verification scope not recorded for this run.'}</span>
+                          </div>
                         </div>
                       )}
 
@@ -256,11 +261,7 @@ export const GraphRunsView: React.FC<GraphRunsViewProps> = ({ onSelectTab, activ
                           ) : nodes.map((n: any) => (
                             <div key={n.nodeId} className="px-3 py-2 border-b border-[#141628] last:border-0 text-[11px]">
                               <div className="flex flex-wrap items-center gap-2">
-                                <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold border ${
-                                  n.status === 'DONE'
-                                    ? 'bg-[#00D26A]/10 border-[#00D26A]/40 text-[#00D26A]'
-                                    : 'bg-[#FF5E8E]/10 border-[#FF5E8E]/40 text-[#FF5E8E]'
-                                }`}>{n.status}</span>
+                                <TaskStatusBadge status={n.status} />
                                 <span className="text-white font-bold truncate">{n.nodeName || n.nodeId}</span>
                                 <span className="text-[#5A6083]">{n.classification}</span>
                                 <span className="text-[#7A82A6] ml-auto">{dur(n)}</span>
@@ -271,6 +272,16 @@ export const GraphRunsView: React.FC<GraphRunsViewProps> = ({ onSelectTab, activ
                                 {n.receiptId && <span className="text-[#8C8AFF]">receipt {String(n.receiptId).slice(0, 18)}</span>}
                                 {n.artifact && <span className="text-[#8C8AFF]">artifact</span>}
                               </div>
+                              {(n.outputContract || n.verification || n.quarantined) && (
+                                <div className="mt-1 flex flex-wrap items-center gap-1">
+                                  <Badge tone="inert">CONTRACT: {contractLabel(n.outputContract)}</Badge>
+                                  {n.verification && <ScopeChips scopes={n.verification} />}
+                                  {n.termination?.status && <Badge tone={n.termination.status === 'COMPLETE' ? 'success' : n.termination.status === 'INCOMPLETE' ? 'warning' : 'inert'}>TERMINATION: {n.termination.status}{n.termination.reason ? ` (${n.termination.reason})` : ''}</Badge>}
+                                  {n.receiptOutcome && <ReceiptOutcomeBadge outcome={n.receiptOutcome} />}
+                                  {n.quarantined && <Badge tone="error" title="Excluded from memory retrieval; evidence preserved.">QUARANTINED</Badge>}
+                                  {n.taskId && <span className="text-[10px] text-[#8C8AFF]">task {String(n.taskId).slice(0, 28)}</span>}
+                                </div>
+                              )}
                               {n.gate && n.gate.passed === false && n.gate.reason && (
                                 <div className="text-[10px] text-[#FF5E8E] mt-1">{n.gate.reason}</div>
                               )}

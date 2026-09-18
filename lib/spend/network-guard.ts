@@ -116,7 +116,7 @@ function hostOf(raw: string | undefined): string | null {
 /** Real paid hosts plus any configured provider base-URL override (proxy, gateway or test double). */
 export function paidHosts(env: NodeJS.ProcessEnv = process.env): Set<string> {
   const set = new Set(REAL_PAID_HOSTS);
-  for (const v of [env.OPENAI_BASE_URL, env.ANTIGRAVITY_BASE_URL]) {
+  for (const v of [env.OPENAI_BASE_URL, env.ANTIGRAVITY_BASE_URL, env.GEMINI_BASE_URL]) {
     const h = hostOf(v);
     if (h) set.add(h);
   }

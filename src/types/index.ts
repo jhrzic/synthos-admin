@@ -384,6 +384,21 @@ export interface KanbanTask {
   updatedAt: string;
   estimatedHours?: string;
   outputLog?: string;
+  /**
+   * What the canonical execution fabric decided for this task — scoped Aegis
+   * outcome, the three verification scopes, the output contract, the signed
+   * receipt's outcome and the artifact's memory (quarantine) state. Read from
+   * the /api/execute-agent-task response; never computed client-side.
+   */
+  verificationOutcome?: {
+    taskStatus: string;
+    scopes?: any;
+    scopeStatement?: string | null;
+    outputContract?: any;
+    receiptOutcome?: string | null;
+    receiptId?: string | null;
+    retrieval?: { status: string; reason: string | null; at: string | null } | null;
+  };
   category?: 'startup-curation' | 'infrastructure' | 'research' | 'code' | 'marketing' | 'growth' | string;
   stage?: string;
 

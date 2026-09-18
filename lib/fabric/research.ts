@@ -40,6 +40,7 @@
 // artifact/Aegis/receipt) — lib/fabric/envelope.ts owns that lifecycle.
 // ---------------------------------------------------------------------------
 
+import type { ProviderTermination } from './output-contract';
 import { generateViaGemini } from './model-gemini';
 import type { ExecutionContext } from './types';
 
@@ -74,6 +75,8 @@ export interface ResearchResult {
   repos: ResearchRepo[];
   synthesis: string;
   reportMarkdown: string;
+  /** The synthesis call's provider termination; absent when no synthesis ran. */
+  termination?: ProviderTermination;
 }
 
 // Real Node process env only — never a VITE_-prefixed variable, matching
@@ -313,5 +316,5 @@ Write a concise synthesis (3-5 sentences) comparing these repositories and expla
 
   const reportMarkdown = buildReportMarkdown(params.query, repos, sources, synthesisResult.output, searchQueriesUsed);
 
-  return { query: params.query, searchQueriesUsed, sources, repos, synthesis: synthesisResult.output, reportMarkdown };
+  return { query: params.query, searchQueriesUsed, sources, repos, synthesis: synthesisResult.output, reportMarkdown, termination: synthesisResult.termination };
 }

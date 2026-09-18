@@ -5,6 +5,7 @@ import {
   RefreshCw, Loader2, AlertTriangle, HardDrive, Hash,
   CheckCircle2, XCircle, Network, Activity, Link as LinkIcon
 } from 'lucide-react';
+import { TaskStatusBadge, RetrievalBadge } from './verification/outcome';
 import { ObsidianGraphMind } from './ObsidianGraphMind';
 import { VaultActivitySparkline } from './VaultActivitySparkline';
 
@@ -29,6 +30,9 @@ interface VaultEntry {
   created_at: string;
   content_type: string;
   preview: string | null;
+  task_status?: string | null;
+  retrieval_status?: string | null;
+  retrieval_status_reason?: string | null;
 }
 
 interface VaultEntryDetail extends VaultEntry {
@@ -630,6 +634,12 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
                     <div className="text-xs text-white font-semibold truncate">{entry.title}</div>
                     <div className="text-[10px] text-[#8E94B8] truncate">{entry.relative_path}</div>
                     <div className="text-[10px] text-[#5A6083] mt-1">{new Date(entry.created_at).toLocaleString()}</div>
+                    {(entry.retrieval_status === 'QUARANTINED' || entry.task_status === 'INCOMPLETE' || entry.task_status === 'VERIFICATION_FAILED') && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        <TaskStatusBadge status={entry.task_status} />
+                        {entry.retrieval_status === 'QUARANTINED' && <RetrievalBadge retrieval={{ status: 'QUARANTINED', reason: null }} />}
+                      </div>
+                    )}
                   </button>
                 ))}
               </div>
@@ -660,6 +670,10 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
                   </div>
                   <div className="mt-1 text-[10px] text-[#5A6083] font-mono break-all">{selectedDetail.content_hash}</div>
                   <div className="mt-1 text-[10px] text-[#5A6083]">Task: {selectedDetail.task_id} · Artifact: {selectedDetail.artifact_id}</div>
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    <TaskStatusBadge status={selectedDetail.task_status} />
+                    <RetrievalBadge retrieval={{ status: selectedDetail.retrieval_status || undefined, reason: selectedDetail.retrieval_status_reason ?? null }} />
+                  </div>
                 </div>
                 <div className="p-4 bg-[#070811] border border-[#151728] rounded-xl max-h-96 overflow-y-auto">
                   {selectedDetail.content === null ? (

@@ -22,12 +22,13 @@ import { writeKnowledgeNote, deriveConversationSubject, type KnowledgeWriteResul
 import { getVaultStatus } from '../vault-config';
 import {
   createInitialTask, recordActivityEvent, updateTaskStatus, getDatabase,
-  recordQualityReview, recordReceipt, runDeterministicAegisVerification,
+  recordQualityReview, recordReceipt,
   canonicalizePayload, signReceiptPayload, verifyReceiptSignature,
   type CanonicalReceiptPayload,
 } from '../persistence';
 import { writeWorkspaceArtifact } from '../vault';
 import { indexVaultArtifact } from '../memory-index';
+import { runScopedAegis, receiptOutcomeFields, commitContentFailure, isContentFailure, DETERMINISTIC_COMPLETION } from '../fabric/scoped-verification';
 import {
   type BusinessProfile, type Channel, type ConversationMessage, type LeadData, type ResponseMode,
   answerQuestion, appendMessage, classifyIntent, createConversation, extractLead, getConversation,
@@ -642,14 +643,17 @@ export function summarizeConversation(workspaceId: string, conversationId: strin
   const artifact = writeWorkspaceArtifact({
     workspaceId, taskId, content: markdown, folder: 'Conversations', extension: 'md', createdAt: nowIso,
   });
-  try { indexVaultArtifact(workspaceId, artifact.artifact_id); } catch { /* index best-effort */ }
   recordActivityEvent({
     taskId, expectedWorkspaceId: workspaceId, eventType: 'ARTIFACT_SAVED', agentId: 'conversation-ai',
     payload: { artifactId: artifact.artifact_id, relativePath: artifact.relative_path, contentHash: artifact.content_hash }, createdAt: nowIso,
   });
   updateTaskStatus(taskId, 'AWAITING_VERIFICATION', undefined, workspaceId);
 
-  const aegisResult = runDeterministicAegisVerification(taskId, markdown);
+  // Scoped Aegis: a deterministic summary, so completion is
+  // DETERMINISTIC_LOCAL by construction; NARRATIVE contract. Indexed only
+  // after VERIFIED + receipt.
+  const scoped = runScopedAegis({ taskId, output: markdown, termination: DETERMINISTIC_COMPLETION, contract: { mode: 'NARRATIVE' } });
+  const aegisResult = scoped.review;
   const review = recordQualityReview({
     taskId, reviewer: aegisResult.reviewer, method: aegisResult.method, score: aegisResult.score,
     decision: aegisResult.decision, checks: aegisResult.checks, evidence: aegisResult.evidence, createdAt: nowIso,
@@ -665,7 +669,7 @@ export function summarizeConversation(workspaceId: string, conversationId: strin
       assignedAgent: 'conversation-ai', provider: 'synthos-conversation-ai',
       modelUsed: 'deterministic-summary',
       artifactId: artifact.artifact_id, artifactHash: artifact.content_hash,
-      aegisDecision: aegisResult.decision, aegisMethod: aegisResult.method, createdAt: nowIso,
+      aegisDecision: aegisResult.decision, aegisMethod: aegisResult.method, ...receiptOutcomeFields(scoped.content), createdAt: nowIso,
     };
     const payloadStr = canonicalizePayload(payload);
     const { signature, publicKeyPem, algorithm, fingerprint } = signReceiptPayload(payloadStr);
@@ -674,8 +678,21 @@ export function summarizeConversation(workspaceId: string, conversationId: strin
       recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: 'RECEIPT_CREATED', agentId: 'guardian', payload: { receiptId: newReceiptId, algorithm, fingerprint, verified: true }, createdAt: nowIso });
       receiptId = newReceiptId;
     }
+  } else if (isContentFailure(scoped.content)) {
+    commitContentFailure({
+      taskId, workspaceId, reviewId: review.review_id, scoped, artifact,
+      identity: { assignedAgent: 'conversation-ai', provider: 'synthos-conversation-ai', modelUsed: 'deterministic-summary' }, nowIso,
+    });
   }
-  updateTaskStatus(taskId, 'DONE', undefined, workspaceId);
+  // DONE + indexed only with a verified, signed receipt; anything else is a
+  // terminal failure and the summary stays out of retrieval.
+  if (receiptId) {
+    updateTaskStatus(taskId, 'DONE', undefined, workspaceId);
+    try { indexVaultArtifact(workspaceId, artifact.artifact_id); } catch { /* index best-effort */ }
+  } else if (!isContentFailure(scoped.content)) {
+    updateTaskStatus(taskId, 'FAILED', undefined, workspaceId);
+    recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: 'AEGIS_REVIEWED', agentId: 'aegis', payload: { reviewId: review.review_id, decision: aegisResult.decision, verificationScopes: scoped.content.scopes }, createdAt: nowIso });
+  }
 
   getDatabase()
     .prepare('UPDATE business_conversations SET summary_artifact_id = ?, updated_at = ? WHERE conversation_id = ? AND workspace_id = ?')

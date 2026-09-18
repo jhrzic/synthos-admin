@@ -60,6 +60,9 @@ export interface VaultEntry {
   size_bytes: number;
   created_at: string;
   content_type: string;
+  task_status: string | null;
+  retrieval_status: string | null;
+  retrieval_status_reason: string | null;
 }
 
 export interface VaultEntryDetail extends VaultEntry {
@@ -94,6 +97,9 @@ interface ArtifactJoinRow {
   size_bytes: number;
   created_at: string;
   title: string | null;
+  task_status?: string | null;
+  retrieval_status?: string | null;
+  retrieval_status_reason?: string | null;
 }
 
 function toEntry(row: ArtifactJoinRow): VaultEntry {
@@ -106,6 +112,11 @@ function toEntry(row: ArtifactJoinRow): VaultEntry {
     size_bytes: row.size_bytes,
     created_at: row.created_at,
     content_type: contentTypeFor(row.relative_path),
+    // The producing task's terminal status and whether this artifact is in
+    // active retrieval or quarantined (with why). Both read from the rows.
+    task_status: row.task_status ?? null,
+    retrieval_status: row.retrieval_status ?? null,
+    retrieval_status_reason: row.retrieval_status_reason ?? null,
   };
 }
 
@@ -113,7 +124,7 @@ function toEntry(row: ArtifactJoinRow): VaultEntry {
 export function listWorkspaceVaultEntries(workspaceId: string, limit = 100): VaultEntry[] {
   const db = getDatabase();
   const rows = db.prepare(`
-    SELECT a.artifact_id, a.task_id, a.relative_path, a.content_hash, a.size_bytes, a.created_at, t.title
+    SELECT a.artifact_id, a.task_id, a.relative_path, a.content_hash, a.size_bytes, a.created_at, t.title, t.status AS task_status, a.retrieval_status, a.retrieval_status_reason
     FROM artifacts a
     JOIN tasks t ON t.task_id = a.task_id
     WHERE t.workspace_id = ?
@@ -154,7 +165,7 @@ export function previewWorkspaceVaultEntry(workspaceId: string, artifactId: stri
 export function getWorkspaceVaultEntry(workspaceId: string, artifactId: string): VaultEntryDetail | null {
   const db = getDatabase();
   const row = db.prepare(`
-    SELECT a.artifact_id, a.task_id, a.relative_path, a.content_hash, a.size_bytes, a.created_at, t.title
+    SELECT a.artifact_id, a.task_id, a.relative_path, a.content_hash, a.size_bytes, a.created_at, t.title, t.status AS task_status, a.retrieval_status, a.retrieval_status_reason
     FROM artifacts a
     JOIN tasks t ON t.task_id = a.task_id
     WHERE t.workspace_id = ? AND a.artifact_id = ?

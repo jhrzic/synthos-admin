@@ -48,8 +48,8 @@
 // ---------------------------------------------------------------------------
 
 import crypto from 'node:crypto';
-import { normalizeOutputContract, buildContractPrompt, verifyContent, type OutputContract, type ProviderTermination } from './output-contract';
-import { quarantineArtifact } from '../memory-index';
+import { normalizeOutputContract, buildContractPrompt, type OutputContract, type ProviderTermination } from './output-contract';
+import { runScopedAegis, receiptOutcomeFields, commitContentFailure, isContentFailure } from './scoped-verification';
 import {
   createInitialTask,
   updateTaskStatus,
@@ -75,7 +75,7 @@ import { classifyModelRequest, DEFAULT_CANDIDATE_MODELS, PROVIDER_ENV_VAR, type 
 import { resolveModelApiKey, type ModelProvider } from '../model-credentials';
 import { recordProviderAttempt } from '../provider-state';
 import { verifyTaskAtGate } from '../kil-gate';
-import { indexVaultArtifact } from '../memory-index';
+import { indexVaultArtifact, getArtifactRetrievalStatus } from '../memory-index';
 // STEP 2 — the canonical Vault writer (lib/vault.ts). Replaces this file's
 // own former direct fs.writeFileSync + recordArtifact() pair; see the
 // artifact-write section below for the full rationale.
@@ -643,17 +643,9 @@ export async function executeAgentTask(
     // are evaluated beside it. The recorded decision is VERIFIED only when
     // every scope the contract requires passed, and the review states the
     // scopes explicitly.
-    const integrity = runDeterministicAegisVerification(taskId, executionOutput);
-    const content = verifyContent({ integrityDecision: integrity.decision, output: executionOutput, termination: providerTermination, contract: outputContract });
-    const aegisResult = {
-      ...integrity,
-      decision: content.decision,
-      method: `${integrity.method}+COMPLETION+INSTRUCTION_COMPLIANCE`,
-      checks: [...integrity.checks.map((c) => ({ ...c, check: `integrity:${c.check}` })), ...content.checks],
-      evidence: { ...integrity.evidence, verificationScopes: content.scopes, scopeStatement: content.scopeStatement, termination: providerTermination, outputContract },
-      // Integrity's own score is kept, but a content failure is not a "100".
-      score: content.decision === 'VERIFIED' ? integrity.score : 0,
-    };
+    const scoped = runScopedAegis({ taskId, output: executionOutput, termination: providerTermination, contract: outputContract });
+    const content = scoped.content;
+    const aegisResult = scoped.review;
 
     // Persist quality review to SQLite quality_reviews table
     const persistedReview = recordQualityReview({
@@ -716,8 +708,7 @@ export async function executeAgentTask(
         artifactHash: persistedArtifact.content_hash,
         aegisDecision: aegisResult.decision,
         aegisMethod: aegisResult.method,
-        outcome: 'COMPLETED',
-        verificationScope: content.scopeStatement,
+        ...receiptOutcomeFields(content),
         createdAt: nowIso,
       };
 
@@ -839,57 +830,15 @@ export async function executeAgentTask(
           createdAt: nowIso,
         });
       }
-    } else if (content.taskStatus === "INCOMPLETE" || content.taskStatus === "VERIFICATION_FAILED") {
-      // INTEGRITY PASSED, CONTENT DID NOT. The artifact is real and intact, so
-      // it gets an integrity/audit receipt — but the signed payload states the
-      // outcome, so the receipt can never be read as a completed task. The
-      // task ends INCOMPLETE / VERIFICATION_FAILED (terminal, never DONE), the
-      // artifact is QUARANTINED (kept as evidence, excluded from searchable
-      // memory), and there is no KIL/knowledge promotion.
-      const outcome = content.taskStatus;
-      recordActivityEvent({
-        taskId,
-        expectedWorkspaceId: resolvedWorkspaceId,
-        eventType: outcome === "INCOMPLETE" ? "AEGIS_INCOMPLETE" : "AEGIS_INSTRUCTION_FAILED",
-        agentId: "aegis",
-        payload: {
-          reviewId: persistedReview.review_id,
-          decision: aegisResult.decision,
-          verificationScopes: content.scopes,
-          checks: aegisResult.checks,
-        },
-        createdAt: nowIso,
-      });
-
-      receiptId = `rcpt-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
-      const auditPayload: CanonicalReceiptPayload = {
-        receiptId, taskId, reviewId: persistedReview.review_id, workspaceId: resolvedWorkspaceId, assignedAgent,
-        provider: PROVIDER_RECEIPT_IDENTITY[provider], modelUsed,
-        artifactId: persistedArtifact.artifact_id, artifactHash: persistedArtifact.content_hash,
-        aegisDecision: aegisResult.decision, aegisMethod: aegisResult.method,
-        outcome, verificationScope: content.scopeStatement, createdAt: nowIso,
-      };
-      const auditPayloadStr = canonicalizePayload(auditPayload);
-      const signed = signReceiptPayload(auditPayloadStr);
-      if (verifyReceiptSignature(auditPayloadStr, signed.signature, signed.publicKeyPem)) {
-        recordReceipt({ receiptId, taskId, reviewId: persistedReview.review_id, algorithm: signed.algorithm, publicKey: signed.publicKeyPem, payloadJson: auditPayloadStr, signature: signed.signature, createdAt: nowIso });
-        recordActivityEvent({
-          taskId, expectedWorkspaceId: resolvedWorkspaceId, eventType: "AUDIT_RECEIPT_CREATED", agentId: "guardian",
-          payload: { receiptId, algorithm: signed.algorithm, fingerprint: signed.fingerprint, outcome, verified: true },
-          createdAt: nowIso,
-        });
-      }
-
-      try {
-        quarantineArtifact({
-          workspaceId: resolvedWorkspaceId, artifactId: persistedArtifact.artifact_id, actor: "aegis",
-          reason: `Aegis ${outcome}: ${content.scopeStatement}`,
-        });
-      } catch (qErr: any) {
-        console.warn("[Memory Index] Quarantine failed:", qErr?.message || qErr);
-      }
-
-      updateTaskStatus(taskId, outcome, undefined, resolvedWorkspaceId);
+    } else if (isContentFailure(content)) {
+      // Integrity passed, content did not: the shared failure branch (audit
+      // receipt stating the outcome, quarantine, terminal status).
+      receiptId = commitContentFailure({
+        taskId, workspaceId: resolvedWorkspaceId, reviewId: persistedReview.review_id, scoped,
+        artifact: persistedArtifact,
+        identity: { assignedAgent, provider: PROVIDER_RECEIPT_IDENTITY[provider], modelUsed },
+        nowIso,
+      }).receiptId ?? undefined;
     } else if (aegisResult.decision === "FAILED") {
       updateTaskStatus(taskId, "FAILED", undefined, resolvedWorkspaceId);
       recordActivityEvent({
@@ -986,6 +935,8 @@ export async function executeAgentTask(
           sizeBytes: persistedArtifact.size_bytes,
           content: artifactContent,
           createdAt: nowIso,
+          // ACTIVE, or QUARANTINED with the reason — read back, not assumed.
+          retrieval: getArtifactRetrievalStatus(persistedArtifact.artifact_id),
         },
         review: {
           reviewId: persistedReview.review_id,

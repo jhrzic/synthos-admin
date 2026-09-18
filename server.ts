@@ -68,7 +68,7 @@ import {
 } from "./lib/model-catalog";
 import { effectiveModelsForProvider, lastRefresh, refreshModelCatalog } from "./lib/model-discovery";
 import { listKnowledgeNotes, searchKnowledgeNotes, listKnowledgeNotesDetailed } from "./lib/knowledge-vault";
-import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory, listWorkspaceMemory } from "./lib/memory-index";
+import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory, listWorkspaceMemory, getArtifactRetrievalStatus } from "./lib/memory-index";
 import { runAeoAudit, createAuditMissionTasks, resolveGeoProvider } from "./lib/aeo/service";
 import { listCapabilities, conversationModelConfigured, toolPackCapabilities } from "./lib/fabric/registry";
 import { TOOL_PACK_1, resolveToolReadiness } from "./lib/fabric/tool-pack";
@@ -194,6 +194,8 @@ import { getSpendPolicy, saveSpendPolicy, PAID_PROVIDERS, type PaidProvider } fr
 import { refreshPricingCatalog, listCatalogPrices, priceHistory } from "./lib/pricing/catalog";
 import { clearAmbiguousUsage } from "./lib/spend/guard";
 import { executeAgentTask, buildAgentRolePrompt } from "./lib/fabric/kernel";
+import { normalizeOutputContract, buildContractPrompt, verifyContent, type OutputContract, type ProviderTermination } from "./lib/fabric/output-contract";
+import { runScopedAegis, receiptOutcomeFields, commitContentFailure, isContentFailure, commitFailedNodeEvidence } from "./lib/fabric/scoped-verification";
 import { createExecutionContext } from "./lib/fabric/context";
 import { generateViaGemini } from "./lib/fabric/model-gemini";
 import { classifyIntent } from "./lib/fabric/intent";
@@ -2221,6 +2223,25 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         return res.status(400).json({ success: false, error: "Graph must contain at least one agent or capability node to execute." });
       }
 
+      // OUTPUT CONTRACTS — validated for every node before ANY node runs, so a
+      // bad declaration on node 5 cannot let nodes 1–4 spend first. A node
+      // without one is NARRATIVE (the documented default, same as the direct
+      // task path); a contract is never inferred from the node's wording.
+      // Capability nodes produce SynthOS-built reports and cannot honour a
+      // LITERAL / JSON_OBJECT contract, so declaring one there is refused
+      // rather than silently ignored.
+      const nodeContracts = new Map<string, OutputContract>();
+      for (const n of nodes) {
+        const parsed = normalizeOutputContract(n.outputContract);
+        if (!parsed.ok) {
+          return res.status(400).json({ success: false, code: "INVALID_OUTPUT_CONTRACT", nodeId: n.id, error: `Node "${n.id}": ${parsed.error}` });
+        }
+        if (n.type === "capability" && parsed.contract.mode !== "NARRATIVE") {
+          return res.status(400).json({ success: false, code: "INVALID_OUTPUT_CONTRACT", nodeId: n.id, error: `Node "${n.id}": capability nodes produce SynthOS-built reports and support only the NARRATIVE contract.` });
+        }
+        nodeContracts.set(n.id, parsed.contract);
+      }
+
       // 1. Persist graph definition — graph ownership is authoritative from
       // here on; saveGraph() rejects if graphId already exists in another
       // workspace instead of silently reassigning it.
@@ -2269,7 +2290,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       // graph-run artifact built after every node succeeds. Never persisted
       // or signed per COMPUTE node individually (that was the
       // N-nodes-to-N-receipts problem this step fixes).
-      const nativeNodeOutputs: Array<{ nodeId: string; nodeLabel: string; order: number; agent: string; modelUsed: string | null; output: string }> = [];
+      const nativeNodeOutputs: Array<{ nodeId: string; nodeLabel: string; order: number; agent: string; modelUsed: string | null; output: string; termination?: ProviderTermination | null }> = [];
       // Shared state threaded between capability nodes in one run: the audit a
       // downstream review/mission/schedule node needs, and the artefacts each
       // produced. Scoped to this run only — never global.
@@ -2438,13 +2459,18 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
             workspaceId,
             createdByUserId: actorUserId,
             targetId: currentNode.windmillTargetId,
-            input: { prompt: nodeDescription, upstreamOutput: previousOutput },
+            input: { prompt: nodeDescription, upstreamOutput: previousOutput, outputContract: nodeContracts.get(currentNode.id) },
             taskId: nodeTaskId,
             graphRunId: runId,
             graphNodeId: currentNode.id,
           });
 
-          if (execution.status === "SUCCEEDED" && execution.result_receipt_id && execution.task_id) {
+          // Ingestion's scoped verification decides; the remote runtime's own
+          // success does not. result_receipt_id is only ever set for a
+          // COMPLETED receipt, and the task must also have reached DONE — an
+          // INCOMPLETE / VERIFICATION_FAILED node falls to the else-branch.
+          const windmillTaskStatus = execution.task_id ? getTaskWithHistory(execution.task_id).task?.status : undefined;
+          if (execution.status === "SUCCEEDED" && execution.result_receipt_id && execution.task_id && windmillTaskStatus === "DONE") {
             // Rule 15/F4 — a SUCCEEDED remote job only reaches this branch
             // because ingestExternalExecutionResult already ran Aegis and
             // only signed a receipt on VERIFIED (see lib/external-executions.ts).
@@ -2459,9 +2485,12 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
               if (nodeArtifact?.disk_path) artifactContentText = fs.readFileSync(nodeArtifact.disk_path, "utf8");
             } catch { /* falls back to empty — never fabricated */ }
 
+            let receiptOutcome: string | null = null;
+            try { receiptOutcome = nodeReceipt ? (JSON.parse(nodeReceipt.payload_json).outcome ?? null) : null; } catch { /* unreadable payload → not COMPLETED */ }
             nodeExecData = {
-              success: true,
-              status: "DONE",
+              success: receiptOutcome === "COMPLETED",
+              status: receiptOutcome === "COMPLETED" ? "DONE" : "FAILED",
+              ...(receiptOutcome === "COMPLETED" ? {} : { reason: "RECEIPT_NOT_COMPLETED", error: `Windmill node receipt outcome is ${receiptOutcome ?? "absent"}, not COMPLETED.` }),
               outputs: artifactContentText,
               artifact: nodeArtifact ? {
                 id: nodeArtifact.artifact_id,
@@ -2484,9 +2513,10 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
             // honestly as an unverified node.
             nodeExecData = {
               success: false,
-              status: execution.status === "SUCCEEDED" ? "FAILED" : execution.status,
+              status: execution.status === "SUCCEEDED" ? (windmillTaskStatus === "INCOMPLETE" || windmillTaskStatus === "VERIFICATION_FAILED" ? windmillTaskStatus : "FAILED") : execution.status,
+              taskId: execution.task_id || null,
               error: execution.error_message_safe
-                || `Windmill node ended in status "${execution.status}" without a SynthOS-verified receipt.`,
+                || `Windmill node ended in status "${execution.status}"${windmillTaskStatus ? ` (task ${windmillTaskStatus})` : ""} without a SynthOS-verified receipt.`,
               externalExecutionId: execution.id,
               externalStatus: execution.status,
               externalRuntime: "windmill",
@@ -2530,8 +2560,13 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
               const normalizedModel = modelClassification.resolvedModel;
               // NO_PAID_FALLBACK — one model per node.
               const candidateModels = [normalizedModel];
+              const nodeContract = nodeContracts.get(currentNode.id) || { mode: "NARRATIVE" as const };
               const genResult = await graphRunCtx.invoke("model.gemini", async () => {
-                const rolePrompt = buildAgentRolePrompt({ assignedAgent: nodeAgent, taskTitle, description: nodeDescription, inputs: previousOutput });
+                // A persona prompt may never override a LITERAL / JSON_OBJECT
+                // contract — same rule as the kernel.
+                const rolePrompt = nodeContract.mode === "NARRATIVE"
+                  ? buildAgentRolePrompt({ assignedAgent: nodeAgent, taskTitle, description: nodeDescription, inputs: previousOutput })
+                  : buildContractPrompt(nodeContract, taskTitle, nodeDescription);
                 // Keyed per run+node, so a graph resume cannot pay for the same node twice.
                 return generateViaGemini({ apiKey, contents: rolePrompt, candidateModels, spend: { callSite: 'graph.node', workspaceId, idempotencyKey: `graph:${runId}:${currentNode.id}` } });
               });
@@ -2543,7 +2578,37 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
                   error: genResult.lastProviderError || "Model provider returned an empty or unparseable response",
                 };
               } else {
-                nodeExecData = { success: true, status: "DONE", outputs: genResult.output, modelUsed: genResult.modelUsed || nodeModel };
+                // SCOPED NODE GATE. Completion and instruction compliance are
+                // judged here, per node; integrity is audited on the one
+                // aggregate artifact for passing nodes (Step 4), and for real
+                // on the node's own evidence artifact when it fails.
+                const termination: ProviderTermination = genResult.termination || { status: "NOT_REPORTED", providerStatus: null, reason: null };
+                const gate = verifyContent({ integrityDecision: "VERIFIED", output: genResult.output, termination, contract: nodeContract });
+                const modelUsed = genResult.modelUsed || nodeModel;
+                if (gate.decision === "VERIFIED") {
+                  nodeExecData = {
+                    success: true, status: "DONE", outputs: genResult.output, modelUsed, termination, outputContract: nodeContract,
+                    verification: { integrity: "AUDITED_ON_AGGREGATE", completion: gate.scopes.completion, instructionCompliance: gate.scopes.instructionCompliance, required: gate.scopes.required, decision: gate.decision, scopeStatement: gate.scopeStatement },
+                  };
+                } else {
+                  const evidence = commitFailedNodeEvidence({
+                    taskId: `task-${runId}-${currentNode.id}`, workspaceId,
+                    title: `Graph node — ${taskTitle}`, description: nodeDescription.slice(0, 2000),
+                    assignedAgent: nodeAgent, modelUsed, output: genResult.output, termination, contract: nodeContract,
+                    graphRunId: runId, graphNodeId: currentNode.id,
+                  });
+                  nodeExecData = {
+                    success: false, status: evidence.status, modelUsed, termination, outputContract: nodeContract,
+                    reason: evidence.status,
+                    error: `Aegis ${evidence.status}: ${evidence.scoped.content.scopeStatement}`,
+                    taskId: evidence.taskId,
+                    artifact: evidence.artifact,
+                    review: { reviewId: evidence.reviewId, decision: evidence.scoped.review.decision, score: evidence.scoped.review.score },
+                    receipt: evidence.receiptId ? { receiptId: evidence.receiptId, verified: true, outcome: evidence.status } : null,
+                    quarantined: true,
+                    verification: { ...evidence.scoped.content.scopes, decision: evidence.scoped.content.decision, scopeStatement: evidence.scoped.content.scopeStatement },
+                  };
+                }
               }
             }
           }
@@ -2577,6 +2642,12 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
           artifact: nodeExecData.artifact ? { id: nodeExecData.artifact.id, filePath: nodeExecData.artifact.filePath, contentHash: nodeExecData.artifact.contentHash } : null,
           externalExecutionId: nodeExecData.externalExecutionId || null,
           receiptId: nodeExecData.receipt?.receiptId || null,
+          receiptOutcome: nodeExecData.receipt?.outcome || (isNodeVerified && nodeExecData.receipt ? "COMPLETED" : null),
+          taskId: nodeExecData.taskId || null,
+          outputContract: nodeExecData.outputContract || null,
+          termination: nodeExecData.termination || null,
+          verification: nodeExecData.verification || null,
+          quarantined: nodeExecData.quarantined === true,
           failure: isNodeVerified ? null : { reason: nodeExecData.reason || nodeExecData.status || null, error: nodeExecData.error || null },
         };
 
@@ -2622,7 +2693,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         executionResults.push(nodeTrace);
         previousOutput = nodeExecData.outputs || nodeExecData.artifact?.content || "";
         if (!isWindmillNode) {
-          nativeNodeOutputs.push({ nodeId: currentNode.id, nodeLabel: taskTitle, order: i, agent: nodeAgent, modelUsed: nodeExecData.modelUsed || null, output: nodeExecData.outputs || "" });
+          nativeNodeOutputs.push({ nodeId: currentNode.id, nodeLabel: taskTitle, order: i, agent: nodeAgent, modelUsed: nodeExecData.modelUsed || null, output: nodeExecData.outputs || "", termination: nodeExecData.termination || null });
         }
       }
 
@@ -2671,7 +2742,15 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         });
 
         updateTaskStatus(graphRunTaskId, "AWAITING_VERIFICATION", undefined, workspaceId);
-        const aegisResult = runDeterministicAegisVerification(graphRunTaskId, artifactContent);
+        // The aggregate is SynthOS-assembled from nodes that each passed their
+        // own contract gate. Its completion is COMPLETE only when every native
+        // node's provider reported COMPLETE; otherwise NOT_REPORTED, which the
+        // NARRATIVE contract tolerates and the receipt scope states plainly.
+        const aggregateTermination: ProviderTermination = nativeNodeOutputs.every((n) => n.termination?.status === "COMPLETE")
+          ? { status: "COMPLETE", providerStatus: "ALL_NODES_COMPLETE", reason: null }
+          : { status: "NOT_REPORTED", providerStatus: null, reason: null };
+        const scopedAggregate = runScopedAegis({ taskId: graphRunTaskId, output: artifactContent, termination: aggregateTermination, contract: { mode: "NARRATIVE" } });
+        const aegisResult = scopedAggregate.review;
         const persistedReview = recordQualityReview({ taskId: graphRunTaskId, reviewer: aegisResult.reviewer, method: aegisResult.method, score: aegisResult.score, decision: aegisResult.decision, checks: aegisResult.checks, evidence: aegisResult.evidence, createdAt: nowIso });
 
         if (aegisResult.decision === "VERIFIED") {
@@ -2691,6 +2770,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
             artifactHash: persistedArtifact.content_hash,
             aegisDecision: aegisResult.decision,
             aegisMethod: aegisResult.method,
+            ...receiptOutcomeFields(scopedAggregate.content),
             createdAt: nowIso,
           };
           const canonicalPayloadStr = canonicalizePayload(canonicalPayload);
@@ -2720,6 +2800,8 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
               taskId: graphRunTaskId,
               receiptId: newReceiptId,
               verified: true,
+              outcome: "COMPLETED",
+              verificationScope: scopedAggregate.content.scopeStatement,
               artifactId: persistedArtifact.artifact_id,
               artifactPath: persistedArtifact.relative_path,
               aegisDecision: aegisResult.decision,
@@ -2729,6 +2811,11 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
             updateTaskStatus(graphRunTaskId, "FAILED", undefined, workspaceId);
             recordActivityEvent({ taskId: graphRunTaskId, expectedWorkspaceId: workspaceId, eventType: "RECEIPT_VERIFICATION_FAILED", agentId: "guardian", payload: { reviewId: persistedReview.review_id }, createdAt: nowIso });
           }
+        } else if (isContentFailure(scopedAggregate.content)) {
+          commitContentFailure({
+            taskId: graphRunTaskId, workspaceId, reviewId: persistedReview.review_id, scoped: scopedAggregate, artifact: persistedArtifact,
+            identity: { assignedAgent: "graph-runtime", provider: "synthos-graph-runtime", modelUsed: `graph-run:${nativeNodeOutputs.length}-nodes` }, nowIso,
+          });
         } else {
           // Clarification #2 — never manufacture a verified aggregate
           // artifact merely to create a receipt. This branch is not
@@ -2742,27 +2829,32 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         }
       }
 
-      // 5. All nodes verified: Mark Graph Run as COMPLETED
+      // 5. All nodes verified. The run is COMPLETED only if the aggregate —
+      // when there is one — was verified and receipted; an aggregate that
+      // Aegis refused is a FAILED run, never a completed one without a receipt.
+      const aggregateVerified = nativeNodeOutputs.length === 0 || graphRunReceipt?.verified === true;
+      const finalStatus = aggregateVerified ? "COMPLETED" : "FAILED";
       const finalState = {
         graphId,
         completedAt: new Date().toISOString(),
         totalCompletedNodes: nodes.length,
         nodeResults: Object.fromEntries(executionResults.map(r => [r.nodeId, r])),
         graphRunReceipt,
+        ...(aggregateVerified ? {} : { error: "The graph-run aggregate did not pass scoped verification; no receipt was issued." }),
       };
       saveGraphRun({
         runId,
         graphId,
-        status: "COMPLETED",
+        status: finalStatus,
         currentNodeId: null,
         state: finalState
       });
 
       return res.json({
-        success: true,
+        success: aggregateVerified,
         runId,
         graphId,
-        status: "COMPLETED",
+        status: finalStatus,
         nodesExecuted: executionResults.length,
         nodes: executionResults,
         finalState,
@@ -3641,6 +3733,9 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
           public_key: r.public_key,
           verified: payloadError ? false : verifyReceipt(r),
           payloadError,
+          // Whether the attested artifact is still in active retrieval or was
+          // quarantined (and why). Read live, never inferred from the receipt.
+          artifactRetrieval: typeof payload.artifactId === "string" ? getArtifactRetrievalStatus(payload.artifactId) : null,
           // The canonical payload carries no secrets, prompts or provider
           // payloads — only ids, hashes and the Aegis decision. Returned as
           // stored so the detail panel shows exactly what was signed.
@@ -6040,7 +6135,15 @@ Rules for spokenSummary specifically:
       const resolved = resolveWorkspaceId(req.query.workspaceId);
       if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
       const limit = req.query.limit ? Number(req.query.limit) : undefined;
-      return res.json({ success: true, executions: listWorkspaceExternalExecutions(resolved.workspaceId, limit) });
+      // A SUCCEEDED remote run is not a SynthOS success: each row carries the
+      // ingested task's status (DONE / INCOMPLETE / VERIFICATION_FAILED /
+      // FAILED) and the result artifact's retrieval state, read from the rows.
+      const executions = listWorkspaceExternalExecutions(resolved.workspaceId, limit).map((e) => ({
+        ...e,
+        task_status: e.task_id ? (getTaskWithHistory(e.task_id).task?.status ?? null) : null,
+        artifact_retrieval: e.result_artifact_id ? getArtifactRetrievalStatus(e.result_artifact_id) : null,
+      }));
+      return res.json({ success: true, executions });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to list external executions" });
     }

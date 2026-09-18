@@ -55,9 +55,12 @@ describe('POST /api/graphs/execute: Windmill node target (G1-G4)', () => {
 
   it('an unverified or still-pending Windmill node is reported success:false, never silently marked DONE', () => {
     const branchStart = executeRoute.indexOf('await submitAndAwaitExternalExecution({');
-    const branchWindow = executeRoute.slice(branchStart, branchStart + 3500);
+    const branchWindow = executeRoute.slice(branchStart, branchStart + 6000);
     expect(branchWindow).toContain('success: false');
-    expect(branchWindow).toContain('execution.status === "SUCCEEDED" ? "FAILED" : execution.status');
+    // A remote SUCCEEDED is never passed through as the node status: it maps
+    // to the ingested task's scoped failure (INCOMPLETE / VERIFICATION_FAILED)
+    // or FAILED.
+    expect(branchWindow).toContain('execution.status === "SUCCEEDED" ? (windmillTaskStatus === "INCOMPLETE" || windmillTaskStatus === "VERIFICATION_FAILED" ? windmillTaskStatus : "FAILED") : execution.status');
   });
 
   it('STEP 4: the Windmill (EXTERNAL_ACTION) gate is preserved byte-for-byte; COMPUTE nodes deliberately get a different, receipt-free gate — they are no longer "the exact same gate" by design, not by accident', () => {

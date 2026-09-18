@@ -3,6 +3,7 @@ import {
   Server, RefreshCw, Loader2, AlertTriangle, ChevronDown, ChevronRight,
   Box, FileCheck, ExternalLink, XCircle, CheckCircle2, Clock, RotateCw
 } from 'lucide-react';
+import { TaskStatusBadge, RetrievalBadge } from './verification/outcome';
 
 // ---------------------------------------------------------------------------
 // EXTERNAL EXECUTIONS — a product surface over the EXISTING external execution
@@ -40,6 +41,9 @@ interface ExternalExecution {
   result_artifact_id: string | null;
   result_receipt_id: string | null;
   created_at: string;
+  /** The ingested SynthOS task's status — the verdict, as opposed to the remote runtime's. */
+  task_status?: string | null;
+  artifact_retrieval?: { status: string; reason: string | null; at: string | null } | null;
 }
 
 interface ExternalExecutionsViewProps {
@@ -258,6 +262,13 @@ export const ExternalExecutionsView: React.FC<ExternalExecutionsViewProps> = ({ 
                     <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-[#141628] text-[10px]">
                       <Ref icon={Box} label="Artifact" value={e.result_artifact_id} />
                       <Ref icon={FileCheck} label="Receipt" value={e.result_receipt_id} />
+                      {e.task_id && (
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="text-[#6A7097]">SynthOS verdict:</span>
+                          <TaskStatusBadge status={e.task_status} />
+                          {e.artifact_retrieval && <RetrievalBadge retrieval={e.artifact_retrieval} />}
+                        </span>
+                      )}
                     </div>
                   </div>
                 )}

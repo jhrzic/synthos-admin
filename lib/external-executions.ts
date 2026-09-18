@@ -43,6 +43,8 @@ import * as antigravityClient from './antigravity-client';
 import { guardedPaidCall, settleAsyncUsage } from './spend/guard';
 import { getSpendPolicy } from './spend/policy';
 import { getApproval } from './approvals';
+import { runScopedAegis, receiptOutcomeFields, commitContentFailure, isContentFailure, externalRuntimeTermination } from './fabric/scoped-verification';
+import { normalizeOutputContract } from './fabric/output-contract';
 import { checkGuardianRules } from './kil-gate';
 
 // ---------------------------------------------------------------------------
@@ -376,6 +378,13 @@ export async function submitExternalExecution(params: SubmitExternalExecutionPar
     if (existing) return { execution: existing, created: false };
   }
 
+  // A declared output contract must be valid before anything is dispatched.
+  // It travels in the stored input and is enforced at ingestion.
+  const declaredContract = normalizeOutputContract((params.input || {}).outputContract);
+  if (!declaredContract.ok) {
+    throw Object.assign(new Error(declaredContract.error), { code: 'INVALID_INPUT' });
+  }
+
   // Per-runtime pre-flight. Both branches produce the same three values —
   // the target row id (null where a runtime has no local registry), the
   // remote path, and its kind — so everything below this point is
@@ -620,7 +629,7 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
     recordActivityEvent({ taskId, eventType: 'EXECUTION_RESULT_RECEIVED', agentId: runtime, payload: { status: 'RUNNING', remoteJobId: existing.remote_job_id, correlationId: existing.correlation_id } });
   }
 
-  recordActivityEvent({ taskId, eventType: 'PROVIDER_COMPLETED', agentId: runtime, payload: { model: `${runtime}:${existing.remote_path}`, runtime, outputLength: resultText.length, truncated: resultTruncated, ...runtimeEvidence } });
+  recordActivityEvent({ taskId, eventType: 'PROVIDER_COMPLETED', agentId: runtime, payload: { model: `${runtime}:${existing.remote_path}`, runtime, outputLength: resultText.length, truncated: resultTruncated, termination: externalRuntimeTermination({ runtime, ledgerStatus: existing.status, resultTruncated }), ...runtimeEvidence } });
 
   // STEP 3 — the canonical Vault writer (lib/vault.ts), the same one
   // lib/fabric/kernel.ts's SUCCESS path uses. This replaces a direct
@@ -664,7 +673,16 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
   });
 
   updateTaskStatus(taskId, 'AWAITING_VERIFICATION');
-  const aegisResult = runDeterministicAegisVerification(taskId, resultText);
+  // SCOPED AEGIS. Termination comes from the shared mapper (a result cut at
+  // SynthOS's byte ceiling is INCOMPLETE). The output contract is the one
+  // stored with the execution's input and validated at submit.
+  const contract = normalizeOutputContract((existing.input_json ? JSON.parse(existing.input_json) : {}).outputContract);
+  const scoped = runScopedAegis({
+    taskId, output: resultText,
+    termination: externalRuntimeTermination({ runtime, ledgerStatus: existing.status, resultTruncated }),
+    contract: contract.ok ? contract.contract : { mode: 'NARRATIVE' },
+  });
+  const aegisResult = scoped.review;
   const persistedReview = recordQualityReview({
     taskId, reviewer: aegisResult.reviewer, method: aegisResult.method, score: aegisResult.score,
     decision: aegisResult.decision, checks: aegisResult.checks, evidence: aegisResult.evidence, createdAt: nowIso,
@@ -686,7 +704,7 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
       // a cryptographically signed record.
       assignedAgent: runtime, provider: runtime, modelUsed: existing.remote_path,
       artifactId: persistedArtifact.artifact_id, artifactHash: persistedArtifact.content_hash,
-      aegisDecision: aegisResult.decision, aegisMethod: aegisResult.method, createdAt: nowIso,
+      aegisDecision: aegisResult.decision, aegisMethod: aegisResult.method, ...receiptOutcomeFields(scoped.content), createdAt: nowIso,
     };
     const canonicalPayloadStr = canonicalizePayload(canonicalPayload);
     const { signature, publicKeyPem, algorithm, fingerprint } = signReceiptPayload(canonicalPayloadStr);
@@ -720,6 +738,19 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
       updateTaskStatus(taskId, 'FAILED');
       recordActivityEvent({ taskId, eventType: 'RECEIPT_VERIFICATION_FAILED', agentId: 'guardian', payload: { reviewId: persistedReview.review_id }, createdAt: nowIso });
     }
+  } else if (isContentFailure(scoped.content)) {
+    // Integrity passed, content did not (truncated / wrong literal / bad
+    // JSON): the shared failure branch — audit receipt stating the outcome,
+    // artifact quarantined, terminal INCOMPLETE / VERIFICATION_FAILED.
+    //
+    // The audit receipt is linked to the TASK (getTaskReceipts), never written
+    // to result_receipt_id: that column means "SynthOS verified this result",
+    // and graph nodes, skill execution, the development loop and the
+    // Antigravity status surface all read its presence as exactly that.
+    commitContentFailure({
+      taskId, workspaceId, reviewId: persistedReview.review_id, scoped, artifact: persistedArtifact,
+      identity: { assignedAgent: runtime, provider: runtime, modelUsed: existing.remote_path }, nowIso,
+    });
   } else {
     // F4/rule 15 — a remote runtime succeeding never implies SynthOS
     // verification. This is the load-bearing rule for Antigravity too: it
@@ -1153,7 +1184,9 @@ export function syncOrchestratedTaskForExecution(execution: ExternalExecutionRec
 
     if (execution.result_ingested_at) {
       // Ingestion already drove the task to DONE (Aegis VERIFIED + receipt) or
-      // FAILED (Aegis refused, or the receipt did not verify).
+      // a terminal failure: FAILED (Aegis refused, or the receipt did not
+      // verify), INCOMPLETE or VERIFICATION_FAILED (scoped content failure).
+      // Only DONE settles the claim as DONE.
       const row = getDatabase().prepare('SELECT status FROM tasks WHERE task_id = ?').get(taskId) as { status: string } | undefined;
       const done = row?.status === 'DONE';
       settleOrchestrationClaimForTask(workspaceId, taskId, done ? 'DONE' : 'FAILED');

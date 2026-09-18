@@ -54,9 +54,13 @@ export async function generateViaGemini(params: GenerateViaGeminiParams): Promis
   if (!m) return { output, modelUsed, providerUsageMetadata, hadProviderError: true, lastProviderError: 'No model was selected for this Gemini call.' };
 
   try {
+    // GEMINI_BASE_URL — optional gateway / test-double override, same contract
+    // as OPENAI_BASE_URL. lib/spend/network-guard.ts treats its host as paid,
+    // so an override can never route around the spend guard.
+    const baseUrl = (process.env.GEMINI_BASE_URL || '').trim();
     const ai = new GoogleGenAI({
       apiKey,
-      httpOptions: { headers: { "User-Agent": "aistudio-build" } },
+      httpOptions: { headers: { "User-Agent": "aistudio-build" }, ...(baseUrl ? { baseUrl } : {}) },
     });
     const resp = await guardedGeminiGenerate(ai, { model: m, contents, config: { temperature: 0.2 } }, params.spend);
     termination = geminiTermination(resp, outputCeiling(params.spend));
