@@ -19,6 +19,9 @@
 // test/scheduler.test.ts.
 // ---------------------------------------------------------------------------
 
+import { isDraining, beginDraining, waitForNoExecutions, inFlightExecutions } from '../runtime-lifecycle';
+import { settleInterruptedAtShutdown, type ShutdownSettlement } from '../continuity/orphans';
+import { recordRuntimeEvent } from '../runtime-events';
 import crypto from 'node:crypto';
 import {
   createSchedule,
@@ -413,6 +416,83 @@ export async function runExternalExecutionReconciliation(nowIso: string = new Da
 
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
 
+// ---------------------------------------------------------------------------
+// TICK MODULES ARE LOADED ONCE, AND EVERY TICK AWAITS THAT ONE LOAD.
+//
+// The tick reaches several modules lazily (dynamic import) because they sit
+// on real import cycles back to this file (scheduler → orchestrator →
+// envelope → scheduler; scheduler → registry → runtime-status → scheduler).
+// Issuing a NEW import() on every tick was the defect behind
+// "Cannot access 'health' before initialization": while the first import of
+// the orchestrator was still loading its graph, a later tick imported it
+// again; the module runner saw the cycle and handed that tick the module's
+// UNFINISHED exports — a hoisted function whose module-level `const health`
+// had not run yet. One shared promise per module means no tick can observe a
+// module before its single evaluation completes. A load that fails stays
+// failed (the rejection is kept), so every tick reports it — fail closed,
+// never silently retried into a half-initialised module.
+// ---------------------------------------------------------------------------
+const tickModules = new Map<string, Promise<any>>();
+function loadTickModule<T>(key: string, load: () => Promise<T>): Promise<T> {
+  let p = tickModules.get(key) as Promise<T> | undefined;
+  if (!p) { p = load(); tickModules.set(key, p); }
+  return p;
+}
+
+// Every promise chain a tick starts is tracked until it settles, so a drain
+// can wait for the scheduler's own background work (orchestrated tasks,
+// scheduled envelopes, reconciliation) instead of exiting underneath it.
+const tickWork = new Set<Promise<unknown>>();
+function trackTick(p: Promise<unknown>): void {
+  tickWork.add(p);
+  p.finally(() => tickWork.delete(p)).catch(() => {});
+}
+
+export interface DrainReport {
+  startedAt: string;
+  finishedAt: string;
+  timeoutMs: number;
+  settledWithinTimeout: boolean;
+  outstandingAtTimeout: Array<{ taskId: string; kind: string; startedAt: string }>;
+  settlement: ShutdownSettlement;
+}
+
+/**
+ * THE drain, called by the service's shutdown path. In order:
+ *   1. DRAINING (lifecycle flag + an appended SERVICE_LIFECYCLE event) —
+ *      from here the kernel starts no task, the orchestrator claims none,
+ *      the spend guard sends no request and this scheduler neither ticks
+ *      nor re-arms;
+ *   2. stop the timer;
+ *   3. wait — bounded by timeoutMs — for the tick's own work and for every
+ *      execution already in flight;
+ *   4. settle whatever did not finish, durably and from evidence
+ *      (settleInterruptedAtShutdown): never-sent reservations released,
+ *      sent-but-unanswered calls UNKNOWN (never retried), interrupted tasks
+ *      resumable or RECONCILING;
+ *   5. an appended DRAINED event with the report.
+ * Only then may the process exit.
+ */
+export async function drainAndSettle(opts: { timeoutMs: number; actor: string; processStartedAt?: string }): Promise<DrainReport> {
+  const startedAt = new Date().toISOString();
+  beginDraining(opts.actor);
+  try { recordRuntimeEvent({ eventType: 'SERVICE_LIFECYCLE', targetType: 'service', targetId: 'synthos-admin', status: 'RUNNING', detail: { state: 'DRAINING', actor: opts.actor, inFlight: inFlightExecutions() } }); } catch { /* evidence only */ }
+  stopScheduler();
+  const deadline = Date.now() + Math.max(0, opts.timeoutMs);
+  const ticks = Promise.allSettled([...tickWork]);
+  const execs = waitForNoExecutions(Math.max(0, opts.timeoutMs));
+  const all = await Promise.race([
+    Promise.all([ticks, execs]).then(([, e]) => e),
+    new Promise<{ settled: boolean; outstanding: ReturnType<typeof inFlightExecutions> }>((r) => setTimeout(() => r({ settled: false, outstanding: inFlightExecutions() }), Math.max(0, deadline - Date.now()))),
+  ]);
+  const outstanding = inFlightExecutions();
+  const settlement = settleInterruptedAtShutdown({ actor: opts.actor, processStartedAt: opts.processStartedAt });
+  const report: DrainReport = { startedAt, finishedAt: new Date().toISOString(), timeoutMs: opts.timeoutMs, settledWithinTimeout: all.settled && outstanding.length === 0, outstandingAtTimeout: outstanding, settlement };
+  try { recordRuntimeEvent({ eventType: 'SERVICE_LIFECYCLE', targetType: 'service', targetId: 'synthos-admin', status: report.settledWithinTimeout ? 'SUCCESS' : 'TIMEOUT', detail: { state: 'DRAINED', ...report } }); } catch { /* evidence only */ }
+  return report;
+}
+
+
 /**
  * How often the model catalog is refreshed from provider metadata. Provider
  * line-ups move on the order of weeks, so six hours is frequent enough to
@@ -456,6 +536,10 @@ export interface SchedulerHealth {
   startedAt: string | null;
   /** Ticks that have begun since this process started. */
   ticks: number;
+  /** Ticks that fired while the service was DRAINING and therefore claimed nothing. */
+  drainRefusedTicks: number;
+  /** RUNNING or DRAINING (lib/runtime-lifecycle.ts), read live. */
+  lifecycle: 'RUNNING' | 'DRAINING';
   /** When the most recent tick began — null until one has. */
   lastTickAt: string | null;
   /** Schedules dispatched by the most recent successfully completed tick. */
@@ -487,6 +571,8 @@ const schedulerHealth: SchedulerHealth = {
   intervalMs: null,
   startedAt: null,
   ticks: 0,
+  drainRefusedTicks: 0,
+  lifecycle: 'RUNNING',
   lastTickAt: null,
   lastTickProcessed: null,
   tickErrors: 0,
@@ -506,7 +592,7 @@ const schedulerHealth: SchedulerHealth = {
 
 /** The scheduler's real, recorded liveness in this process. Never a configuration read. */
 export function getSchedulerHealth(): SchedulerHealth {
-  return { ...schedulerHealth, lastTickError: schedulerHealth.lastTickError ? { ...schedulerHealth.lastTickError } : null };
+  return { ...schedulerHealth, lifecycle: isDraining() ? 'DRAINING' : 'RUNNING', lastTickError: schedulerHealth.lastTickError ? { ...schedulerHealth.lastTickError } : null };
 }
 
 /** Test-only reset so one file's counters can't leak into another's assertions. */
@@ -515,6 +601,7 @@ export function resetSchedulerHealthForTests(): void {
   schedulerHealth.intervalMs = null;
   schedulerHealth.startedAt = null;
   schedulerHealth.ticks = 0;
+  schedulerHealth.drainRefusedTicks = 0;
   schedulerHealth.lastTickAt = null;
   schedulerHealth.lastTickProcessed = null;
   schedulerHealth.tickErrors = 0;
@@ -532,10 +619,15 @@ export function resetSchedulerHealthForTests(): void {
 /** Registers the ONE real in-process poll loop for schedules. Idempotent — calling twice does not start a second timer. */
 export function startScheduler(intervalMs = 10000): void {
   if (schedulerTimer) return;
+  // A draining service never re-arms: it is on its way out.
+  if (isDraining()) return;
   schedulerTimer = setInterval(() => {
+    // DRAINING: claim no new work. (stopScheduler also clears the timer; this
+    // covers a tick already queued when the drain began.)
+    if (isDraining()) { schedulerHealth.drainRefusedTicks += 1; return; }
     schedulerHealth.ticks += 1;
     schedulerHealth.lastTickAt = new Date().toISOString();
-    runDueSchedules()
+    trackTick(runDueSchedules()
       .then((result) => {
         schedulerHealth.lastTickProcessed = result.processed;
       })
@@ -544,7 +636,7 @@ export function startScheduler(intervalMs = 10000): void {
         schedulerHealth.lastTickError = { at: new Date().toISOString(), message: err?.message || String(err) };
         // eslint-disable-next-line no-console
         console.error('[scheduler] tick failed:', err);
-      });
+      }));
 
     // NO-COPY/PASTE ORCHESTRATION — the third thing this ONE timer drives.
     //
@@ -577,27 +669,27 @@ export function startScheduler(intervalMs = 10000): void {
     // SPEND — crash recovery for the usage ledger. A synchronous paid call left
     // in flight by a process that died becomes UNKNOWN (never auto-retried),
     // freeing its concurrency slot. One UPDATE; no provider call.
-    import('../spend/ledger')
+    trackTick(loadTickModule('spend/ledger', () => import('../spend/ledger'))
       .then((m) => m.reconcileStaleUsage())
-      .catch(() => { /* bookkeeping must never stop scheduled work */ });
+      .catch(() => { /* bookkeeping must never stop scheduled work */ }));
 
     // CONTINUITY — paused tasks whose condition cleared go back to READY (a
     // routing preview; nothing dispatched here). ROUTE REFRESH — metadata
     // only, and a no-op unless an operator switched it on (OFF by default).
-    import('../continuity/resume')
+    trackTick(loadTickModule('continuity/resume', () => import('../continuity/resume'))
       .then((m) => m.continuityTickForScheduler())
-      .catch(() => { /* bookkeeping must never stop scheduled work */ });
-    import('../registry/route-import')
+      .catch(() => { /* bookkeeping must never stop scheduled work */ }));
+    trackTick(loadTickModule('registry/route-import', () => import('../registry/route-import'))
       .then((m) => m.routeRefreshTickForScheduler())
-      .catch(() => { /* a refresh failure marks the route STALE; it never stops the tick */ });
+      .catch(() => { /* a refresh failure marks the route STALE; it never stops the tick */ }));
 
     // AUTHORITY RECORD — sign each moved workspace's chain head at most once a
     // day (throttled to one sweep an hour). Local database work only.
-    import('../authority-ledger')
+    trackTick(loadTickModule('authority-ledger', () => import('../authority-ledger'))
       .then((m) => m.authorityTickForScheduler())
-      .catch(() => { /* bookkeeping must never stop scheduled work */ });
+      .catch(() => { /* bookkeeping must never stop scheduled work */ }));
 
-    import('./orchestrator')
+    trackTick(loadTickModule('orchestrator', () => import('./orchestrator'))
       .then((m) => m.orchestrationTickForScheduler())
       .then((result) => {
         if (result) {
@@ -610,13 +702,13 @@ export function startScheduler(intervalMs = 10000): void {
         schedulerHealth.lastOrchestrationError = { at: new Date().toISOString(), message: err?.message || String(err) };
         // eslint-disable-next-line no-console
         console.error('[orchestration] tick failed:', err);
-      });
+      }));
 
     // Separate promise chain on purpose. A provider outage during
     // reconciliation must not be recorded as a SCHEDULER failure, and must
     // not stop scheduled work from dispatching — the two share this timer
     // and nothing else.
-    runExternalExecutionReconciliation()
+    trackTick(runExternalExecutionReconciliation()
       .then((result) => {
         schedulerHealth.lastReconcileAt = new Date().toISOString();
         schedulerHealth.lastReconcileConsidered = result.considered;
@@ -626,7 +718,7 @@ export function startScheduler(intervalMs = 10000): void {
         schedulerHealth.lastReconcileError = { at: new Date().toISOString(), message: err?.message || String(err) };
         // eslint-disable-next-line no-console
         console.error('[reconcile] sweep failed:', err);
-      });
+      }));
   }, intervalMs);
   schedulerTimer.unref?.();
   schedulerHealth.running = true;
