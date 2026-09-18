@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { appendReceiptToLedger } from './authority-ledger';
 import path from 'node:path';
 import crypto from 'node:crypto';
 // @ts-ignore
@@ -2919,6 +2920,15 @@ export function recordReceipt(params: {
     params.signature,
     nowIso
   );
+
+  // Chain every receipt into the workspace's tamper-evident authority record.
+  appendReceiptToLedger({
+    receiptId,
+    taskId: params.taskId,
+    payloadJson: params.payloadJson,
+    signature: params.signature,
+    recordedAt: nowIso,
+  });
 
   return {
     receipt_id: receiptId,

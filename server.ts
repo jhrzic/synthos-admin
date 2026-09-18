@@ -125,6 +125,7 @@ import { getWorkspaceOverview } from "./lib/overview";
 import { buildEnvReadinessReport, buildStartupSummary } from "./lib/env-readiness";
 import { rateLimit, byIp, byUserOrIp } from "./lib/rate-limit";
 import { registerPublicVisibilityCheck } from "./lib/aeo/public-check";
+import { registerAuthorityRoutes } from "./lib/authority-routes";
 import * as windmillClient from "./lib/windmill-client";
 import {
   listVisibleWindmillTargets, listPlatformWindmillTargets, resolveWindmillTarget,
@@ -3661,6 +3662,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
 
   // Free "visible in AI answers?" check — top of the audit funnel. Own daily caps inside.
   registerPublicVisibilityCheck(app, rateLimit("EXPENSIVE_EXECUTION", byIp, "public-visibility-check"), byIp);
+  registerAuthorityRoutes(app);
 
   app.get("/api/public/assistant/:publicKey", rateLimit("GENERAL_API", byIp, "public-assistant"), (req, res) => {
     const profile = getProfileByPublicKey(String(req.params.publicKey));
