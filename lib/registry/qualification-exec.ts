@@ -34,6 +34,7 @@ import { credentialForTarget } from './index';
 import { runWithRouteContext } from './route-context';
 import { getRun, getSuite, getTaskClass, recordCaseResult, evaluateCase, type CaseResult } from './qualification';
 import { routeTask, requirementsFor } from './router';
+import { approvedSubstance } from './substance';
 import { listUsageForKey } from '../spend/ledger';
 import { verifyContent, type OutputContract } from '../fabric/output-contract';
 import { recordQualityReview, recordReceipt, canonicalizePayload, signReceiptPayload, verifyReceiptSignature, type CanonicalReceiptPayload } from '../persistence';
@@ -60,10 +61,12 @@ export interface CaseEvidence {
   aegisDecision: string | null;
   receiptId: string | null;
   receiptVerified: boolean;
+  /** LOCAL routes: the substance hash the router verified for this case (null for other routes). */
+  substanceHash: string | null;
 }
 
 export type QualificationExecResult =
-  | { ok: true; recorded: number; refused: Array<{ caseId: string; repetition?: number; reason: string; decisionId?: string | null }>; cases: CaseEvidence[]; stoppedOnUnknown: { caseId: string; repetition: number; usageId: string | null; reason: string } | null }
+  | { ok: true; recorded: number; refused: Array<{ caseId: string; repetition?: number; reason: string; decisionId?: string | null }>; cases: CaseEvidence[]; stoppedOnUnknown: { caseId: string; repetition: number; usageId: string | null; reason: string } | null; stoppedOnSubstance?: { caseId: string; repetition: number; reason: string } | null }
   | { ok: false; error: string };
 
 const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
@@ -118,6 +121,12 @@ export async function executeQualificationCases(p: { runId: string; workspaceId:
       if (!sel || sel.providerId !== run.provider_id || sel.modelId !== run.model_id || sel.deploymentId !== run.deployment_id) {
         const codes = [...new Set(decision.candidates.filter((x) => x.providerId === run.provider_id && x.modelId === run.model_id).flatMap((x) => x.disqualified.map((d) => d.code)))];
         refused.push({ caseId: c.caseId, repetition: rep, decisionId: decision.decisionId, reason: `${decision.outcome}${codes.length ? ` (${codes.join(', ')})` : ''}: ${decision.explanation}` });
+        // A changed or unbound model stops the whole run before any inference.
+        const subCode = codes.find((x) => x.startsWith('MODEL_SUBSTANCE_'));
+        if (subCode) {
+          const why = decision.candidates.find((x) => x.providerId === run.provider_id && x.modelId === run.model_id)?.disqualified.find((d) => d.code === subCode)?.reason ?? subCode;
+          return { ok: true, recorded, refused, cases, stoppedOnUnknown: null, stoppedOnSubstance: { caseId: c.caseId, repetition: rep, reason: `${subCode}: ${why}` } };
+        }
         continue;
       }
 
@@ -132,6 +141,9 @@ export async function executeQualificationCases(p: { runId: string; workspaceId:
       );
       if (gen.spendBlockedCode || /^BLOCKED_BUDGET \(/.test(String(gen.lastProviderError || ''))) {
         refused.push({ caseId: c.caseId, repetition: rep, decisionId: decision.decisionId, reason: String(gen.lastProviderError) });
+        if (/MODEL_SUBSTANCE_/.test(String(gen.spendBlockedCode || gen.lastProviderError))) {
+          return { ok: true, recorded, refused, cases, stoppedOnUnknown: null, stoppedOnSubstance: { caseId: c.caseId, repetition: rep, reason: String(gen.lastProviderError) } };
+        }
         continue;
       }
       const row: any = listUsageForKey(key).pop() ?? null;
@@ -150,6 +162,7 @@ export async function executeQualificationCases(p: { runId: string; workspaceId:
         { check: 'integrity:ledger_names_decision', ok: row?.routing_decision_id === decision.decisionId, evidence: `routing_decision_id ${row?.routing_decision_id ?? 'none'}` },
         { check: 'integrity:ledger_names_run', ok: row?.correlation_id === p.runId, evidence: `correlation_id ${row?.correlation_id ?? 'none'}` },
         ...(local ? [localZeroCostCheck(row)] : []),
+        ...(body.routeKind === 'LOCAL' ? [(() => { const a = approvedSubstance(run.provider_id, run.model_id); const ok = !!sel.substanceHash && !!a && sel.substanceHash === a.hash; return { check: 'integrity:substance_verified', ok, evidence: `decision substance ${sel.substanceHash ?? 'none'}; approved ${a?.hash ?? 'none'}` }; })()] : []),
       ];
       const integrityOk = integrityChecks.every((x) => x.ok);
       const scored = output ? evaluateCase(c.check, output) : { pass: false, detail: 'no output' };
@@ -180,7 +193,8 @@ export async function executeQualificationCases(p: { runId: string; workspaceId:
         aegisDecision, aegisMethod: QUALIFICATION_METHOD,
         outcome: verified ? 'COMPLETED' : !integrityOk ? 'INTEGRITY_FAILED' : term.status !== 'COMPLETE' ? 'INCOMPLETE' : 'VERIFICATION_FAILED',
         verificationScope: `${content.scopeStatement}; suite_check=${compliant ? 'PASS' : 'FAIL'}`,
-        registryProviderId: run.provider_id, canonicalModelId: run.model_id, priceVersion: row?.price_version ?? null,
+        registryProviderId: run.provider_id, canonicalModelId: run.model_id, canonicalVersionId: run.canonical_version_id ?? null, priceVersion: row?.price_version ?? null,
+        substanceHash: sel.substanceHash ?? null, deploymentId: run.deployment_id,
         routingDecisionId: decision.decisionId, qualificationRunId: p.runId, caseId: c.caseId, repetition: rep,
         usageId: row?.usage_id ?? null, providerRequestId: row?.provider_request_id ?? null, termination: `${term.status}:${term.providerStatus ?? ''}`,
         createdAt: nowIso,
@@ -204,9 +218,10 @@ export async function executeQualificationCases(p: { runId: string; workspaceId:
         usageId: row?.usage_id ?? null, costUsd: row ? Number(row.actual_cost_usd ?? row.estimated_cost_usd) : null, providerRequestId: row?.provider_request_id ?? null,
         termination: `${term.status}:${term.providerStatus ?? ''}`, output: output || null, pass: verified,
         reviewId: review.review_id, aegisDecision, receiptId: receiptVerified ? receiptId : null, receiptVerified,
+        substanceHash: sel.substanceHash ?? null,
       });
     }
   }
-  return { ok: true, recorded, refused, cases, stoppedOnUnknown: null };
+  return { ok: true, recorded, refused, cases, stoppedOnUnknown: null, stoppedOnSubstance: null };
 }
 

@@ -39,6 +39,7 @@ import { credentialReadiness, resolveProviderCredential } from './credentials';
 import { semverGte, validateManifest, modelSubstanceHash, modelRecordHash } from './schema';
 import { getSpendPolicy } from '../spend/policy';
 import { routeIdentity, deploymentsOf } from './identity';
+import { verifyRouteSubstance } from './substance';
 import { resolveTaskClass, findQualification, getRun as getQualificationRun } from './qualification';
 import type { RouteContext } from './route-context';
 import { resolveProviderState } from '../provider-state';
@@ -307,6 +308,12 @@ export function registryGate(providerId: string, modelId: string, ctx: Execution
   if (!identity.resolved) {
     return { ok: false, code: 'ROUTE_MAPPING_UNRESOLVED', reason: `${providerId}/${modelId}'s canonical version is ${identity.status}${identity.reason ? ` (${identity.reason})` : ''}; nothing was sent.` };
   }
+  // LOCAL SUBSTANCE — re-verified at the last gate before every dispatch
+  // (qualification and production): a mutable tag never carries its approval
+  // to different weights. Refused here, nothing is sent.
+  const body0 = getStoredProvider(providerId)!.manifest.provider;
+  const sub = verifyRouteSubstance(providerId, modelId, (body0.routeKind ?? 'DIRECT') === 'LOCAL');
+  if (sub.required && !sub.ok) return { ok: false, code: sub.code, reason: `${sub.reason}; nothing was sent.` };
   const route = ctx.route ?? null;
   const deploymentId = route?.deploymentId ?? null;
   if (deploymentId) {

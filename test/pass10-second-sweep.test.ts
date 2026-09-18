@@ -79,7 +79,7 @@ describe('Pass X second sweep: MasterAdminView Guardian/Aegis badges are never h
   });
 
   it('reads the real diagnostics.guardian.status / diagnostics.aegis.status fields instead', () => {
-    expect(content).toContain('diagnostics?.guardian.status');
+    expect(content).toContain('diagnostics?.guardian?.status');
     expect(content).toContain('diagnostics?.aegis.status');
   });
 

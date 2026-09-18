@@ -31,6 +31,7 @@ process.env.MCP_CREDENTIAL_ENCRYPTION_KEY = 'l'.repeat(64);
 
 import { isolateVaultForTest } from './helpers/isolated-vault';
 isolateVaultForTest('local-qualification');
+import { writeOllamaModel, ollamaTagsBody } from './helpers/ollama-fixture';
 
 import { getDatabase, verifyReceipt } from '../lib/persistence';
 import { ensureWorkspace } from '../lib/workspaces';
@@ -57,6 +58,7 @@ type Mode = 'echo' | 'wrong-on-2' | 'hang';
 let mode: Mode = 'echo';
 let requests: Array<{ method: string; url: string; auth: string | undefined; body: any }> = [];
 let server: http.Server;
+let tagsRequests = 0;
 let base = '';
 
 function answer(content: string): string {
@@ -72,6 +74,8 @@ beforeAll(async () => {
     let raw = '';
     req.on('data', (c) => (raw += c));
     req.on('end', () => {
+      // The substance runtime check (metadata only) — counted apart from inference.
+      if (req.method === 'GET' && req.url === '/api/tags') { tagsRequests += 1; res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(ollamaTagsBody([MODEL])); }
       let body: any = null; try { body = raw ? JSON.parse(raw) : null; } catch {}
       requests.push({ method: req.method || '', url: req.url || '', auth: req.headers.authorization, body });
       if (req.method === 'GET' && req.url === '/v1/models') {
@@ -175,7 +179,9 @@ describe('metadata import, identity and price — nothing runs until each is app
     ensureRegistry();
     const publisherVersion = (getDatabase().prepare("SELECT canonical_version_id FROM registry_versions WHERE defined_by LIKE 'route:%' LIMIT 1").get() as any)?.canonical_version_id;
     if (publisherVersion) expect(approveRouteMapping({ providerId: LOC, modelId: MODEL, canonicalVersionId: publisherVersion, actor: 'operator' })).toMatchObject({ ok: false, error: expect.stringMatching(/cannot claim/) });
-    expect(approveRouteMapping({ providerId: LOC, modelId: MODEL, canonicalVersionId: 'qwen/qwen2.5-coder-14b', family: { familyId: 'qwen2.5-coder', displayName: 'Qwen2.5-Coder', publisher: 'qwen' }, actor: 'operator', evidence: { ollamaManifestDigest: 'sha256:test' } }).ok).toBe(true);
+    // A local mapping must bind substance; without it, it is refused.
+    expect(approveRouteMapping({ providerId: LOC, modelId: MODEL, canonicalVersionId: 'qwen/qwen2.5-coder-14b', family: { familyId: 'qwen2.5-coder', displayName: 'Qwen2.5-Coder', publisher: 'qwen' }, actor: 'operator' })).toMatchObject({ ok: false, error: expect.stringMatching(/must bind a substance/) });
+    expect(approveRouteMapping({ providerId: LOC, modelId: MODEL, canonicalVersionId: 'qwen/qwen2.5-coder-14b', family: { familyId: 'qwen2.5-coder', displayName: 'Qwen2.5-Coder', publisher: 'qwen' }, actor: 'operator', substance: writeOllamaModel(MODEL) }).ok).toBe(true);
     expect(routeIdentity(LOC, MODEL)).toMatchObject({ resolved: true, canonicalVersionId: 'qwen/qwen2.5-coder-14b' });
     // Admitted (record + price reviewed), NOT enabled for production.
     expect(qualifyModel(LOC, MODEL, 'operator').ok).toBe(true);

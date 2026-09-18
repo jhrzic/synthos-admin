@@ -155,8 +155,8 @@ export const CanonicalReceiptsView: React.FC<CanonicalReceiptsViewProps> = ({ ac
           </div>
           <div className="p-3 bg-[#05060C] border border-[#161828] rounded-xl">
             <span className="text-[10px] text-[#6A7097] uppercase tracking-wider block">Algorithm</span>
-            <span className="text-base font-extrabold text-[#38BDF8] mt-0.5 block inline-flex items-center gap-1.5">
-              <Key className="w-3.5 h-3.5" /> {receipts[0]?.algorithm || 'Ed25519'}
+            <span className="text-base font-extrabold text-[#38BDF8] mt-0.5 block inline-flex items-center gap-1.5" data-testid="receipts-algorithm">
+              <Key className="w-3.5 h-3.5" /> {receipts[0]?.algorithm || 'UNKNOWN'}
             </span>
           </div>
         </div>
@@ -278,7 +278,7 @@ export const CanonicalReceiptsView: React.FC<CanonicalReceiptsViewProps> = ({ ac
 
                     <div className="space-y-2 pt-2 border-t border-[#141628]">
                       <Mono label="Artifact Hash" icon={Hash} value={r.payload.artifactHash} />
-                      <Mono label={`Signature (${r.algorithm})`} icon={Key} value={r.signature} />
+                      <Mono label={`Signature (${r.algorithm || 'UNKNOWN'})`} icon={Key} value={r.signature} />
                       <Mono label="Signing Public Key" icon={Key} value={r.public_key} />
                     </div>
 

@@ -13,6 +13,7 @@
 // back to another model.
 // ---------------------------------------------------------------------------
 
+import { approvedSubstance, verifyRuntimeResolves, recordSubstanceChange } from './substance';
 import { geminiTermination, openAiTermination, type ProviderTermination } from '../fabric/output-contract';
 import { normalizeGeminiUsage, normalizeOpenAiUsage, guardedPaidCall, type NormalizedUsage } from '../spend/guard';
 import { outputCeiling, requestKey, type SpendContext } from '../spend/adapters';
@@ -145,6 +146,22 @@ async function chatCompletionsCall(p: ModelCallParams): Promise<ModelCallResult>
   const maxOutputTokens = outputCeiling(p.spend);
   const timeoutMs = p.timeoutMs ?? 60_000;
   const out: ModelCallResult = { output: '', modelUsed: null, providerUsageMetadata: null, hadProviderError: false, lastProviderError: null, termination: NOT_REPORTED, latencyMs: null };
+  // LOCAL routes: before anything is sent, the running runtime must resolve
+  // the tag to the approved manifest digest (metadata GET; no inference).
+  const localSub = (() => { try { return (getStoredProvider(p.providerId)?.manifest.provider.routeKind ?? 'DIRECT') === 'LOCAL' ? approvedSubstance(p.providerId, p.modelId) : null; } catch { return null; } })();
+  if (localSub) {
+    const live = await verifyRuntimeResolves(p.baseUrl, localSub.substance);
+    if (!live.ok) {
+      // A different digest is a changed model (recorded; qualifications invalidated).
+      // An unreachable runtime is not: the call is refused, nothing is invalidated.
+      if (live.kind === 'MISMATCH') recordSubstanceChange(p.providerId, p.modelId, localSub.hash, `runtime:${live.reason.slice(0, 80)}`, [`runtime: ${live.reason}`], null);
+      const code = live.kind === 'MISMATCH' ? 'MODEL_SUBSTANCE_CHANGED' : 'LOCAL_RUNTIME_UNVERIFIED';
+      out.hadProviderError = true;
+      out.spendBlockedCode = code;
+      out.lastProviderError = `BLOCKED_BUDGET (${code}): the running local runtime could not be confirmed to serve the approved ${p.modelId} (${live.reason}); nothing was sent.`;
+      return out;
+    }
+  }
   const r = await guardedPaidCall({
     provider: p.providerId, model: p.modelId, callSite: p.spend.callSite,
     workspaceId: p.spend.workspaceId ?? null, taskId: p.spend.taskId ?? null, correlationId: p.spend.correlationId ?? null,

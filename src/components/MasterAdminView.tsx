@@ -119,6 +119,7 @@ interface LiveDiagnostics {
     mode: string;
     receiptsCount: number;
     signingAlgorithm: string;
+    receiptAlgorithms?: Record<string, number>;
   };
   graphRuntime: {
     status: 'LIVE' | 'PARTIAL' | 'NOT_CONNECTED';
@@ -1318,7 +1319,7 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
                   {/* Pass X / Workstream A2 — this badge was hardcoded 'LIVE' unconditionally.
                       diagnostics.guardian.status is real (Pass V derived it from the real
                       quality_reviews table); use it instead of a claim with no backing. */}
-                  {getStatusBadge(diagnostics?.guardian.status ?? 'PARTIAL')}
+                  {getStatusBadge(diagnostics?.guardian?.status ?? 'PARTIAL')}
                 </div>
                 <p className="text-slate-400 text-[11px]">{diagnostics?.guardian.reviewsCount ?? 0} Quality Reviews Recorded</p>
               </div>
@@ -2043,7 +2044,7 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
               </p>
             </div>
             {/* Pass X / Workstream A2 — previously hardcoded 'LIVE' unconditionally. */}
-            {getStatusBadge(diagnostics?.guardian.status ?? 'PARTIAL')}
+            {getStatusBadge(diagnostics?.guardian?.status ?? 'PARTIAL')}
           </div>
 
           <div className="space-y-3 font-mono text-xs">
@@ -2077,7 +2078,7 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
                 Aegis Deterministic Verifier & Cryptographic Receipts
               </h2>
               <p className="text-xs text-slate-400 mt-0.5">
-                Deterministic post-execution verification and HMAC-SHA256 / SHA-256 cryptographic receipt ledger.
+                Deterministic post-execution verification and a signed receipt ledger ({diagnostics?.aegis.signingAlgorithm || 'UNKNOWN'} signatures, SHA-256 digests).
               </p>
             </div>
             {/* Pass X / Workstream A2 — previously hardcoded 'LIVE' unconditionally. */}
@@ -2094,7 +2095,12 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
             <div className="p-4 bg-[#06070E] border border-[#1A1D34] rounded-xl space-y-2">
               <span className="text-[10px] text-slate-500 uppercase block">Cryptographic Receipt Ledger</span>
               <p className="text-sm font-bold text-white">{diagnostics?.aegis.receiptsCount ?? 0} Signed Receipts</p>
-              <p className="text-slate-400 text-[11px]">Algorithm: {diagnostics?.aegis.signingAlgorithm || 'HMAC-SHA256'}</p>
+              <p className="text-slate-400 text-[11px]" data-testid="aegis-signing-algorithm">Algorithm: {diagnostics?.aegis.signingAlgorithm || 'UNKNOWN'}</p>
+              {diagnostics?.aegis.receiptAlgorithms && Object.keys(diagnostics.aegis.receiptAlgorithms).length > 0 && (
+                <p className="text-slate-500 text-[10px]" data-testid="aegis-receipt-algorithms">
+                  Recorded: {Object.entries(diagnostics.aegis.receiptAlgorithms).map(([alg, n]) => `${alg} × ${n}`).join(' · ')}
+                </p>
+              )}
             </div>
           </div>
         </div>

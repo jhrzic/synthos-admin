@@ -17,6 +17,7 @@
 // approved mapping — fails closed as CONFLICT and needs review.
 // ---------------------------------------------------------------------------
 
+import { validateSubstance, readOllamaSubstance, substanceDiff, substanceHash, ensureSubstanceColumns, type LocalSubstance } from './substance';
 import { getDatabase } from '../persistence';
 import { canonicalJson, sha256 } from './schema';
 import type { DeploymentSpec, ModelManifest, ProviderManifestBody, RouteKind, PrivacyClass } from './types';
@@ -67,6 +68,7 @@ export function ensureIdentityTables(): void {
       PRIMARY KEY (provider_id, deployment_id)
     );
   `);
+  ensureSubstanceColumns();
   ensured = true;
 }
 
@@ -191,6 +193,8 @@ export interface RouteIdentity {
   publisher: string | null;
   reason: string | null;
   resolved: boolean;
+  /** LOCAL routes: hash of the approved substance record (./substance.ts); null otherwise. */
+  substanceHash?: string | null;
 }
 
 export function routeIdentity(providerId: string, modelId: string): RouteIdentity {
@@ -204,6 +208,7 @@ export function routeIdentity(providerId: string, modelId: string): RouteIdentit
     providerId, modelId, status: m.status, canonicalVersionId: m.canonical_version_id ?? null, proposedVersionId: m.proposed_version_id ?? null,
     familyId: v?.family_id ?? null, familyDisplayName: f?.display_name ?? null, publisher: v?.publisher ?? (m.status === 'IMPLICIT_PUBLISHER' ? providerId : null),
     reason: m.reason ?? null, resolved: RESOLVED_MAPPINGS.includes(m.status),
+    substanceHash: m.substance_hash ?? null,
   };
 }
 
@@ -212,7 +217,7 @@ export function routeIdentity(providerId: string, modelId: string): RouteIdentit
  * by the caller. Defines the version when its publisher has not (yet),
  * recording the operator as the definer.
  */
-export function approveRouteMapping(p: { providerId: string; modelId: string; canonicalVersionId: string; family?: { familyId: string; displayName: string; publisher: string } | null; actor: string; evidence?: Record<string, string> | null }): { ok: true } | { ok: false; error: string } {
+export function approveRouteMapping(p: { providerId: string; modelId: string; canonicalVersionId: string; family?: { familyId: string; displayName: string; publisher: string } | null; actor: string; evidence?: Record<string, string> | null; substance?: LocalSubstance | null }): { ok: true; substanceHash: string | null } | { ok: false; error: string } {
   ensureIdentityTables();
   const db = getDatabase();
   const now = new Date().toISOString();
@@ -229,6 +234,22 @@ export function approveRouteMapping(p: { providerId: string; modelId: string; ca
   if (v && kind === 'LOCAL' && String(v.defined_by || '').startsWith('route:')) {
     return { ok: false, error: `${p.canonicalVersionId} is defined by the publisher route ${String(v.defined_by).slice(6)}; a local route cannot claim to be it` };
   }
+  // A LOCAL route binds to immutable substance (./substance.ts): the record
+  // must be supplied, name this route's own tag, and match what is on disk now.
+  let substance: LocalSubstance | null = null;
+  if (kind === 'LOCAL') {
+    if (!p.substance) return { ok: false, error: 'a local route mapping must bind a substance record (manifest, config and weights digests)' };
+    const val = validateSubstance(p.substance);
+    if (!val.ok) return { ok: false, error: val.error };
+    if (val.substance.tag !== p.modelId) return { ok: false, error: `the substance record names ${val.substance.tag}; this route is ${p.modelId}` };
+    const now = readOllamaSubstance(val.substance.tag);
+    if (!now.ok) return { ok: false, error: `the local model cannot be verified: ${now.reason}` };
+    const diff = substanceDiff(val.substance, now.substance);
+    if (diff.length) return { ok: false, error: `the supplied substance does not match the local model now: ${diff.join('; ')}` };
+    substance = val.substance;
+  } else if (p.substance) {
+    return { ok: false, error: 'a substance record binds LOCAL routes only' };
+  }
   if (!v) {
     if (!p.family) return { ok: false, error: 'the version is not defined yet; supply its family to define it' };
     if (!p.canonicalVersionId.startsWith(`${p.family.publisher}/`)) return { ok: false, error: 'the version id must be namespaced by the family publisher' };
@@ -241,10 +262,14 @@ export function approveRouteMapping(p: { providerId: string; modelId: string; ca
     ON CONFLICT(provider_id, model_id) DO UPDATE SET canonical_version_id = excluded.canonical_version_id, proposed_version_id = NULL, status = 'APPROVED',
       reason = excluded.reason, approved_by = excluded.approved_by, approved_at = excluded.approved_at, updated_at = excluded.updated_at`)
     .run(p.providerId, p.modelId, p.canonicalVersionId, p.actor, now, now);
-  // The audited record of who mapped what, on what evidence.
+  ensureSubstanceColumns();
+  const sHash = substance ? substanceHash(substance) : null;
+  db.prepare('UPDATE registry_route_mappings SET substance_json = ?, substance_hash = ? WHERE provider_id = ? AND model_id = ?').run(substance ? JSON.stringify(substance) : null, sHash, p.providerId, p.modelId);
+  // The audited record of who mapped what, on what evidence. Append-only: a
+  // re-approval is a new event; the previous one (and its substance) stays.
   db.prepare(`INSERT INTO registry_events (event_id, event_type, provider_id, model_id, actor, detail_json, created_at) VALUES (?, 'ROUTE_MAPPING_APPROVED', ?, ?, ?, ?, ?)`)
-    .run(`rev-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, p.providerId, p.modelId, p.actor, JSON.stringify({ canonicalVersionId: p.canonicalVersionId, family: p.family ?? null, evidence: p.evidence ?? null }), now);
-  return { ok: true };
+    .run(`rev-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, p.providerId, p.modelId, p.actor, JSON.stringify({ canonicalVersionId: p.canonicalVersionId, family: p.family ?? null, evidence: p.evidence ?? null, substance, substanceHash: sHash }), now);
+  return { ok: true, substanceHash: sHash };
 }
 
 export function listFamiliesAndVersions(): Array<{ familyId: string; displayName: string; publisher: string; versions: Array<{ canonicalVersionId: string; displayName: string; lifecycle: string; releaseDate: string | null; definedBy: string }> }> {

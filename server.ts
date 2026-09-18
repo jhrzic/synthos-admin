@@ -19,6 +19,8 @@ import {
   getTaskReceipts,
   canonicalizePayload,
   signReceiptPayload,
+  RECEIPT_SIGNING_ALGORITHM,
+  receiptAlgorithmLabel,
   verifyReceiptSignature,
   verifyReceipt,
   CanonicalReceiptPayload,
@@ -71,6 +73,7 @@ import { routedModelCall, previewRoutedCall } from "./lib/fabric/routed-call";
 import { getMembership } from "./lib/workspaces";
 import { routeIdentity, listFamiliesAndVersions, approveRouteMapping } from "./lib/registry/identity";
 import { runRouteImport, refreshRoute, listRouteImportStatus, getRouteRefreshSettings, setRouteRefreshSettings } from "./lib/registry/route-import";
+import { readOllamaSubstance, substanceHash } from "./lib/registry/substance";
 import { listTaskClasses, upsertTaskClass, listQualifications, startQualificationRun, recordCaseResult, evaluateRun, approveQualification, revokeQualification, getRun as getQualificationRun } from "./lib/registry/qualification";
 import { executeQualificationCases } from "./lib/registry/qualification-exec";
 import { activePolicy, listPolicies, ROUTING_MODES, getWorkspaceRouting, setWorkspaceRouting, listDecisions } from "./lib/registry/router";
@@ -6849,9 +6852,17 @@ Rules for spokenSummary specifically:
 
   app.post("/api/registry/route-mappings/approve", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-mapping"), (req, res) => {
     const actor = (req as AuthedRequest).authUser!.user_id;
-    const r = approveRouteMapping({ providerId: String(req.body?.providerId || ""), modelId: String(req.body?.modelId || ""), canonicalVersionId: String(req.body?.canonicalVersionId || ""), family: req.body?.family ?? null, actor });
-    registryAudit(req, `${req.body?.providerId}/${req.body?.modelId}`, { action: "ROUTE_MAPPING_APPROVED", canonicalVersionId: req.body?.canonicalVersionId, ok: r.ok, error: r.ok ? null : r.error });
+    // LOCAL routes must bind the substance record the operator reviewed (GET /api/registry/local-substance).
+    const r = approveRouteMapping({ providerId: String(req.body?.providerId || ""), modelId: String(req.body?.modelId || ""), canonicalVersionId: String(req.body?.canonicalVersionId || ""), family: req.body?.family ?? null, substance: req.body?.substance ?? null, actor });
+    registryAudit(req, `${req.body?.providerId}/${req.body?.modelId}`, { action: "ROUTE_MAPPING_APPROVED", canonicalVersionId: req.body?.canonicalVersionId, substanceHash: r.ok ? r.substanceHash : null, ok: r.ok, error: r.ok ? null : r.error });
     return res.status(r.ok ? 200 : 400).json({ success: r.ok, ...(r.ok ? { identity: routeIdentity(String(req.body.providerId), String(req.body.modelId)) } : { error: r.error }) });
+  });
+
+  // The local model's CURRENT substance, read from disk (no inference) — for an operator to review before binding it.
+  app.get("/api/registry/local-substance", requirePlatformAdmin, (req, res) => {
+    const tag = String(req.query.modelId || "");
+    const r = readOllamaSubstance(tag);
+    return res.status(r.ok ? 200 : 404).json(r.ok ? { success: true, substance: r.substance, substanceHash: substanceHash(r.substance) } : { success: false, error: r.reason });
   });
 
   app.get("/api/registry/route-imports", requireWorkspaceMember(fromQuery), (_req, res) => {
@@ -7237,7 +7248,19 @@ Rules for spokenSummary specifically:
           // Pass IV / H: this previously read "HMAC-SHA256 / SHA-256
           // Digest" — the real algorithm (lib/persistence.ts
           // signReceiptPayload/verifyReceipt) is Ed25519.
-          signingAlgorithm: "Ed25519"
+          signingAlgorithm: RECEIPT_SIGNING_ALGORITHM,
+          // What the stored receipts actually record, per algorithm (legacy
+          // rows keep their own; a blank algorithm counts as UNKNOWN).
+          receiptAlgorithms: (() => {
+            try {
+              const out: Record<string, number> = {};
+              for (const r of getDatabase().prepare("SELECT algorithm, COUNT(*) AS n FROM receipts GROUP BY algorithm").all() as Array<{ algorithm: string | null; n: number }>) {
+                const k = receiptAlgorithmLabel(r.algorithm);
+                out[k] = (out[k] ?? 0) + r.n;
+              }
+              return out;
+            } catch { return {}; }
+          })(),
         },
         graphRuntime: {
           status: "PARTIAL",
@@ -7707,7 +7730,7 @@ Rules for spokenSummary specifically:
           step: 7,
           name: "Aegis Verifier & Cryptographic Receipt Ledger",
           status: "PASS",
-          details: "HMAC-SHA256 signature generation and verification certified."
+          details: `${signed.algorithm} signature generation and verification certified.`
         });
       } else {
         results.push({

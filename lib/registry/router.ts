@@ -34,6 +34,7 @@ import { routeIdentity, deploymentsOf, providerBodyForDeployment, privacyRank, r
 import { findQualification, getTaskClass, getRun, type QualificationView } from './qualification';
 import { isRouteStale } from './route-import';
 import { resolveProviderEndpoint } from './endpoints';
+import { verifyRouteSubstance } from './substance';
 import { getProtocolAdapter } from './protocols';
 import { currentPricing, priceVersionKey } from './pricing';
 import { assessCapacity, type CapacityReport } from '../continuity/capacity';
@@ -224,6 +225,8 @@ export interface Candidate {
   estimatedCostUsd: number | null;
   priceVersion: string | null;
   qualificationId: string | null;
+  /** LOCAL routes: the approved substance hash, verified against the model on disk for this decision. */
+  substanceHash?: string | null;
   disqualified: Disqualification[];
   capacity?: { headroom: number; exhausted: string[]; acting: string[] };
   features?: Record<WeightKey, number | null>;
@@ -243,6 +246,9 @@ export interface SelectedRoute {
   priceSnapshot: PricingRecord | null;
   estimatedCostUsd: number | null;
   score: number;
+  /** LOCAL routes: the verified substance record's hash (manifest/config/weights digests). */
+  substanceHash?: string | null;
+  substanceVerifiedAt?: string | null;
 }
 
 export type WaitState = 'PAUSED_AWAITING_BUDGET' | 'PAUSED_AWAITING_CAPACITY' | 'PAUSED_AWAITING_QUALIFIED_CAPACITY' | 'PAUSED_AWAITING_APPROVAL' | null;
@@ -431,6 +437,9 @@ export function routeTask(req: RouteRequest): RoutingDecision {
       // eligible only for agent orchestration, never for ordinary model work.
       const dispatch = getProtocolAdapter(body.protocol)?.dispatch ?? 'NONE';
       if (dispatch === 'EXTERNAL_RUNTIME' && R.taskClass !== 'agent_orchestration') add('ADAPTER_NOT_A_MODEL_CALL', `${body.protocol} is a managed-agent runtime, not a model call`);
+      // LOCAL substance — the model behind a mutable tag must still be the approved one.
+      const sub = verifyRouteSubstance(m.providerId, m.modelId, kind === 'LOCAL');
+      if (sub.required && !sub.ok) add(sub.code, sub.reason);
       // 4. available deployments
       if (dep.status !== 'ACTIVE') add('DEPLOYMENT_DISABLED', `deployment ${dep.deploymentId} is ${dep.status}`);
       const ep = resolveProviderEndpoint(providerBodyForDeployment(body, dep));
@@ -467,6 +476,7 @@ export function routeTask(req: RouteRequest): RoutingDecision {
         routeKind: kind, region: dep.region, privacyClass: dep.privacyClass, free: !!rec.freeTier?.free || body.billing === 'FREE_LOCAL', freeGuaranteed: !!rec.freeTier?.guaranteed || body.billing === 'FREE_LOCAL',
         estimatedCostUsd: est, priceVersion: pricing.record ? priceVersionKey(m.providerId, m.modelId, m.manifestVersion, pricing.record) : null,
         qualificationId: q.ok ? q.qualification.qualificationId : null, disqualified: dq,
+        ...(sub.required && sub.ok ? { substanceHash: sub.hash } : {}),
       };
       // 5. continuity / capacity — only for candidates still standing.
       if (!dq.length) {
@@ -544,6 +554,7 @@ export function routeTask(req: RouteRequest): RoutingDecision {
   const selected: SelectedRoute = {
     providerId: best.providerId, modelId: best.modelId, deploymentId: best.deploymentId, canonicalVersionId: best.canonicalVersionId, familyId: best.familyId,
     routeKind: best.routeKind, qualificationId: best.qualificationId!, priceVersion: best.priceVersion, priceSnapshot: priceNow, estimatedCostUsd: best.estimatedCostUsd, score: best.score!,
+    ...(best.substanceHash ? { substanceHash: best.substanceHash, substanceVerifiedAt: createdAt } : {}),
   };
   return finish({ candidates, selected, outcome: 'SELECTED', waitState: null, explanation: explain(best, eligible, candidates, R, mode, policy) });
 }

@@ -23,6 +23,7 @@
 // the component named, and the router will not use it.
 // ---------------------------------------------------------------------------
 
+import { verifyRouteSubstance } from './substance';
 import crypto from 'node:crypto';
 import { getDatabase } from '../persistence';
 import { canonicalJson, sha256, modelSubstanceHash } from './schema';
@@ -212,6 +213,8 @@ export interface QualificationBinding {
   endpoint: string | null;
   suite: string;
   taskClass: string;
+  /** LOCAL routes: hash of the approved substance record (manifest/config/weights). Null elsewhere. */
+  substance?: string | null;
 }
 
 function routeSubstance(body: ProviderManifestBody): string {
@@ -238,6 +241,7 @@ export function currentBinding(providerId: string, modelId: string, deploymentId
     modelSubstance: modelSubstanceHash(providerId, m.record), routeSubstance: routeSubstance(body), deployment: deploymentHash(dep),
     adapterVersion: adapter?.adapterVersion ?? null, endpoint: ep.ok ? ep.baseUrl : null,
     suite: suite.recordHash, taskClass: tc.recordHash,
+    substance: id.substanceHash ?? null,
   };
 }
 
@@ -245,12 +249,14 @@ const BINDING_LABELS: Record<keyof QualificationBinding, string> = {
   canonicalVersionId: 'the canonical model version', mappingStatus: 'the route→version mapping', modelSubstance: 'the model record (capabilities, limits, contracts, pricing rates, tools)',
   routeSubstance: 'the route (protocol, hosts, auth, billing, retention, restrictions)', deployment: 'the deployment (endpoint, region, credential binding, limits, retention)',
   adapterVersion: 'the adapter version', endpoint: 'the resolved endpoint', suite: 'the evaluation suite or its thresholds', taskClass: 'the task class definition (thresholds)',
+  substance: 'the local model substance (manifest/config/weights digests)',
 };
 
 /** '*' is written only by the test-fixture insert (refused outside tests): a fixture is not bound to a test double's port. */
 export function bindingDiff(stored: QualificationBinding, now: QualificationBinding): string[] {
   return (Object.keys(BINDING_LABELS) as Array<keyof QualificationBinding>)
-    .filter((k) => !(k === 'endpoint' && stored.endpoint === '*' && isTestEnvironment()) && stored[k] !== now[k])
+    // A binding recorded before a field existed reads it as null (e.g. substance on a non-local route).
+    .filter((k) => !(k === 'endpoint' && stored.endpoint === '*' && isTestEnvironment()) && (stored[k] ?? null) !== (now[k] ?? null))
     .map((k) => BINDING_LABELS[k]);
 }
 
@@ -379,6 +385,10 @@ export function approveQualification(p: { runId: string; actor: string; scope?: 
   if (drift.length) return { ok: false, error: `the run no longer describes this route: ${drift.join('; ')} changed since it ran` };
   const id = routeIdentity(run.provider_id, run.model_id);
   if (!id.resolved) return { ok: false, error: `the route's canonical version is ${id.status}; approve its mapping first` };
+  // LOCAL routes: the model on disk must still be exactly the approved substance.
+  const provBody = getStoredProvider(run.provider_id)!.manifest.provider;
+  const sub = verifyRouteSubstance(run.provider_id, run.model_id, (provBody.routeKind ?? 'DIRECT') === 'LOCAL');
+  if (sub.required && !sub.ok) return { ok: false, error: `${sub.code}: ${sub.reason}` };
   const tc = getTaskClass(run.task_class)!;
   const m = getStoredModel(run.provider_id, run.model_id)!;
   const body = getStoredProvider(run.provider_id)!.manifest.provider;
@@ -476,6 +486,9 @@ function viewRow(r: any): QualificationView {
   const reasons: string[] = [];
   let state: QualificationState = 'VALID';
   if (r.status === 'REVOKED') { state = 'REVOKED'; reasons.push(r.revoked_reason || 'revoked'); }
+  // Persisted by the substance verifier: once the model behind the route
+  // changed, this qualification stays invalid even if the files revert.
+  else if (r.status === 'INVALIDATED') { state = 'INVALIDATED'; reasons.push(r.revoked_reason || 'invalidated'); }
   else if (Date.parse(r.expires_at) <= Date.now()) { state = 'EXPIRED'; reasons.push(`expired ${r.expires_at}; re-run the suite`); }
   else {
     const now = currentBinding(r.provider_id, r.model_id, r.deployment_id, r.task_class, r.suite_id, r.suite_version);

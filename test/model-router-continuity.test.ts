@@ -27,6 +27,7 @@ process.env.MCP_CREDENTIAL_ENCRYPTION_KEY = 'q'.repeat(64);
 
 import { isolateVaultForTest } from './helpers/isolated-vault';
 isolateVaultForTest('router');
+import { writeOllamaModel, ollamaTagsBody } from './helpers/ollama-fixture';
 
 import { getDatabase, getTaskReceipts, verifyReceipt, getTaskWithHistory } from '../lib/persistence';
 import { ensureWorkspace } from '../lib/workspaces';
@@ -83,6 +84,8 @@ beforeAll(async () => {
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => {
+      // The local runtime's model list (metadata only; the substance runtime check). Not an inference request.
+      if (req.method === 'GET' && req.url === '/api/tags') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(ollamaTagsBody(['loc-1'])); }
       const route = (req.url || '').split('/')[1];
       let p: any = {}; try { p = JSON.parse(body || '{}'); } catch {}
       const content = String(p?.messages?.[0]?.content ?? '');
@@ -177,7 +180,7 @@ function installRoutes(): void {
     expect(enableModel(p, m, 'test').ok).toBe(true);
   }
   // A local runtime's model has no publisher of its own here: an operator maps it.
-  expect(approveRouteMapping({ providerId: LOC, modelId: 'loc-1', canonicalVersionId: 'synthetic-open/loc-1', family: { familyId: 'open-family', displayName: 'Open family', publisher: 'synthetic-open' }, actor: 'operator' }).ok).toBe(true);
+  expect(approveRouteMapping({ providerId: LOC, modelId: 'loc-1', canonicalVersionId: 'synthetic-open/loc-1', family: { familyId: 'open-family', displayName: 'Open family', publisher: 'synthetic-open' }, actor: 'operator', substance: writeOllamaModel('loc-1') }).ok).toBe(true);
 }
 
 function policy(paid: boolean, over: Record<string, unknown> = {}) {

@@ -46,7 +46,9 @@ describe('H: a real fabrication found during this pass — Aegis signing algorit
     const idx = serverContent.indexOf('aegis: {\n');
     expect(idx).toBeGreaterThan(-1);
     const slice = serverContent.slice(idx, idx + 500);
-    expect(slice).toContain('signingAlgorithm: "Ed25519"');
+    // Reported from the signer's own constant (lib/receipt-algorithm.ts), which is Ed25519.
+    expect(slice).toContain('signingAlgorithm: RECEIPT_SIGNING_ALGORITHM');
+    expect(fs.readFileSync(path.resolve(process.cwd(), 'lib/receipt-algorithm.ts'), 'utf-8')).toContain("export const RECEIPT_SIGNING_ALGORITHM = 'Ed25519';");
   });
 });
 

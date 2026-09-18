@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import { RECEIPT_SIGNING_ALGORITHM, receiptAlgorithmLabel } from './receipt-algorithm';
+export { RECEIPT_SIGNING_ALGORITHM, receiptAlgorithmLabel };
 import { appendReceiptToLedger } from './authority-ledger';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -2814,7 +2816,7 @@ export function ensureSigningKeyPair(): { privateKeyPem: string; publicKeyPem: s
 
 export function getSigningPublicKey(): { publicKeyPem: string; fingerprint: string; algorithm: string } {
   const { publicKeyPem, fingerprint } = ensureSigningKeyPair();
-  return { publicKeyPem, fingerprint, algorithm: 'Ed25519' };
+  return { publicKeyPem, fingerprint, algorithm: RECEIPT_SIGNING_ALGORITHM };
 }
 
 export function canonicalizePayload(payload: CanonicalReceiptPayload | Record<string, any>): string {
@@ -2838,7 +2840,7 @@ export function signReceiptPayload(canonicalPayloadStr: string): {
   return {
     signature,
     publicKeyPem,
-    algorithm: 'Ed25519',
+    algorithm: RECEIPT_SIGNING_ALGORITHM,
     fingerprint
   };
 }

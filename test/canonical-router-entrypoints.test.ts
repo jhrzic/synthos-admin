@@ -28,6 +28,7 @@ process.env.MCP_CREDENTIAL_ENCRYPTION_KEY = 'e'.repeat(64);
 
 import { isolateVaultForTest } from './helpers/isolated-vault';
 isolateVaultForTest('entrypoints');
+import { writeOllamaModel, ollamaTagsBody } from './helpers/ollama-fixture';
 
 import { getDatabase, getTaskReceipts, verifyReceipt, getTaskWithHistory } from '../lib/persistence';
 import { ensureWorkspace } from '../lib/workspaces';
@@ -70,6 +71,8 @@ beforeAll(async () => {
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => {
+      // The local runtime's model list (metadata only; the substance runtime check). Not an inference request.
+      if (req.method === 'GET' && req.url === '/api/tags') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(ollamaTagsBody(['loc-1'])); }
       const route = (req.url || '').split('/')[1];
       let p: any = {}; try { p = JSON.parse(body || '{}'); } catch {}
       const content = (p?.messages ?? []).map((m: any) => String(m?.content ?? '')).join('\n');
@@ -169,7 +172,7 @@ function installRoutes(): void {
     enableModel(p, m, 'test');
   }
   expect(approveRouteMapping({ providerId: AGG, modelId: `${PUB}/pub-large`, canonicalVersionId: `${PUB}/pub-large`, actor: 'operator' } as any).ok).toBe(true);
-  expect(approveRouteMapping({ providerId: LOC, modelId: 'loc-1', canonicalVersionId: 'entry-open/loc-1', family: { familyId: 'entry-open', displayName: 'Open', publisher: 'entry-open' }, actor: 'operator' }).ok).toBe(true);
+  expect(approveRouteMapping({ providerId: LOC, modelId: 'loc-1', canonicalVersionId: 'entry-open/loc-1', family: { familyId: 'entry-open', displayName: 'Open', publisher: 'entry-open' }, actor: 'operator', substance: writeOllamaModel('loc-1') }).ok).toBe(true);
 }
 
 function policy(p: { paid: boolean; local: boolean; model?: boolean }) {

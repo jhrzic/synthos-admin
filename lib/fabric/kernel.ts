@@ -447,6 +447,8 @@ export async function executeAgentTask(
       taskClass: run.taskClass,
       segmentIds: run.segments.map((x) => x.segmentId),
       segmentCount: run.segments.length,
+      // LOCAL routes: the substance (manifest/config/weights) the router verified.
+      substanceHash: run.decision.selected?.substanceHash ?? null,
     };
 
     // STEP 2 — the artifact write and its DB record both now go through
