@@ -169,6 +169,9 @@ export const ModelFamiliesPanel: React.FC<Props> = ({ workspaceId, models, provi
             <div className="text-[#6A7097]">{i.description}</div>
             <textarea className={`${input} w-full h-16 mt-1`} placeholder={i.importerId === 'signed-offline' ? 'Paste a signed registry manifest (JSON)' : "Paste the route's model-list document (JSON)"} value={importText[i.importerId] || ''} onChange={(e) => setImportText({ ...importText, [i.importerId]: e.target.value })} aria-label={`${i.importerId} document`} />
             <button className={`${btn} mt-1`} disabled={!importText[i.importerId]} onClick={() => { let payload: any; try { payload = JSON.parse(importText[i.importerId]); } catch { setMsg('The document is not valid JSON.'); return; } call(`/api/registry/route-imports/${encodeURIComponent(i.importerId)}`, { payload }); }}>Import (nothing is qualified or enabled)</button>
+            {i.importerId !== 'signed-offline' && (
+              <button className={`${btn} mt-1 ml-2`} data-testid={`route-pull-${i.importerId}`} onClick={() => call(`/api/registry/route-imports/${encodeURIComponent(i.importerId)}/refresh`, {})}>Pull once from the route (GET /models — needs manual discovery ON)</button>
+            )}
           </div>
         ))}
         {refresh && (
@@ -183,7 +186,7 @@ export const ModelFamiliesPanel: React.FC<Props> = ({ workspaceId, models, provi
       {/* Qualification */}
       <div className={`${box} space-y-2`} data-testid="qualification-runner">
         <div className="text-white flex items-center gap-2"><ShieldCheck className="w-3.5 h-3.5" />Qualify a route for a task class</div>
-        <div className="text-[10px] text-[#8E94B8]">Runs the class's evaluation suite through the normal spend-guarded path (paid calls; refused while paid execution is OFF), scores it deterministically, and needs approval with canary ledger evidence.</div>
+        <div className="text-[10px] text-[#8E94B8]">Runs the class's evaluation suite through the canonical router, Guardian and the spend guard — each case gets a routing decision, a ledger row, an Aegis review and a signed receipt (paid calls need paid execution ON; a LOCAL $0 route needs local execution ON). A passed run qualifies nothing until an operator approves it with canary ledger evidence.</div>
         <div className="flex flex-wrap gap-1">
           <select className={input} value={qForm.route} onChange={(e) => setQForm({ ...qForm, route: e.target.value })} aria-label="Route">
             <option value="">route…</option>
@@ -197,7 +200,7 @@ export const ModelFamiliesPanel: React.FC<Props> = ({ workspaceId, models, provi
           </select>
           <button className={btn} disabled={!qForm.route || !qForm.taskClass} onClick={async () => { const [providerId, modelId] = qForm.route.split('|'); const j = await call('/api/registry/qualifications/runs', { providerId, modelId, taskClass: qForm.taskClass }); if (j?.success) setRun({ runId: j.runId, status: 'OPEN' }); }}>Start run</button>
           {run && <>
-            <button className={btn} onClick={async () => { const j = await call(`/api/registry/qualifications/runs/${run.runId}/execute`, { source: qForm.source }); if (j?.run) setRun({ ...j.run, refused: j.refused }); }}>Execute cases (paid)</button>
+            <button className={btn} onClick={async () => { const j = await call(`/api/registry/qualifications/runs/${run.runId}/execute`, { source: qForm.source }); if (j?.run) setRun({ ...j.run, refused: j.refused }); }}>Execute cases (once each, no retry)</button>
             <button className={btn} onClick={async () => { const j = await call(`/api/registry/qualifications/runs/${run.runId}/evaluate`, {}); if (j) setRun({ ...run, evaluation: j }); }}>Evaluate</button>
             <button className={btn} onClick={() => call(`/api/registry/qualifications/runs/${run.runId}/approve`, {})}>Approve qualification</button>
           </>}

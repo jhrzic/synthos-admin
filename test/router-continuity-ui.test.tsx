@@ -214,6 +214,18 @@ describe('Model Router header — live registry counts, never a stale fallback-r
   });
 });
 
+describe('local route qualification controls', () => {
+  it('the route-import panel offers a one-off pull (server-gated by manual discovery) and the runner states the canonical path', () => {
+    const src = fs.readFileSync(path.join(process.cwd(), 'src/components/registry/ModelFamiliesPanel.tsx'), 'utf8');
+    expect(src).toContain('/refresh`, {})}>Pull once from the route (GET /models — needs manual discovery ON)');
+    expect(src).toContain('A passed run qualifies nothing until an operator approves it');
+    expect(src).not.toContain('Execute cases (paid)');
+    const server = fs.readFileSync(path.join(process.cwd(), 'server.ts'), 'utf8');
+    expect(server).toContain('if (!isManualDiscoveryEnabled()) return res.status(409).json({ success: false, code: "MANUAL_DISCOVERY_DISABLED"');
+    expect(server).toContain('app.post("/api/registry/models/approve-local-price", requirePlatformAdmin');
+  });
+});
+
 describe('labels and the wiring the views depend on', () => {
   it('every pause state is labelled as waiting, never as failed', () => {
     for (const s of ['PAUSED_AWAITING_BUDGET', 'PAUSED_AWAITING_CAPACITY', 'PAUSED_AWAITING_QUALIFIED_CAPACITY', 'PAUSED_AWAITING_APPROVAL', 'RECONCILING_UNKNOWN_EXECUTION']) {

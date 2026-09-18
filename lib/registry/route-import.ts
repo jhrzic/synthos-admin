@@ -34,6 +34,7 @@ import { resolvePlatformSetting, setPlatformSetting } from '../platform-settings
 import { ensureRegistry } from './install';
 import { getStoredProvider, importManifest, listStoredModels, recordRegistryEvent, type ImportOutcome } from './store';
 import { resolveProviderEndpoint } from './endpoints';
+import { isManualDiscoveryEnabled } from './discovery';
 import { REGISTRY_SCHEMA_VERSION, type ModelManifest, type PricingRecord, type CapabilityRecord } from './types';
 
 export const ROUTE_REFRESH_SETTING = 'registry.routeRefresh';
@@ -408,6 +409,16 @@ type Fetcher = (url: string, init: RequestInit) => Promise<{ ok: boolean; status
  */
 export async function refreshRoute(importerId: string, actor: string, fetcher: Fetcher = fetch as unknown as Fetcher, trigger: 'MANUAL' | 'SCHEDULED' = 'MANUAL'): Promise<RouteImportResult> {
   ensureRegistry();
+  // Reaching out is always an explicit switch: a one-off (MANUAL) pull needs
+  // manual discovery ON; a SCHEDULED pull needs scheduled refresh ON. Neither
+  // switch implies the other.
+  if (trigger === 'MANUAL' && !isManualDiscoveryEnabled()) {
+    recordRegistryEvent('ROUTE_REFRESH_REFUSED', { actor, importerId, reason: 'manual discovery is off', trigger });
+    return { ok: false, importerId, code: 'REFRESH_DISABLED', error: 'Manual discovery is switched off. Switch it on for a one-off metadata pull, then off again; or import the route document by hand.' };
+  }
+  if (trigger === 'SCHEDULED' && !getRouteRefreshSettings().enabled) {
+    return { ok: false, importerId, code: 'REFRESH_DISABLED', error: 'Scheduled route refresh is switched off.' };
+  }
   const importer = getRouteImporter(importerId);
   if (!importer || !importer.providerId || !importer.metadataPath) return { ok: false, importerId, code: 'UNKNOWN_IMPORTER', error: `"${importerId}" cannot be refreshed from a URL.` };
   const provider = getStoredProvider(importer.providerId);

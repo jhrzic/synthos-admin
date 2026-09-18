@@ -161,7 +161,7 @@ function installRoutes(): void {
     model('loc-unpriced', { pricing: [price(0, 0, 'UNREVIEWED')] }),
   ], {
     routeKind: 'LOCAL', auth: { type: 'NONE', credentialSlot: null, envVars: [] }, billing: 'FREE_LOCAL', privacyClass: 'LOCAL_ONLY',
-    approvedHosts: ['localhost'], defaultBaseUrl: 'http://localhost:9/v1',
+    approvedHosts: ['127.0.0.1'], defaultBaseUrl: 'http://127.0.0.1:9/v1',
   }), { source: 'PLUGIN', actor: 'test' });
   expect(c.ok, c.errors?.join('; ')).toBe(true);
   for (const [p, m] of [[PUB, 'pub-large'], [PUB, 'pub-cheap'], [AGG, `${PUB}/pub-large`], [LOC, 'loc-1'], [LOC, 'loc-unpriced']]) {

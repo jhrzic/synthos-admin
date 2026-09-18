@@ -1,6 +1,6 @@
 {
   "schemaVersion": "synthos.registry/v1",
-  "manifestVersion": "2026.09.18-local-runtime-1",
+  "manifestVersion": "2026.09.18-local-runtime-2",
   "provenance": {
     "publisher": "synthos-core",
     "generatedAt": "2026-09-18T00:00:00.000Z",
@@ -12,9 +12,9 @@
     "protocol": "openai.chat_completions",
     "adapterVersion": "1.0.0",
     "approvedHosts": [
-      "localhost"
+      "127.0.0.1"
     ],
-    "defaultBaseUrl": "http://localhost:11434/v1",
+    "defaultBaseUrl": "http://127.0.0.1:11434/v1",
     "baseUrlEnvVar": "SYNTHOS_LOCAL_RUNTIME_BASE_URL",
     "auth": {
       "type": "NONE",

@@ -268,6 +268,10 @@ export interface CaseResult {
   usageId: string | null;
   receiptId: string | null;
   source: 'SANDBOX' | 'CANARY';
+  /** The persisted routing decision this case ran under (canonical path). */
+  decisionId?: string | null;
+  /** The Aegis review recorded for this case. */
+  reviewId?: string | null;
   pass?: boolean;
   detail?: string;
 }

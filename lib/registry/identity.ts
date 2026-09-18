@@ -212,7 +212,7 @@ export function routeIdentity(providerId: string, modelId: string): RouteIdentit
  * by the caller. Defines the version when its publisher has not (yet),
  * recording the operator as the definer.
  */
-export function approveRouteMapping(p: { providerId: string; modelId: string; canonicalVersionId: string; family?: { familyId: string; displayName: string; publisher: string } | null; actor: string }): { ok: true } | { ok: false; error: string } {
+export function approveRouteMapping(p: { providerId: string; modelId: string; canonicalVersionId: string; family?: { familyId: string; displayName: string; publisher: string } | null; actor: string; evidence?: Record<string, string> | null }): { ok: true } | { ok: false; error: string } {
   ensureIdentityTables();
   const db = getDatabase();
   const now = new Date().toISOString();
@@ -220,6 +220,15 @@ export function approveRouteMapping(p: { providerId: string; modelId: string; ca
   const route = db.prepare('SELECT 1 FROM registry_models WHERE provider_id = ? AND model_id = ?').get(p.providerId, p.modelId);
   if (!route) return { ok: false, error: `${p.providerId}/${p.modelId} is not a registered route offering` };
   const v = db.prepare('SELECT * FROM registry_versions WHERE canonical_version_id = ?').get(p.canonicalVersionId) as any;
+  // A LOCAL runtime serves weights on this machine. It may define a new
+  // version or map onto one an operator defined — never onto a version a
+  // publisher's own route defined, which would claim the local model IS that
+  // publisher's hosted model.
+  const prov = db.prepare('SELECT manifest_json FROM registry_providers WHERE provider_id = ?').get(p.providerId) as { manifest_json: string } | undefined;
+  const kind = prov ? routeKindOf(JSON.parse(prov.manifest_json).provider ?? {}) : 'DIRECT';
+  if (v && kind === 'LOCAL' && String(v.defined_by || '').startsWith('route:')) {
+    return { ok: false, error: `${p.canonicalVersionId} is defined by the publisher route ${String(v.defined_by).slice(6)}; a local route cannot claim to be it` };
+  }
   if (!v) {
     if (!p.family) return { ok: false, error: 'the version is not defined yet; supply its family to define it' };
     if (!p.canonicalVersionId.startsWith(`${p.family.publisher}/`)) return { ok: false, error: 'the version id must be namespaced by the family publisher' };
@@ -232,6 +241,9 @@ export function approveRouteMapping(p: { providerId: string; modelId: string; ca
     ON CONFLICT(provider_id, model_id) DO UPDATE SET canonical_version_id = excluded.canonical_version_id, proposed_version_id = NULL, status = 'APPROVED',
       reason = excluded.reason, approved_by = excluded.approved_by, approved_at = excluded.approved_at, updated_at = excluded.updated_at`)
     .run(p.providerId, p.modelId, p.canonicalVersionId, p.actor, now, now);
+  // The audited record of who mapped what, on what evidence.
+  db.prepare(`INSERT INTO registry_events (event_id, event_type, provider_id, model_id, actor, detail_json, created_at) VALUES (?, 'ROUTE_MAPPING_APPROVED', ?, ?, ?, ?, ?)`)
+    .run(`rev-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, p.providerId, p.modelId, p.actor, JSON.stringify({ canonicalVersionId: p.canonicalVersionId, family: p.family ?? null, evidence: p.evidence ?? null }), now);
   return { ok: true };
 }
 

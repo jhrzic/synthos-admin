@@ -25,6 +25,8 @@
 //   the task's contract/capabilities   → else POLICY_BLOCKED
 // ---------------------------------------------------------------------------
 
+import crypto from 'node:crypto';
+import { getDatabase } from '../persistence';
 import { ensureRegistry } from './install';
 import {
   listStoredProviders, listStoredModels, getStoredModel, getStoredProvider, getAdminRow, writeAdminRow,
@@ -34,7 +36,7 @@ import { getProtocolAdapter, type ProtocolAdapter } from './protocols';
 import { currentPricing, priceVersionKey } from './pricing';
 import { resolveProviderEndpoint } from './endpoints';
 import { credentialReadiness, resolveProviderCredential } from './credentials';
-import { semverGte, validateManifest, modelSubstanceHash } from './schema';
+import { semverGte, validateManifest, modelSubstanceHash, modelRecordHash } from './schema';
 import { getSpendPolicy } from '../spend/policy';
 import { routeIdentity, deploymentsOf } from './identity';
 import { resolveTaskClass, findQualification, getRun as getQualificationRun } from './qualification';
@@ -292,7 +294,12 @@ export function registryGate(providerId: string, modelId: string, ctx: Execution
   const v = evaluateModel(providerId, modelId, { ...ctx, credentialHeld: true })!;
   if (!v.executable) {
     const real = v.blockers.filter((b) => b.state !== 'DEPRECATED' && b.state !== 'DEGRADED');
-    return { ok: false, code: `MODEL_${real[0].state}`, reason: `${providerId}/${modelId} is ${real[0].state}: ${real.map((b) => b.reason).join('; ')}` };
+    // A qualification run's own case may run a model that is ADMITTED (record
+    // and price reviewed) but not ENABLED for production — evaluation is not
+    // production. Any other blocker (price, policy, paid/local switch,
+    // credential, adapter) still refuses. The run itself is checked below.
+    const evaluationOnly = !!ctx.route?.qualificationRunId && real.length > 0 && real.every((b) => b.state === 'QUALIFIED');
+    if (!evaluationOnly) return { ok: false, code: `MODEL_${real[0].state}`, reason: `${providerId}/${modelId} is ${real[0].state}: ${real.map((b) => b.reason).join('; ')}` };
   }
   // IDENTITY — a route offering whose canonical version is unresolved
   // (pending review, conflicting, unmapped) never executes.
@@ -356,6 +363,49 @@ export function qualifyModel(providerId: string, modelId: string, actor: string)
   writeAdminRow(providerId, modelId, { qualifiedHash: modelSubstanceHash(providerId, m.record), qualifiedBy: actor, qualifiedAt: new Date().toISOString() });
   recordRegistryEvent('MODEL_QUALIFIED', { providerId, modelId, actor, recordHash: m.recordHash, priceVersion: view.pricing.versionKey });
   return { ok: true, view: evaluateModel(providerId, modelId)! };
+}
+
+/**
+ * Approve the exact $0 price record of a LOCAL, credential-free route offering.
+ *
+ * A route import records a local model at $0 as UNREVIEWED, and unknown
+ * pricing is never free — so a local route cannot run until an operator
+ * approves THIS record. Deliberately narrow: only a FREE_LOCAL, LOCAL,
+ * auth-NONE route; only a record whose every rate and surcharge is zero; only
+ * the price version the operator actually reviewed (versionKey must match
+ * what is in force now). Paid prices are never approved by hand here.
+ */
+export function approveLocalZeroPrice(p: { providerId: string; modelId: string; versionKey: string; actor: string }): { ok: true; versionKey: string } | { ok: false; error: string } {
+  ensureRegistry();
+  const m = getStoredModel(p.providerId, p.modelId);
+  const prov = getStoredProvider(p.providerId);
+  if (!m || !prov) return { ok: false, error: `${p.providerId}/${p.modelId} is not registered` };
+  const body = prov.manifest.provider;
+  if (body.billing !== 'FREE_LOCAL' || (body.routeKind ?? 'DIRECT') !== 'LOCAL' || body.auth.type !== 'NONE') {
+    return { ok: false, error: `${p.providerId} is not a credential-free LOCAL route billed FREE_LOCAL; its prices are not approved by hand` };
+  }
+  const cur = currentPricing(m.record);
+  if (!cur.record) return { ok: false, error: `no single price record is in force (${cur.state}: ${cur.reason})` };
+  const key = priceVersionKey(p.providerId, p.modelId, m.manifestVersion, cur.record);
+  if (key !== p.versionKey) return { ok: false, error: `the price in force is ${key}, not the reviewed ${p.versionKey}; review it again` };
+  if (cur.record.approval === 'APPROVED') return { ok: false, error: 'this price record is already approved' };
+  const r = cur.record;
+  const zero = r.rates.input === 0 && r.rates.output === 0 && (r.rates.cachedInput === null || r.rates.cachedInput === 0)
+    && r.tiers.length === 0 && r.toolCharges.length === 0 && r.modalityCharges.length === 0;
+  if (!zero) return { ok: false, error: 'the record is not exactly $0 (a rate, tier or surcharge is non-zero); a local route is never approved at a price' };
+  if (!/local/i.test(r.source)) return { ok: false, error: `the record's source "${r.source}" does not identify local execution` };
+  const idx = m.record.pricing.indexOf(r);
+  const record = { ...m.record, pricing: m.record.pricing.map((x, i) => (i === idx ? { ...x, approval: 'APPROVED' as const } : x)) };
+  const unstamped = { ...record, capabilities: record.capabilities.map(({ provenance: _p, manifestVersion: _m, adapterVersion: _a, lastUpdated: _l, ...c }: any) => c) };
+  const recordHash = modelRecordHash(p.providerId, unstamped as ModelManifest);
+  const now = new Date().toISOString();
+  const db = getDatabase();
+  db.prepare('UPDATE registry_models SET record_json = ?, record_hash = ?, updated_at = ? WHERE provider_id = ? AND model_id = ?').run(JSON.stringify(record), recordHash, now, p.providerId, p.modelId);
+  db.prepare(`INSERT INTO registry_model_versions (version_id, provider_id, model_id, record_json, record_hash, manifest_version, import_id, change_type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'PRICE_APPROVED', ?)`)
+    .run(`rmv-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`, p.providerId, p.modelId, JSON.stringify(record), recordHash, m.manifestVersion, `price-approval:${p.actor}`, now);
+  const approved = priceVersionKey(p.providerId, p.modelId, m.manifestVersion, record.pricing[idx]);
+  recordRegistryEvent('LOCAL_PRICE_APPROVED', { providerId: p.providerId, modelId: p.modelId, actor: p.actor, reviewed: p.versionKey, approved, source: r.source, rates: r.rates });
+  return { ok: true, versionKey: approved };
 }
 
 export function enableModel(providerId: string, modelId: string, actor: string): AdminActionResult {

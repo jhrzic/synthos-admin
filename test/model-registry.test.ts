@@ -483,7 +483,7 @@ describe('provider endpoint security', () => {
       expect(r.ok && m.manifest.provider.approvedHosts.includes(new URL(r.baseUrl).hostname)).toBe(true);
       // https everywhere, except a credential-free LOCAL route on loopback.
       const local = m.manifest.provider.routeKind === 'LOCAL' && m.manifest.provider.auth.type === 'NONE';
-      expect(r.ok && (r.baseUrl.startsWith('https://') || (local && new URL(r.baseUrl).hostname === 'localhost')), p.providerId).toBe(true);
+      expect(r.ok && (r.baseUrl.startsWith('https://') || (local && new URL(r.baseUrl).hostname === '127.0.0.1')), p.providerId).toBe(true);
     }
   });
 

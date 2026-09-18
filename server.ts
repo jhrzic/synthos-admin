@@ -79,7 +79,7 @@ import { continuityView, listPausedTasks, resolveUnknownSegment } from "./lib/co
 import { resumeByOperator } from "./lib/continuity/resume";
 import { routeTask, requirementsFor } from "./lib/registry/router";
 import { runWithRouteContext } from "./lib/registry/route-context";
-import { listProviderViews, listModelViews, registerModelViaAdmin, qualifyModel, enableModel, disableModel } from "./lib/registry";
+import { listProviderViews, listModelViews, registerModelViaAdmin, qualifyModel, enableModel, disableModel, approveLocalZeroPrice } from "./lib/registry";
 import { ALL_STATES } from "./lib/registry/types";
 import { importManifest, listImports, listTrustedKeys, addTrustedKey, getWorkspacePolicy, setWorkspacePolicy, modelHistory } from "./lib/registry/store";
 import { applyCatalogPricesToRegistry } from "./lib/registry/catalog-bridge";
@@ -6789,6 +6789,16 @@ Rules for spokenSummary specifically:
     return res.status(r.ok ? 200 : 400).json({ success: r.ok, ...r });
   });
 
+  // Approve the exact $0 price record of a credential-free LOCAL route (the
+  // operator names the price version they reviewed). Paid prices are never approved here.
+  app.post("/api/registry/models/approve-local-price", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-local-price"), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const { providerId, modelId, versionKey } = req.body || {};
+    const r = approveLocalZeroPrice({ providerId: String(providerId || ""), modelId: String(modelId || ""), versionKey: String(versionKey || ""), actor });
+    registryAudit(req, `${providerId}/${modelId}`, { action: "APPROVE_LOCAL_PRICE", versionKey, ok: r.ok, error: r.ok ? null : r.error });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, ...r });
+  });
+
   app.post("/api/registry/trusted-keys", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-key"), (req, res) => {
     try {
       const actor = (req as AuthedRequest).authUser!.user_id;
@@ -6856,10 +6866,11 @@ Rules for spokenSummary specifically:
     return res.status(r.ok ? 200 : 400).json({ success: r.ok, result: r });
   });
 
-  // A metadata refresh from the route's own endpoint — only when an operator switched refresh on.
+  // A one-off metadata pull from the route's own endpoint — only while an
+  // operator has manual discovery switched on (scheduled refresh stays separate).
   app.post("/api/registry/route-imports/:importerId/refresh", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-route-refresh"), async (req, res) => {
     const actor = (req as AuthedRequest).authUser!.user_id;
-    if (!getRouteRefreshSettings().enabled) return res.status(409).json({ success: false, code: "ROUTE_REFRESH_DISABLED", error: "Route refresh is switched off. Import the route document manually, or switch refresh on first." });
+    if (!isManualDiscoveryEnabled()) return res.status(409).json({ success: false, code: "MANUAL_DISCOVERY_DISABLED", error: "Manual discovery is switched off. Switch it on for a one-off metadata pull (and off again), or import the route document manually." });
     const r = await refreshRoute(String(req.params.importerId), actor);
     registryAudit(req, String(req.params.importerId), { action: "ROUTE_REFRESH", ok: r.ok, error: r.ok ? null : r.error });
     return res.status(r.ok ? 200 : 400).json({ success: r.ok, result: r });

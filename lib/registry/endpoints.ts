@@ -66,6 +66,12 @@ export function validateEndpointUrl(raw: string, provider: Pick<ProviderManifest
     // A LOCAL route that sends no credential (e.g. a self-hosted runtime) may
     // use loopback anywhere: there is no secret for a local listener to take.
     const credentialFreeLocal = provider.routeKind === 'LOCAL' && provider.auth?.type === 'NONE';
+    // …but only on a loopback host the manifest itself approves — never "any
+    // local port", which would include this admin service and anything else
+    // listening on the machine.
+    if (credentialFreeLocal && !provider.approvedHosts.map((h) => h.toLowerCase()).includes(host)) {
+      return { ok: false, reason: `loopback host ${host} is not an approved host for ${provider.providerId} (${provider.approvedHosts.join(', ')})` };
+    }
     if (!credentialFreeLocal && !loopbackProvidersAllowed(env)) return { ok: false, reason: `loopback host ${host} is only permitted under test or with SYNTHOS_ALLOW_LOOPBACK_PROVIDERS=true outside production` };
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return { ok: false, reason: 'only http(s) is supported' };
     return { ok: true, url };

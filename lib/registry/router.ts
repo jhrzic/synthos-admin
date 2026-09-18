@@ -31,7 +31,7 @@ import { ensureRegistry } from './install';
 import { listStoredModels, listStoredProviders, recordRegistryEvent } from './store';
 import { viewOf } from './index';
 import { routeIdentity, deploymentsOf, providerBodyForDeployment, privacyRank, routeKindOf } from './identity';
-import { findQualification, getTaskClass, type QualificationView } from './qualification';
+import { findQualification, getTaskClass, getRun, type QualificationView } from './qualification';
 import { isRouteStale } from './route-import';
 import { resolveProviderEndpoint } from './endpoints';
 import { getProtocolAdapter } from './protocols';
@@ -84,6 +84,11 @@ export function ensureRouterTables(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_routing_decisions_task ON routing_decisions (task_id, created_at);
   `);
+  // Added later: Guardian's verdict on the instruction, and the qualification
+  // run a decision was made for (evaluation only). Nullable; older rows lack them.
+  const cols = new Set((getDatabase().prepare('PRAGMA table_info(routing_decisions)').all() as Array<{ name: string }>).map((c) => c.name));
+  if (!cols.has('guardian_json')) getDatabase().exec('ALTER TABLE routing_decisions ADD COLUMN guardian_json TEXT');
+  if (!cols.has('qualification_run_id')) getDatabase().exec('ALTER TABLE routing_decisions ADD COLUMN qualification_run_id TEXT');
   const now = new Date().toISOString();
   const ins = getDatabase().prepare(`INSERT OR IGNORE INTO registry_routing_policies (policy_id, version, record_json, status, source, approved_by, created_at, activated_at) VALUES (?, ?, ?, 'ACTIVE', 'BUNDLED', 'bundled-data', ?, ?)`);
   for (const p of (bundledPolicies as any).policies as RoutingPolicy[]) ins.run(p.policyId, p.version, JSON.stringify(p), now, now);
@@ -257,6 +262,16 @@ export interface RoutingDecision {
   waitState: WaitState;
   explanation: string;
   createdAt: string;
+  /** Guardian's verdict on the instruction (null when no instruction was inspected). */
+  guardian?: GuardianVerdict | null;
+  /** Set only for a qualification run's own case (evaluation, never production). */
+  qualificationRunId?: string | null;
+}
+
+export interface GuardianVerdict {
+  status: string;
+  riskLevel: string | null;
+  ruleCitation: string | null;
 }
 
 function estimateCost(pricing: PricingRecord | null, inTok: number, outTok: number, billing: string): number | null {
@@ -284,6 +299,15 @@ export interface RouteRequest {
   floor?: ContinuationFloor | null;
   /** false: evaluate and return, but do not persist (a preview the UI shows). */
   persist?: boolean;
+  /**
+   * EVALUATION ONLY: route one case of this OPEN qualification run. The route
+   * is pinned to the run's own provider/model/deployment; that route alone is
+   * excused from "qualified for this task class" (it is being qualified) and
+   * from "enabled for production" (evaluation is not production). Every other
+   * filter — Guardian, identity, price, paid/local switches, endpoint,
+   * capacity, budget — applies unchanged.
+   */
+  qualificationRunId?: string | null;
 }
 
 export function routeTask(req: RouteRequest): RoutingDecision {
@@ -294,33 +318,46 @@ export function routeTask(req: RouteRequest): RoutingDecision {
   let mode: RoutingMode = constraints.mode ?? policy.defaultMode;
   if (constraints.pinnedRoute && !req.constraints?.mode) mode = 'PINNED_ROUTE';
   else if (constraints.pinnedVersion && !req.constraints?.mode) mode = 'PINNED_MODEL_VERSION';
-  const modeSpec = policy.modes[mode] ?? { weightOverrides: {} };
+  let modeSpec = policy.modes[mode] ?? { weightOverrides: {} };
   const R = req.requirements;
   const floor = req.floor ?? null;
   const tc = getTaskClass(R.taskClass);
   const createdAt = new Date().toISOString();
   const decisionId = `route-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
   const { instruction, ...reqStored } = R;
+  let guardian: GuardianVerdict | null = null;
+  const evalRun = req.qualificationRunId ? getRun(req.qualificationRunId) : null;
 
   const finish = (d: Omit<RoutingDecision, 'decisionId' | 'createdAt' | 'policy' | 'mode' | 'requirements' | 'constraints' | 'taskId' | 'workspaceId' | 'segmentId'>): RoutingDecision => {
     const decision: RoutingDecision = {
       decisionId, taskId: req.taskId ?? null, workspaceId: req.workspaceId, segmentId: req.segmentId ?? null,
       policy: { policyId: policy.policyId, version: policy.version }, mode, requirements: reqStored, constraints, createdAt, ...d,
+      guardian, qualificationRunId: req.qualificationRunId ?? null,
     };
     if (req.persist !== false) {
-      getDatabase().prepare(`INSERT INTO routing_decisions (decision_id, task_id, workspace_id, segment_id, policy_id, policy_version, mode, requirements_json, constraints_json, candidates_json, selected_json, outcome, wait_state, explanation, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      getDatabase().prepare(`INSERT INTO routing_decisions (decision_id, task_id, workspace_id, segment_id, policy_id, policy_version, mode, requirements_json, constraints_json, candidates_json, selected_json, outcome, wait_state, explanation, created_at, guardian_json, qualification_run_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(decisionId, decision.taskId, decision.workspaceId, decision.segmentId, policy.policyId, policy.version, mode, JSON.stringify(reqStored), JSON.stringify(constraints),
-          JSON.stringify(decision.candidates), decision.selected ? JSON.stringify(decision.selected) : null, decision.outcome, decision.waitState, decision.explanation, createdAt);
+          JSON.stringify(decision.candidates), decision.selected ? JSON.stringify(decision.selected) : null, decision.outcome, decision.waitState, decision.explanation, createdAt,
+          guardian ? JSON.stringify(guardian) : null, req.qualificationRunId ?? null);
     }
     return decision;
   };
 
   if (!tc) return finish({ candidates: [], selected: null, outcome: 'NO_ELIGIBLE_ROUTE', waitState: 'PAUSED_AWAITING_QUALIFIED_CAPACITY', explanation: `No route was selected: task class ${R.taskClass} is not registered.` });
+  if (req.qualificationRunId) {
+    // An evaluation decision must describe exactly the open run's own route and class.
+    const bad = !evalRun ? 'does not exist' : evalRun.status !== 'OPEN' ? `is ${evalRun.status}` : evalRun.task_class !== R.taskClass ? `evaluates ${evalRun.task_class}, not ${R.taskClass}` : null;
+    if (bad) return finish({ candidates: [], selected: null, outcome: 'NO_ELIGIBLE_ROUTE', waitState: null, explanation: `No route was selected: qualification run ${req.qualificationRunId} ${bad}.` });
+    constraints.pinnedRoute = { providerId: evalRun!.provider_id, modelId: evalRun!.model_id, deploymentId: evalRun!.deployment_id };
+    mode = 'PINNED_ROUTE';
+    modeSpec = policy.modes[mode] ?? { weightOverrides: {} };
+  }
 
   // GUARDIAN — the instruction itself. A refusal stops routing entirely.
   if (instruction) {
     const g = checkGuardianRules(instruction);
+    guardian = { status: g.status, riskLevel: g.riskLevel ?? null, ruleCitation: g.ruleCitation ?? null };
     if (g.status === 'BLOCKED') return finish({ candidates: [], selected: null, outcome: 'GUARDIAN_REFUSED', waitState: null, explanation: `Guardian refused this task (${g.ruleCitation ?? g.riskLevel}): ${g.warning ?? 'blocked'}. No model was selected.` });
     if (g.status === 'APPROVAL_REQUIRED') return finish({ candidates: [], selected: null, outcome: 'NO_ELIGIBLE_ROUTE', waitState: 'PAUSED_AWAITING_APPROVAL', explanation: `Guardian requires a human approval before this task may run (${g.ruleCitation ?? g.riskLevel}). No model was selected.` });
   }
@@ -358,7 +395,10 @@ export function routeTask(req: RouteRequest): RoutingDecision {
         taskClass: R.taskClass, deploymentId: dep.deploymentId, outputContract: R.outputContract, capabilities: R.capabilities,
         contextTokens: R.estimatedInputTokens + R.expectedOutputTokens, tools: R.tools, privacyClass: minPrivacy, minQuality, minReliability,
       });
-      if (!q.ok) add('NOT_QUALIFIED', q.reasons.join('; '));
+      // The open run's own route is being qualified: it is excused from this
+      // one check (only for that run, only for its task class).
+      const isEvalRoute = !!evalRun && evalRun.provider_id === m.providerId && evalRun.model_id === m.modelId && evalRun.deployment_id === dep.deploymentId;
+      if (!q.ok && !isEvalRoute) add('NOT_QUALIFIED', q.reasons.join('; '));
       // 2. eligible canonical versions
       if (!id.resolved) add('IDENTITY_UNRESOLVED', `canonical version mapping is ${id.status}${id.reason ? `: ${id.reason}` : ''}`);
       if (constraints.pinnedVersion && id.canonicalVersionId !== constraints.pinnedVersion) add('NOT_PINNED_VERSION', `pinned to ${constraints.pinnedVersion}`);
@@ -374,6 +414,8 @@ export function routeTask(req: RouteRequest): RoutingDecision {
       // registry state of the offering itself
       for (const b of view.blockers) {
         if (b.state === 'DEPRECATED' || b.state === 'DEGRADED') continue;
+        // Admitted but not enabled for production: an evaluation may still run it.
+        if (isEvalRoute && b.state === 'QUALIFIED') continue;
         if (b.state === 'NOT_CONFIGURED' && /credential/.test(b.reason)) { add('INVALID_OR_MISSING_CREDENTIAL', b.reason); continue; }
         if (b.state === 'POLICY_BLOCKED' && /paid execution is switched off/.test(b.reason)) { add('PAID_EXECUTION_DISABLED', b.reason); continue; }
         if (b.state === 'POLICY_BLOCKED' && /local \$0 execution is switched off/.test(b.reason)) { add('LOCAL_EXECUTION_DISABLED', b.reason); continue; }
@@ -564,6 +606,7 @@ function decisionFromRow(r: any): RoutingDecision {
     policy: { policyId: r.policy_id, version: r.policy_version }, mode: r.mode, requirements: JSON.parse(r.requirements_json), constraints: JSON.parse(r.constraints_json),
     candidates: JSON.parse(r.candidates_json), selected: r.selected_json ? JSON.parse(r.selected_json) : null, outcome: r.outcome, waitState: r.wait_state,
     explanation: r.explanation, createdAt: r.created_at,
+    guardian: r.guardian_json ? JSON.parse(r.guardian_json) : null, qualificationRunId: r.qualification_run_id ?? null,
   };
 }
 

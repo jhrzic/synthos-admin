@@ -41,6 +41,7 @@ import { executeQualificationCases } from '../lib/registry/qualification-exec';
 import { routeTask, requirementsFor, getDecision, setWorkspaceRouting, listDecisions, activePolicy, listPolicies } from '../lib/registry/router';
 import { recordPerformanceSample, proposeRouteStats, decideProposal, approvedRouteStats, proposePolicyWeights } from '../lib/registry/performance';
 import { runWithRouteContext } from '../lib/registry/route-context';
+import { setManualDiscoveryEnabled } from '../lib/registry/discovery';
 import { saveSpendPolicy, DEFAULT_SPEND_POLICY } from '../lib/spend/policy';
 import { ensureUsageTable, listUsageForKey } from '../lib/spend/ledger';
 import { guardedPaidCall } from '../lib/spend/guard';
@@ -168,7 +169,7 @@ function installRoutes(): void {
   expect(b.ok).toBe(true);
   const c = importManifest(manifest(LOC, [model('loc-1', { pricing: [price(0, 0)] })], {
     routeKind: 'LOCAL', auth: { type: 'NONE', credentialSlot: null, envVars: [] }, billing: 'FREE_LOCAL', privacyClass: 'LOCAL_ONLY',
-    approvedHosts: ['localhost'], defaultBaseUrl: 'http://localhost:9/v1',
+    approvedHosts: ['127.0.0.1'], defaultBaseUrl: 'http://127.0.0.1:9/v1',
   }), { source: 'PLUGIN', actor: 'test' });
   expect(c.ok, c.errors.join('; ')).toBe(true);
   for (const [p, m] of [[PUB, 'pub-large'], [PUB, 'pub-small'], [AGG, `${PUB}/pub-large`], [LOC, 'loc-1']]) {
@@ -342,7 +343,12 @@ describe('route importers — metadata only, manual, never qualify, never overri
     expect(fetched).toEqual([]);
     // A later successful refresh restores CURRENT.
     getDatabase().prepare("UPDATE registry_route_import_status SET last_attempt_at = ? WHERE importer_id = 'openrouter'").run(iso(Date.now() - 13 * 3_600_000));
-    const ok = await refreshRoute('openrouter', 'op', async () => ({ ok: true, status: 200, text: async () => JSON.stringify(orDoc('0.000003')) }));
+    // A one-off MANUAL pull is gated by manual discovery, not by scheduled refresh.
+    const doc = async () => ({ ok: true, status: 200, text: async () => JSON.stringify(orDoc('0.000003')) });
+    expect(await refreshRoute('openrouter', 'op', doc)).toMatchObject({ ok: false, code: 'REFRESH_DISABLED' });
+    setManualDiscoveryEnabled(true, 'op');
+    const ok = await refreshRoute('openrouter', 'op', doc);
+    setManualDiscoveryEnabled(false, 'op');
     expect(ok.ok).toBe(true);
     expect(isRouteStale('openrouter')).toBe(false);
     setRouteRefreshSettings({ enabled: false, importers: [] }, 'op');
