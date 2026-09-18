@@ -29,6 +29,8 @@ const NOT_DEPLOYMENT_CONFIG = new Set([
   // Set by the test harness itself, never by an operator.
   'VITEST',
   'NODE_TEST_CONTEXT',
+  // Vitest-only gate override for pre-existing execution tests; ignored unless VITEST is set.
+  'SYNTHOS_TEST_QUEUED_TASK_PROCESSING',
   // Read only to locate a developer's own machine paths in dev tooling.
   'HOME',
   // The Windows spelling of HOME, read as its fallback when resolving a

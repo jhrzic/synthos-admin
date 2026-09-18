@@ -10,6 +10,7 @@ import { devAssetGuard } from "./lib/http/dev-asset-guard";
 import { CONTROL_PLANE_AUTHORITY } from "./lib/control-plane-authority";
 import { listBoardTasks } from "./lib/task-board";
 import { listObservedAgents, NOT_RECORDED_FIELDS } from "./lib/agent-roster";
+import { readQueuedTaskProcessing, ensureQueuedTaskProcessingSetting, queuedTaskProcessingRefusals, QUEUED_TASK_PROCESSING_GATES } from "./lib/queued-task-processing";
 import dotenv from "dotenv";
 import { 
   createInitialTask, 
@@ -7194,7 +7195,7 @@ Rules for spokenSummary specifically:
   // under the current switches, and which operator actions are available.
   app.get("/api/master-admin/task-queue", requirePlatformAdmin, (req, res) => {
     const ws = typeof req.query.workspaceId === "string" && req.query.workspaceId ? req.query.workspaceId : null;
-    return res.json({ success: true, tasks: reviewQueuedTasks({ workspaceId: ws, limit: Number(req.query.limit) || 500 }) });
+    return res.json({ success: true, processing: { ...readQueuedTaskProcessing(), gates: QUEUED_TASK_PROCESSING_GATES, refusals: queuedTaskProcessingRefusals() }, tasks: reviewQueuedTasks({ workspaceId: ws, limit: Number(req.query.limit) || 500 }) });
   });
 
   // One explicit operator action on one queued task — confirmed, workspace
@@ -8405,6 +8406,9 @@ Rules for spokenSummary specifically:
   // timer from this process. For read-only verification copies and any
   // non-canonical instance — there must be exactly one scheduler, the
   // canonical control plane's (lib/control-plane-authority.ts).
+  // Persist the fail-closed default (queuedTaskProcessingEnabled: false) if no
+  // value is stored. Never overwrites an operator's value.
+  ensureQueuedTaskProcessingSetting();
   if (process.env.SYNTHOS_SCHEDULER_DISABLED === "1") {
     console.log("[Startup] SCHEDULER: DISABLED by SYNTHOS_SCHEDULER_DISABLED=1 — nothing dispatches on a timer from this process.");
   } else {

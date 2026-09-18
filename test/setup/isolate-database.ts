@@ -107,3 +107,11 @@ process.on('exit', cleanup);
 // set (lib/spend/network-guard.ts). It touches no database.
 // ---------------------------------------------------------------------------
 import '../../lib/spend/network-guard';
+
+// ---------------------------------------------------------------------------
+// QUEUED-TASK PROCESSING. Production default is OFF (fail closed; see
+// lib/queued-task-processing.ts). Pre-existing tests that exercise execution
+// run with the gate open through a Vitest-only override; the gate's own tests
+// (test/queued-task-processing.test.ts) delete this to test the real default.
+// ---------------------------------------------------------------------------
+process.env.SYNTHOS_TEST_QUEUED_TASK_PROCESSING = 'enabled';

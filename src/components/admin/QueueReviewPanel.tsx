@@ -13,13 +13,14 @@ import { ExecutionReconciliationPanel } from '../registry/ExecutionReconciliatio
 
 export const QueueReviewPanel: React.FC = () => {
   const [tasks, setTasks] = useState<any[] | null>(null);
+  const [processing, setProcessing] = useState<any | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reason, setReason] = useState<Record<string, string>>({});
   const [msg, setMsg] = useState<string | null>(null);
 
   const load = useCallback(() => {
     fetch('/api/master-admin/task-queue').then((r) => r.json()).then((j) => {
-      if (j?.success) { setTasks(j.tasks); setError(null); } else setError(j?.error || 'Queue review unavailable.');
+      if (j?.success) { setTasks(j.tasks); setProcessing(j.processing ?? null); setError(null); } else setError(j?.error || 'Queue review unavailable.');
     }).catch(() => setError('Queue review unavailable.'));
   }, []);
   useEffect(() => { load(); }, [load]);
@@ -38,6 +39,10 @@ export const QueueReviewPanel: React.FC = () => {
   return (
     <div className="space-y-3" data-testid="queue-review">
       <div className="text-white text-sm font-bold flex items-center gap-2"><ListChecks className="w-4 h-4" />Queue review</div>
+      <div className={`p-3 rounded-xl border text-[11px] font-mono ${processing?.enabled ? 'border-[#E8A845]/50 text-[#E8A845]' : 'border-[#1C2038] text-[#C9CCE6]'}`} data-testid="queued-task-processing">
+        <div>Queued-task processing: <span className="font-bold" data-testid="queued-task-processing-effective">{processing ? (processing.enabled ? 'ON' : 'OFF') : 'OFF (UNKNOWN — fail closed)'}</span>{processing ? ` · state ${processing.state} · stored ${processing.storedValue ?? 'none'}${processing.updatedAt ? ` · set ${processing.updatedAt} by ${processing.updatedBy ?? 'UNKNOWN'}` : ''}` : ''}</div>
+        <div className="text-slate-500">{processing?.reason ?? 'not reported'} · enforced at {(processing?.gates ?? []).length} points: nothing is claimed, started, dispatched, resumed or scheduled while OFF; ledger and receipt bookkeeping continue.</div>
+      </div>
       <div className="text-[11px] text-slate-400" data-testid="queue-review-summary">
         {tasks.length} queued task(s); {runnable} could execute under the current switches. Reviewing changes nothing — every action below needs a reason and a confirmation.
       </div>

@@ -43,6 +43,7 @@ import { executeEnvelope, type ExecutionEnvelopeResult, type EnvelopeOutcome, EX
 // sweep's own durability comes from the ledger, not from this loop — see
 // lib/external-executions.ts.
 import { advanceDueExternalExecutions } from '../external-executions';
+import { queuedTaskProcessingRefusal } from '../queued-task-processing';
 
 // ---------------------------------------------------------------------------
 // Time-phrase parsing. Deterministic, regex-based — no model call, so
@@ -381,7 +382,12 @@ export async function fireScheduleOccurrence(schedule: ScheduleRecord, dueAtIso:
 }
 
 /** The tick body. Exported so tests call it directly — no real timer needed to prove correctness. */
-export async function runDueSchedules(nowIso: string = new Date().toISOString()): Promise<{ processed: number }> {
+export async function runDueSchedules(nowIso: string = new Date().toISOString()): Promise<{ processed: number; refused?: string }> {
+  // QUEUED-TASK PROCESSING OFF (fail closed): scheduled work is neither
+  // enqueued nor executed. Schedule rows (cadence, next_run_at) are left
+  // exactly as they are — nothing is fired, skipped-forward or rewritten.
+  const gate = queuedTaskProcessingRefusal('scheduler.runDueSchedules');
+  if (gate) return { processed: 0, refused: gate.message };
   const due = listDueSchedules(nowIso);
   for (const schedule of due) {
     await fireScheduleOccurrence(schedule, schedule.next_run_at!);

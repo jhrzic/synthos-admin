@@ -73,6 +73,7 @@ import { searchWorkspaceKnowledge } from '../knowledge-vault';
 import { listApprovalsForCorrelation } from '../approvals';
 import { scrubSecrets } from '../redact';
 import { SPEND_WAIT_CODES } from '../spend/guard';
+import { queuedTaskProcessingRefusal } from '../queued-task-processing';
 
 export type OrchestrationOutcome =
   | 'ADVANCED'            // the task ran and reached a terminal state
@@ -111,6 +112,8 @@ export interface OrchestrationTickResult {
   stranded: string[];
   /** Tasks moved out of WAITING_FOR_APPROVAL because a human decided. */
   resumed: Array<{ taskId: string; to: string; approvalId: string }>;
+  /** Set when the tick did nothing because queued-task processing is not ENABLED. */
+  refused?: string;
 }
 
 /** Health, exposed for the Admin surface and /api/ready. Process-local, like the scheduler's. */
@@ -286,6 +289,9 @@ export async function advanceTask(task: OrchestratorTaskRow): Promise<Orchestrat
   const base = { taskId: task.task_id, workspaceId, capability: task.capability, correlationId };
   // DRAINING: nothing is claimed or started; the task stays exactly as it was.
   if (isDraining()) return { ...base, outcome: 'DEFERRED', reason: 'SERVICE_DRAINING: the service is shutting down; the task was not claimed.' } as OrchestrationStep;
+  // Immediately before the claim: queued-task processing must be ENABLED.
+  const gate = queuedTaskProcessingRefusal('orchestrator.advanceTask');
+  if (gate) return { ...base, outcome: 'DEFERRED', reason: gate.message } as OrchestrationStep;
 
   // Declared before the claim so every exit path can settle it.
   let settle: ((outcome: OrchestrationOutcome) => void) | null = null;
@@ -756,6 +762,10 @@ export async function runOrchestrationTick(opts: { maxTasks?: number; workspaceI
   if (level === 'MANUAL') {
     return { level, considered: 0, steps, stranded, resumed };
   }
+  // QUEUED-TASK PROCESSING OFF (fail closed): claim nothing, resume nothing —
+  // not even approved tasks. Checked every tick, before any read of the queue.
+  const gate = queuedTaskProcessingRefusal('orchestrator.tick');
+  if (gate) return { level, considered: 0, steps, stranded, resumed, refused: gate.message };
 
   const workspaceIds = opts.workspaceId
     ? [opts.workspaceId]

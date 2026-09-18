@@ -92,6 +92,7 @@ import { writeWorkspaceArtifact } from '../vault';
 // abstraction: two providers do not justify a plugin layer, and the one
 // switch below is easier to read than an indirection would be.
 import type { ExecuteAgentTaskInput, ExecutionResult, ExecutionContext } from './types';
+import { queuedTaskProcessingRefusal } from '../queued-task-processing';
 
 /**
  * The provider identity written into a signed receipt. Deliberately the
@@ -261,6 +262,9 @@ export async function executeAgentTask(
   if (isDraining()) {
     return { status: 503, body: { success: false, status: "REFUSED", reason: "SERVICE_DRAINING", error: "The service is shutting down; no new task is started. Submit it again after the restart.", taskId: body.taskId } };
   }
+  // QUEUED-TASK PROCESSING OFF (fail closed): no model task starts.
+  const gate = queuedTaskProcessingRefusal('kernel.executeEnvelope');
+  if (gate) return { status: 503, body: { success: false, status: "REFUSED", reason: "QUEUED_TASK_PROCESSING_DISABLED", error: gate.message, taskId: body.taskId } };
   const finished = noteExecutionStarted(body.taskId, 'kernel.task');
   try {
     return await executeAgentTaskInner(body, resolvedWorkspaceId, ctx);

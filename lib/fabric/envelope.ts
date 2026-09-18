@@ -142,6 +142,7 @@ import {
   computeInputDigest,
   type ApprovalRecord,
 } from '../approvals';
+import { queuedTaskProcessingRefusal } from '../queued-task-processing';
 
 // SUBMITTED — an asynchronous runtime accepted the work and it is still
 // running remotely. NOT terminal and NOT a success: no artifact, Aegis review
@@ -292,6 +293,10 @@ export async function executeEnvelope(input: ExecutionEnvelopeInput): Promise<Ex
   // is discarded here; only the approval gate may set it, and only after
   // consuming a real approval bound to these exact inputs.
   input = { ...input, __consumedApprovalId: null };
+  // QUEUED-TASK PROCESSING OFF (fail closed): no capability runs — nothing is
+  // claimed, started, dispatched or recorded as an attempt.
+  const gate = queuedTaskProcessingRefusal('kernel.executeEnvelope');
+  if (gate) return { outcome: 'BLOCKED', capability: input.capability, reason: gate.message };
   const startedAt = Date.now();
   let result: ExecutionEnvelopeResult;
   try {

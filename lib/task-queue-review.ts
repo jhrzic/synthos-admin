@@ -17,6 +17,7 @@ import { listQualifications, findQualification, getTaskClass } from './registry/
 import { routeTask, requirementsFor } from './registry/router';
 import { getSpendPolicy } from './spend/policy';
 import { isDraining } from './runtime-lifecycle';
+import { readQueuedTaskProcessing } from './queued-task-processing';
 
 const QUEUED = ['TODO', 'READY', 'PAUSED_AWAITING_CAPACITY', 'PAUSED_AWAITING_QUALIFIED_CAPACITY', 'PAUSED_AWAITING_BUDGET', 'PAUSED_AWAITING_APPROVAL', 'PAUSED_AWAITING_REPLAN', 'RECONCILING_UNKNOWN_EXECUTION', 'WAITING_FOR_APPROVAL'];
 const CANCELLABLE = ['TODO', 'READY', 'PAUSED_AWAITING_CAPACITY', 'PAUSED_AWAITING_QUALIFIED_CAPACITY', 'PAUSED_AWAITING_BUDGET', 'PAUSED_AWAITING_APPROVAL', 'PAUSED_AWAITING_REPLAN'];
@@ -68,6 +69,8 @@ export function reviewQueuedTasks(opts: { workspaceId?: string | null; limit?: n
     if (t.status === 'WAITING_FOR_APPROVAL') blocked.push('waiting for a human approval');
     if (!policy.modelExecutionEnabled) blocked.push('all model execution is switched off');
     if (isDraining()) blocked.push('the service is draining');
+    const processing = readQueuedTaskProcessing();
+    if (!processing.enabled) blocked.push(`queued-task processing is ${processing.state} (${processing.reason})`);
     let qualificationValid = false;
     let routable = false;
     if (taskClass && getTaskClass(taskClass)) {
@@ -80,7 +83,7 @@ export function reviewQueuedTasks(opts: { workspaceId?: string | null; limit?: n
         if (!d.selected) blocked.push(`router: ${d.explanation}`);
       }
     }
-    const couldExecuteNow = eligible && ['TODO', 'READY'].includes(t.status) && routable && !isDraining();
+    const couldExecuteNow = eligible && ['TODO', 'READY'].includes(t.status) && routable && !isDraining() && processing.enabled;
     const actions: QueuedTaskReview['actions'] = [
       { action: 'CANCEL', allowed: CANCELLABLE.includes(t.status), reason: CANCELLABLE.includes(t.status) ? 'moves it to CANCELLED; history kept' : `not cancellable from ${t.status}` },
       { action: 'ARCHIVE', allowed: CANCELLABLE.includes(t.status), reason: CANCELLABLE.includes(t.status) ? 'retires it as legacy (CANCELLED, recorded as an archive); history kept' : `not archivable from ${t.status}` },

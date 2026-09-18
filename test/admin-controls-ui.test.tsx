@@ -127,6 +127,19 @@ describe('queue review panel', () => {
     fireEvent.click(screen.getByTestId('queue-cancel-legacy-1-no'));
     expect(calls.filter((c) => c.method === 'POST')).toEqual([]);
   });
+
+  it('shows the effective queued-task processing value, and OFF when it is not reported', async () => {
+    routes['/api/master-admin/task-queue'] = () => ({ success: true, tasks: [], processing: { enabled: false, state: 'DISABLED', storedValue: '{"queuedTaskProcessingEnabled":false}', updatedAt: '2026-09-18T00:00:00Z', updatedBy: 'system:default-off', reason: 'explicitly disabled', gates: ['a', 'b'], refusals: {} } });
+    render(<QueueReviewPanel />);
+    await waitFor(() => expect(screen.getByTestId('queued-task-processing-effective').textContent).toBe('OFF'));
+    const text = screen.getByTestId('queued-task-processing').textContent || '';
+    for (const s of ['state DISABLED', 'stored {"queuedTaskProcessingEnabled":false}', 'by system:default-off', 'enforced at 2 points']) expect(text).toContain(s);
+    cleanup();
+    routes['/api/master-admin/task-queue'] = () => ({ success: true, tasks: [] });
+    render(<QueueReviewPanel />);
+    await waitFor(() => expect(calls.length).toBeGreaterThan(1));
+    expect(screen.getByTestId('queued-task-processing-effective').textContent).toMatch(/^OFF \(UNKNOWN/);
+  });
 });
 
 describe('runtime version on the diagnostic screen', () => {

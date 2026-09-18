@@ -49,6 +49,7 @@ import { getApproval } from './approvals';
 import { runScopedAegis, receiptOutcomeFields, commitContentFailure, isContentFailure, externalRuntimeTermination } from './fabric/scoped-verification';
 import { normalizeOutputContract } from './fabric/output-contract';
 import { checkGuardianRules } from './kil-gate';
+import { assertQueuedTaskProcessing } from './queued-task-processing';
 
 // ---------------------------------------------------------------------------
 // ADR-006 — the canonical LOCAL truth for a Windmill job (Workstream C).
@@ -378,6 +379,8 @@ export interface SubmitExternalExecutionResult {
  * never trusts a targetId as sufficient proof on its own.
  */
 export async function submitExternalExecution(params: SubmitExternalExecutionParams): Promise<SubmitExternalExecutionResult> {
+  // QUEUED-TASK PROCESSING OFF (fail closed): no Windmill / Antigravity dispatch.
+  assertQueuedTaskProcessing('externalExecutions.dispatch');
   const db = getDatabase();
   const runtime: ExternalRuntime = params.runtime || 'windmill';
 
@@ -1059,6 +1062,8 @@ export async function cancelExternalExecution(workspaceId: string, id: string): 
 
 /** N2/N3 — a retry never overwrites history; it's a brand-new row, linked via parent_execution_id, with attempt_number incremented. */
 export async function retryExternalExecution(workspaceId: string, actorUserId: string, priorId: string): Promise<SubmitExternalExecutionResult> {
+  // A retry is a new dispatch: refused while queued-task processing is OFF.
+  assertQueuedTaskProcessing('externalExecutions.dispatch');
   const prior = getWorkspaceExternalExecution(workspaceId, priorId);
   if (!prior) throw Object.assign(new Error('External execution not found.'), { code: 'NOT_FOUND' });
   if (!TERMINAL_STATUSES.includes(prior.status) || prior.status === 'SUCCEEDED') {

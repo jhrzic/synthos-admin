@@ -4,6 +4,7 @@ export { RECEIPT_SIGNING_ALGORITHM, receiptAlgorithmLabel };
 import { appendReceiptToLedger } from './authority-ledger';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { assertQueuedTaskProcessing } from './queued-task-processing';
 // @ts-ignore
 import { DatabaseSync } from 'node:sqlite';
 import {
@@ -1699,6 +1700,8 @@ export function getOrchestratorTask(taskId: string, workspaceId: string): Orches
  * Returns true if THIS caller now owns the task.
  */
 export function claimTaskForOrchestration(taskId: string, workspaceId: string, nowIso?: string): boolean {
+  // Fail closed: no claim while queued-task processing is not explicitly ENABLED.
+  assertQueuedTaskProcessing('persistence.claimOrchestratorTask');
   const db = getDatabase();
   const now = nowIso || new Date().toISOString();
   const eligible = ORCHESTRATOR_ELIGIBLE_STATUSES.map(() => '?').join(', ');
@@ -1838,6 +1841,8 @@ export function acquireExecutionClaim(params: {
   payloadHash: string;
   taskId: string;
 }): ExecutionClaimAcquisition {
+  // Fail closed: no execution claim while queued-task processing is not ENABLED.
+  assertQueuedTaskProcessing('persistence.claimExecution');
   const db = getDatabase();
   const now = new Date().toISOString();
   const claimId = `claim-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
@@ -2153,6 +2158,9 @@ export class TaskWorkspaceMismatchError extends Error {
  * caller (lib/external-executions.ts and others) is unaffected.
  */
 export function updateTaskStatus(taskId: string, status: string, timestamp?: string, expectedWorkspaceId?: string): void {
+  // Backstop for every caller: nothing transitions INTO RUNNING while
+  // queued-task processing is not explicitly ENABLED (checked before any write).
+  if (status === 'RUNNING') assertQueuedTaskProcessing('persistence.updateTaskStatus.RUNNING');
   const db = getDatabase();
 
   if (expectedWorkspaceId !== undefined) {

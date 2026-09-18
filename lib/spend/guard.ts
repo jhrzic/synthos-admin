@@ -48,6 +48,7 @@ import {
   insertUsageRow, patchUsageRow, listUsageForKey, newUsageId, spentSince, inFlightCount, periodStarts,
   recordSpendAlert, AMBIGUOUS_STATUSES, type UsageStatus,
 } from './ledger';
+import { queuedTaskProcessingRefusal } from '../queued-task-processing';
 
 export interface PaidCallRequest {
   provider: PaidProvider;
@@ -241,6 +242,11 @@ export function isGovernedZeroCostLocal(provider: string, model: string): boolea
 
 /** Pre-dispatch checks and reservation. Returns a refusal, or the reserved row id and estimate. */
 export function authorizePaidCall(req: PaidCallRequest): { permitted: false; usageId: string; status: 'BLOCKED'; code: string; reason: string; estimatedCostUsd: number | null } | { permitted: true; usageId: string; estimatedCostUsd: number; tier: string; attempt: number; maxTotalTokens?: number } {
+  // QUEUED-TASK PROCESSING OFF (fail closed): no provider, local or
+  // Antigravity dispatch — and, unlike every other refusal here, NO ledger
+  // row: the gate is checked before anything is read or written.
+  const gate = queuedTaskProcessingRefusal('spend.authorizePaidCall');
+  if (gate) return { permitted: false, usageId: 'NOT_RECORDED', status: 'BLOCKED', code: gate.code, reason: gate.message, estimatedCostUsd: null };
   const policy = getSpendPolicy();
   const prior = listUsageForKey(req.idempotencyKey);
   const attempt = prior.length ? Math.max(...prior.map((r) => r.attempt)) + 1 : 1;
