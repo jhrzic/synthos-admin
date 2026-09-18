@@ -24,14 +24,24 @@ import { collectBuildInfo, toShell } from '../scripts/write-build-info.mjs';
 const SHA = 'c0ffee0123456789abcdef0123456789abcdef01';
 const CANARY = 'build-info-canary-value-7f3a9d';
 
-describe('readBuildInfo — reads only the five SYNTHOS_BUILD_* values', () => {
+describe('readBuildInfo — reads only the SYNTHOS_BUILD_* values, the environment and the deployment name', () => {
   it('returns a supplied SHA, time and ref exactly', () => {
     const v = readBuildInfo({ SYNTHOS_BUILD_SHA: SHA, SYNTHOS_BUILD_TREE: 'CLEAN', SYNTHOS_BUILD_TIME: '2026-09-18T12:00:00.000Z', SYNTHOS_BUILD_REF: 'checkpoint/x-1', SYNTHOS_BUILD_SOURCE: 'LAUNCHER_GIT' });
-    expect(v).toEqual({ commit: SHA, buildTime: '2026-09-18T12:00:00.000Z', ref: 'checkpoint/x-1', tree: 'CLEAN', source: 'LAUNCHER_GIT' });
+    expect(v).toEqual({ commit: SHA, buildTime: '2026-09-18T12:00:00.000Z', ref: 'checkpoint/x-1', tree: 'CLEAN', source: 'LAUNCHER_GIT', environment: 'UNKNOWN', deployment: 'UNKNOWN' });
+  });
+
+  it('reports the environment and deployment name when stamped, validated; the deploy archive is a known source', () => {
+    const v = readBuildInfo({ SYNTHOS_BUILD_SHA: SHA, SYNTHOS_BUILD_TREE: 'CLEAN', SYNTHOS_BUILD_SOURCE: 'DEPLOY_ARCHIVE', SYNTHOS_ENVIRONMENT: 'production', SYNTHOS_DEPLOYMENT_NAME: 'admin.getsynthos.com (gce synthos-core-01)' });
+    expect(v).toMatchObject({ commit: SHA, source: 'DEPLOY_ARCHIVE', environment: 'production', deployment: 'admin.getsynthos.com (gce synthos-core-01)' });
+    expect(readBuildInfo({ NODE_ENV: 'production' }).environment).toBe('production');
+    expect(readBuildInfo({ SYNTHOS_ENVIRONMENT: 'local', NODE_ENV: 'production' }).environment).toBe('local');
+    expect(readBuildInfo({ SYNTHOS_ENVIRONMENT: 'PROD; rm -rf /' }).environment).toBe('UNKNOWN');
+    expect(readBuildInfo({ SYNTHOS_DEPLOYMENT_NAME: '$(curl evil)' }).deployment).toBe('UNKNOWN');
+    expect(readBuildInfo({ SYNTHOS_BUILD_SOURCE: 'GUESSED' }).source).toBe('UNKNOWN');
   });
 
   it('missing metadata reads UNKNOWN everywhere', () => {
-    expect(readBuildInfo({})).toEqual({ commit: 'UNKNOWN', buildTime: 'UNKNOWN', ref: 'UNKNOWN', tree: 'UNKNOWN', source: 'UNKNOWN' });
+    expect(readBuildInfo({})).toEqual({ commit: 'UNKNOWN', buildTime: 'UNKNOWN', ref: 'UNKNOWN', tree: 'UNKNOWN', source: 'UNKNOWN', environment: 'UNKNOWN', deployment: 'UNKNOWN' });
   });
 
   it('never fabricates: a short, uppercase or padded-garbage SHA, a bad time or an unsafe ref is UNKNOWN', () => {
@@ -49,7 +59,7 @@ describe('readBuildInfo — reads only the five SYNTHOS_BUILD_* values', () => {
 
   it('unrelated environment values are never included', () => {
     const v = readBuildInfo({ SYNTHOS_BUILD_SHA: SHA, SYNTHOS_BUILD_TREE: 'CLEAN', SYNTHOS_DB_PATH: `/tmp/${CANARY}.db`, HOME: `/Users/${CANARY}`, SOME_API_KEY: CANARY });
-    expect(Object.keys(v).sort()).toEqual(['buildTime', 'commit', 'ref', 'source', 'tree']);
+    expect(Object.keys(v).sort()).toEqual(['buildTime', 'commit', 'deployment', 'environment', 'ref', 'source', 'tree']);
     expect(JSON.stringify(v)).not.toContain(CANARY);
   });
 });
@@ -118,6 +128,8 @@ describe('/api/ready over HTTP', () => {
       ...process.env, SYNTHOS_DB_PATH: DB, PORT: String(port), DISABLE_HMR: 'true',
       SYNTHOS_BUILD_SHA: SHA, SYNTHOS_BUILD_TREE: 'CLEAN', SYNTHOS_BUILD_TIME: '2026-09-18T12:00:00.000Z', SYNTHOS_BUILD_REF: 'checkpoint/ready-test', SYNTHOS_BUILD_SOURCE: 'LAUNCHER_GIT',
       SYNTHOS_READY_TEST_CANARY: CANARY,
+      SYNTHOS_ENVIRONMENT: 'test',
+      SYNTHOS_DEPLOYMENT_NAME: 'ready-test-deployment',
     };
     for (const k of ['OPENAI_API_KEY', 'GEMINI_API_KEY', 'ANTIGRAVITY_API_KEY', 'ANTIGRAVITY_ENABLED']) delete env[k];
     child = spawn(path.join(REPO_ROOT, 'node_modules', '.bin', 'tsx'), ['server.ts'], { cwd: REPO_ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -139,7 +151,7 @@ describe('/api/ready over HTTP', () => {
     const res = await fetch(`${base}/api/ready`);
     const text = await res.text();
     const body = JSON.parse(text);
-    expect(body.version).toEqual({ commit: SHA, buildTime: '2026-09-18T12:00:00.000Z', ref: 'checkpoint/ready-test', tree: 'CLEAN', source: 'LAUNCHER_GIT' });
+    expect(body.version).toEqual({ commit: SHA, buildTime: '2026-09-18T12:00:00.000Z', ref: 'checkpoint/ready-test', tree: 'CLEAN', source: 'LAUNCHER_GIT', environment: 'test', deployment: 'ready-test-deployment' });
     expect(text).not.toContain(CANARY);
     expect(text).not.toContain(TMP);
     expect(text).not.toContain(REPO_ROOT);

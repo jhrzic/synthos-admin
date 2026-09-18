@@ -62,7 +62,7 @@ export type MasterAdminSection =
 interface LiveDiagnostics {
   /** The running build/runtime/schema version — same authority as /api/ready (lib/build-info.ts). */
   runtimeVersion?: {
-    commit: string; buildTime: string; ref: string; tree: string; source: string;
+    commit: string; buildTime: string; ref: string; tree: string; source: string; environment?: string; deployment?: string;
     node: string; registrySchema: string; databaseSchema: { version: number | string; supported?: number | string; fingerprint: string };
   };
   platform: {
@@ -1508,6 +1508,7 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
           <div className="p-4 bg-[#06070E] border border-[#1A1D34] rounded-xl font-mono text-xs space-y-1" data-testid="runtime-version">
             <span className="text-[10px] text-slate-500 uppercase block">Running version</span>
             <div className="text-white break-all" data-testid="runtime-version-commit">commit {diagnostics?.runtimeVersion?.commit ?? 'UNKNOWN'}</div>
+            <div className="text-slate-300" data-testid="runtime-version-deployment">deployment {diagnostics?.runtimeVersion?.deployment ?? 'UNKNOWN'} · environment {diagnostics?.runtimeVersion?.environment ?? 'UNKNOWN'}</div>
             <div className="text-slate-400" data-testid="runtime-version-meta">
               ref {diagnostics?.runtimeVersion?.ref ?? 'UNKNOWN'} · tree {diagnostics?.runtimeVersion?.tree ?? 'UNKNOWN'} · built {diagnostics?.runtimeVersion?.buildTime ?? 'UNKNOWN'} · source {diagnostics?.runtimeVersion?.source ?? 'UNKNOWN'}
             </div>

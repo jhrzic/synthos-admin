@@ -126,7 +126,11 @@ for line in ${(f)BUILD_LINES}; do
     export "${line}"
   fi
 done
-say "version commit=${SYNTHOS_BUILD_SHA:-UNKNOWN} tree=${SYNTHOS_BUILD_TREE:-UNKNOWN} ref=${SYNTHOS_BUILD_REF:-UNKNOWN}"
+# Which deployment this is (shown next to the commit in the Admin footer and
+# diagnostics). The operator's Mac service, not the hosted Admin.
+export SYNTHOS_DEPLOYMENT_NAME="${SYNTHOS_DEPLOYMENT_NAME:-localhost (launchd com.synthos.admin)}"
+export SYNTHOS_ENVIRONMENT="${SYNTHOS_ENVIRONMENT:-local}"
+say "version commit=${SYNTHOS_BUILD_SHA:-UNKNOWN} tree=${SYNTHOS_BUILD_TREE:-UNKNOWN} ref=${SYNTHOS_BUILD_REF:-UNKNOWN} deployment=${SYNTHOS_DEPLOYMENT_NAME} environment=${SYNTHOS_ENVIRONMENT}"
 
 if [[ "${MODE}" == "production" ]]; then
   [[ -f "${REPO}/dist/server.cjs" ]] || refuse "SYNTHOS_SERVICE_MODE=production but dist/server.cjs is missing. Run: npm run build"

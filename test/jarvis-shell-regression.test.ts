@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
+import { NAV_DESTINATIONS, navGroupsFor } from '../src/navigation/canonical-nav';
 
 describe('SYNTHOS GLOBAL SHELL INVARIANT: Jarvis Non-Removable Architecture Rule', () => {
   const appFileContent = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf-8');
@@ -102,11 +103,13 @@ describe('SYNTHOS GLOBAL SHELL INVARIANT: Jarvis Non-Removable Architecture Rule
 
     // Assert SidebarNav includes jarvis entrypoint in SYSTEM
     const sidebarContent = fs.readFileSync(path.resolve(process.cwd(), 'src/components/SidebarNav.tsx'), 'utf-8');
-    expect(sidebarContent).toContain("id: 'jarvis'");
+    expect(sidebarContent).toContain('navGroupsFor({ platformRole })');
+    expect(NAV_DESTINATIONS.find((d) => d.tabId === 'jarvis')?.group).toBe('SYSTEM');
 
     // Assert CommandPalette includes global jarvis entrypoint
     const commandPaletteContent = fs.readFileSync(path.resolve(process.cwd(), 'src/components/CommandPalette.tsx'), 'utf-8');
-    expect(commandPaletteContent).toContain("id: 'jarvis'");
+    expect(commandPaletteContent).toContain('navGroupsFor({ platformRole })');
+    expect(navGroupsFor({ platformRole: 'standard' }).flatMap((g) => g.items).some((d) => d.tabId === 'jarvis')).toBe(true);
   });
 
   it('8. Explicit Assert: Triggering the HUD routes the user to the correct "jarvis" tab and not "hermes-apollo"', () => {

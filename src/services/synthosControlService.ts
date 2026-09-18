@@ -35,19 +35,9 @@ class SynthOsControlLayer {
     }
   };
 
-  private ledgerEvents: ActivityLedgerEvent[] = [
-    {
-      id: 'led-init-01',
-      workspaceId: 'ws-synthos-primary',
-      eventType: 'TASK_CREATED',
-      actorRole: 'orchestrator',
-      actorModel: 'Nous Hermes 3',
-      summary: 'SynthOS Mission Control session initialized with Guardian & Aegis policies.',
-      payload: { policyProfile: 'strict-enterprise-governance' },
-      timestamp: new Date(Date.now() - 3600000).toISOString(),
-      isSimulated: false
-    }
-  ];
+  // Browser-local only. The Activity Ledger screen reads the server record
+  // (GET /api/activity-ledger); nothing here is shown as ledger evidence.
+  private ledgerEvents: ActivityLedgerEvent[] = [];
 
   private receipts: ExecutionReceipt[] = [];
   private artifacts: VaultArtifact[] = [];

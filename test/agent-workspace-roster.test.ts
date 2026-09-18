@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { AGENT_DEFINITIONS } from '../src/data/agentDefinitions';
+import { NAV_DESTINATIONS } from '../src/navigation/canonical-nav';
 
 // ---------------------------------------------------------------------------
 // Regression test for: "Cannot read properties of undefined (reading
@@ -28,9 +29,9 @@ const appContent = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), '
 // AgentView, and so are legitimately absent from AGENT_DEFINITIONS.
 const NON_AGENT_VIEW_TABS = new Set(['agent-fleet', 'agent-memory']);
 
+// The sidebar renders the canonical navigation (src/navigation/canonical-nav.ts).
 function sidebarAgentTabIds(): string[] {
-  const matches = sidebarContent.matchAll(/id:\s*'(agent-[a-z0-9-]+)'\s*as\s*ActiveTab/g);
-  return Array.from(matches, (m) => m[1]).filter((id) => !NON_AGENT_VIEW_TABS.has(id));
+  return NAV_DESTINATIONS.map((d) => d.tabId as string).filter((id) => id.startsWith('agent-') && !NON_AGENT_VIEW_TABS.has(id));
 }
 
 describe('Every sidebar agent workspace tab resolves to a real AGENT_DEFINITIONS entry', () => {

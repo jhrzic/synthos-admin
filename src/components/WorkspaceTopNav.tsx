@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { normalizeContextTabs } from '../navigation/canonical-nav';
 import { ActiveTab } from '../types';
 import { useHermesHealth, deriveHermesDisplayStatus } from '../hooks/useHermesHealth';
 import {
@@ -238,7 +239,7 @@ export const WorkspaceTopNav: React.FC<WorkspaceTopNavProps> = ({
       statusColor: '#F59E0B',
       accentColor: '#8A5CF5',
       primaryTabs: [
-        { id: 'agent-antigravity', label: 'Overview', icon: LayoutDashboard, color: '#8A5CF5' },
+        { id: 'hermes-core', label: 'Overview', icon: LayoutDashboard, color: '#615EFF' },
         { id: 'graph-builder', label: 'Graph', icon: GitMerge, color: '#38BDF8' },
         { id: 'hermes-oracle', label: 'Quant', icon: BrainCircuit, color: '#EC4899' },
         { id: 'kanban', label: 'Tasks', icon: Kanban, color: '#00D26A' },
@@ -306,7 +307,11 @@ export const WorkspaceTopNav: React.FC<WorkspaceTopNavProps> = ({
     }
   };
 
-  const activeConfig = configs[currentWorkspace] || configs.hermes;
+  // Labels and de-duplication come from the canonical navigation
+  // (src/navigation/canonical-nav.ts): one destination, one name.
+  const rawConfig = configs[currentWorkspace] || configs.hermes;
+  const normalized = normalizeContextTabs(rawConfig.primaryTabs, rawConfig.moreTabs);
+  const activeConfig = { ...rawConfig, primaryTabs: normalized.primary, moreTabs: normalized.more };
   const isMoreActive = activeConfig.moreTabs.some(t => t.id === activeTab);
   const activeMoreItem = activeConfig.moreTabs.find(t => t.id === activeTab);
   // fix(hermes): unify runtime status across admin UI — the single

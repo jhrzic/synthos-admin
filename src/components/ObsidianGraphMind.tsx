@@ -96,6 +96,32 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
   const [showSynapseParticles, setShowSynapseParticles] = useState(true);
   const [layoutMode, setLayoutMode] = useState<'force' | 'radial' | 'cluster'>('force');
 
+  // Motion policy. Reduced motion: the layout is settled once and drawn as a
+  // still frame — no particles, no bursts, no running loop. The loop also
+  // stops while the tab is hidden or the graph is scrolled off-screen, and
+  // resumes when it is visible again, so it never burns CPU/GPU unseen.
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState<boolean>(() => {
+    try { return typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches; } catch { return false; }
+  });
+  const [isPageHidden, setIsPageHidden] = useState<boolean>(() => typeof document !== 'undefined' && document.visibilityState === 'hidden');
+  const [isOffscreen, setIsOffscreen] = useState(false);
+  const [canvasUnsupported, setCanvasUnsupported] = useState(false);
+  useEffect(() => {
+    const mq = typeof window !== 'undefined' ? window.matchMedia?.('(prefers-reduced-motion: reduce)') : undefined;
+    const onMq = () => setPrefersReducedMotion(!!mq?.matches);
+    mq?.addEventListener?.('change', onMq);
+    const onVis = () => setIsPageHidden(document.visibilityState === 'hidden');
+    document.addEventListener('visibilitychange', onVis);
+    let io: IntersectionObserver | null = null;
+    if (typeof IntersectionObserver !== 'undefined' && containerRef.current) {
+      io = new IntersectionObserver((entries) => setIsOffscreen(!entries.some((e) => e.isIntersecting)));
+      io.observe(containerRef.current);
+    }
+    return () => { mq?.removeEventListener?.('change', onMq); document.removeEventListener('visibilitychange', onVis); io?.disconnect(); };
+  }, []);
+  const animate = !prefersReducedMotion && !isPageHidden && !isOffscreen;
+  const settledRef = useRef(false);
+
   // Simulation physics parameters
   const [repulsion, setRepulsion] = useState(160);
   const [linkDistance, setLinkDistance] = useState(85);
@@ -354,14 +380,24 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
     particlesRef.current = seededParticles;
   }, [initialNodes, initialLinks]);
 
+  // A content key for the graph data (stable across renders with equal data):
+  // new data re-settles and repaints even while the loop is paused or motion
+  // is reduced, so a still frame is never stale.
+  const graphDataKey = useMemo(() => `${initialNodes.map((n) => n.id).join('|')}#${initialLinks.map((l) => `${l.source}>${l.target}`).join('|')}`, [initialNodes, initialLinks]);
+  const lastDataKeyRef = useRef('');
+
   // Handle Canvas Resize & Simulation Loop
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    let ctx: CanvasRenderingContext2D | null = null;
+    try { ctx = canvas.getContext('2d'); } catch { ctx = null; }
+    if (!ctx) { setCanvasUnsupported(true); return; }
+    const g = ctx;
 
-    let animationFrameId: number;
+    let animationFrameId = 0;
+    let stopped = false;
+    let ready = false;
 
     const resize = () => {
       const container = containerRef.current;
@@ -370,10 +406,15 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
       const dpr = window.devicePixelRatio || 1;
       canvas.width = rect.width * dpr;
       canvas.height = rect.height * dpr;
-      ctx.scale(dpr, dpr);
+      // setTransform, not scale: scale() compounded on every resize.
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (!animate && ready) paintStill();
     };
 
-    resize();
+    // The container is observed directly (window resize misses fullscreen
+    // and layout changes).
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => resize()) : null;
+    if (ro && containerRef.current) ro.observe(containerRef.current);
     window.addEventListener('resize', resize);
 
     // Initial transform center
@@ -398,18 +439,18 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
       // The loop now always re-arms and simply skips painting a frame it
       // cannot measure, so it heals instead of dying.
       if (!container || container.clientWidth === 0 || container.clientHeight === 0) {
-        animationFrameId = requestAnimationFrame(render);
+        if (animate && !stopped) animationFrameId = requestAnimationFrame(render);
         return;
       }
       const width = container.clientWidth;
       const height = container.clientHeight;
 
-      ctx.clearRect(0, 0, width, height);
+      g.clearRect(0, 0, width, height);
 
       // Save context for camera transform
-      ctx.save();
-      ctx.translate(transformRef.current.x, transformRef.current.y);
-      ctx.scale(transformRef.current.k, transformRef.current.k);
+      g.save();
+      g.translate(transformRef.current.x, transformRef.current.y);
+      g.scale(transformRef.current.k, transformRef.current.k);
 
       const nodes = nodesRef.current;
       const links = linksRef.current;
@@ -495,8 +536,8 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
       }
 
       // Render subtle background coordinate grid
-      ctx.strokeStyle = 'rgba(30, 33, 56, 0.25)';
-      ctx.lineWidth = 1;
+      g.strokeStyle = 'rgba(30, 33, 56, 0.25)';
+      g.lineWidth = 1;
       const gridSize = 80;
       const minX = -1200;
       const maxX = 1200;
@@ -504,20 +545,20 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
       const maxY = 1200;
 
       for (let gx = minX; gx <= maxX; gx += gridSize) {
-        ctx.beginPath();
-        ctx.moveTo(gx, minY);
-        ctx.lineTo(gx, maxY);
-        ctx.stroke();
+        g.beginPath();
+        g.moveTo(gx, minY);
+        g.lineTo(gx, maxY);
+        g.stroke();
       }
       for (let gy = minY; gy <= maxY; gy += gridSize) {
-        ctx.beginPath();
-        ctx.moveTo(minX, gy);
-        ctx.lineTo(maxX, gy);
-        ctx.stroke();
+        g.beginPath();
+        g.moveTo(minX, gy);
+        g.lineTo(maxX, gy);
+        g.stroke();
       }
 
       // Periodic Wave Rings from Hubs
-      if (Date.now() - lastWaveTime > 2400) {
+      if (animate && Date.now() - lastWaveTime > 2400) {
         lastWaveTime = Date.now();
         const hubs = nodes.filter(n => n.type === 'vault' || n.type === 'model');
         if (hubs.length > 0) {
@@ -544,14 +585,14 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
           continue;
         }
 
-        ctx.save();
-        ctx.beginPath();
-        ctx.arc(ring.x, ring.y, ring.r, 0, Math.PI * 2);
-        ctx.strokeStyle = ring.color;
-        ctx.globalAlpha = Math.max(0, ring.alpha * 0.4);
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-        ctx.restore();
+        g.save();
+        g.beginPath();
+        g.arc(ring.x, ring.y, ring.r, 0, Math.PI * 2);
+        g.strokeStyle = ring.color;
+        g.globalAlpha = Math.max(0, ring.alpha * 0.4);
+        g.lineWidth = 1.5;
+        g.stroke();
+        g.restore();
       }
 
       const nodeMap = new Map(nodes.map(n => [n.id, n]));
@@ -571,29 +612,29 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
         const isSelected = 
           selectedNoteId && (selectedNoteId === source.id || selectedNoteId === target.id);
 
-        ctx.save();
-        ctx.beginPath();
-        ctx.moveTo(source.x, source.y);
-        ctx.lineTo(target.x, target.y);
+        g.save();
+        g.beginPath();
+        g.moveTo(source.x, source.y);
+        g.lineTo(target.x, target.y);
 
         if (isHighlighted || isSelected) {
-          ctx.strokeStyle = '#615EFF';
-          ctx.lineWidth = 2.2;
-          ctx.globalAlpha = 0.9;
-          ctx.shadowColor = '#615EFF';
-          ctx.shadowBlur = 8;
+          g.strokeStyle = '#615EFF';
+          g.lineWidth = 2.2;
+          g.globalAlpha = 0.9;
+          g.shadowColor = '#615EFF';
+          g.shadowBlur = 8;
         } else {
-          ctx.strokeStyle = link.color || 'rgba(97, 94, 255, 0.18)';
-          ctx.lineWidth = 1;
-          ctx.globalAlpha = isSourceVisible && isTargetVisible ? 0.35 : 0.08;
+          g.strokeStyle = link.color || 'rgba(97, 94, 255, 0.18)';
+          g.lineWidth = 1;
+          g.globalAlpha = isSourceVisible && isTargetVisible ? 0.35 : 0.08;
         }
 
-        ctx.stroke();
-        ctx.restore();
+        g.stroke();
+        g.restore();
       }
 
       // 2. Draw Synapse Particles traveling along edges
-      if (showSynapseParticles && particlesRef.current.length > 0) {
+      if (animate && showSynapseParticles && particlesRef.current.length > 0) {
         for (const p of particlesRef.current) {
           const s = nodeMap.get(p.sourceId);
           const t = nodeMap.get(p.targetId);
@@ -613,14 +654,14 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
           const px = s.x + (t.x - s.x) * p.progress;
           const py = s.y + (t.y - s.y) * p.progress;
 
-          ctx.save();
-          ctx.beginPath();
-          ctx.arc(px, py, 2.2, 0, Math.PI * 2);
-          ctx.fillStyle = p.color;
-          ctx.shadowColor = p.color;
-          ctx.shadowBlur = 6;
-          ctx.fill();
-          ctx.restore();
+          g.save();
+          g.beginPath();
+          g.arc(px, py, 2.2, 0, Math.PI * 2);
+          g.fillStyle = p.color;
+          g.shadowColor = p.color;
+          g.shadowBlur = 6;
+          g.fill();
+          g.restore();
         }
       }
 
@@ -635,62 +676,74 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
             (l.target === hoveredNode.id && l.source === node.id)
           );
 
-        ctx.save();
-        ctx.globalAlpha = isVisible ? 1 : 0.18;
+        g.save();
+        g.globalAlpha = isVisible ? 1 : 0.18;
 
         // Glowing outer halo
         if (isHovered || isSelected || isNeighbor) {
-          ctx.beginPath();
-          ctx.arc(node.x, node.y, node.radius + (isHovered ? 8 : 4), 0, Math.PI * 2);
-          ctx.fillStyle = node.color;
-          ctx.globalAlpha = 0.25;
-          ctx.shadowColor = node.color;
-          ctx.shadowBlur = 16;
-          ctx.fill();
-          ctx.globalAlpha = 1;
+          g.beginPath();
+          g.arc(node.x, node.y, node.radius + (isHovered ? 8 : 4), 0, Math.PI * 2);
+          g.fillStyle = node.color;
+          g.globalAlpha = 0.25;
+          g.shadowColor = node.color;
+          g.shadowBlur = 16;
+          g.fill();
+          g.globalAlpha = 1;
         }
 
         // Inner solid circle
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
-        ctx.fillStyle = node.color;
-        ctx.shadowColor = node.color;
-        ctx.shadowBlur = isHovered || isSelected ? 12 : 4;
-        ctx.fill();
+        g.beginPath();
+        g.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
+        g.fillStyle = node.color;
+        g.shadowColor = node.color;
+        g.shadowBlur = isHovered || isSelected ? 12 : 4;
+        g.fill();
 
         // Node border
-        ctx.strokeStyle = isSelected ? '#FFFFFF' : '#0B0D18';
-        ctx.lineWidth = isSelected ? 2.5 : 1.5;
-        ctx.stroke();
+        g.strokeStyle = isSelected ? '#FFFFFF' : '#0B0D18';
+        g.lineWidth = isSelected ? 2.5 : 1.5;
+        g.stroke();
 
         // Node label
         if (node.radius >= 9 || isHovered || isSelected || isNeighbor || node.degree > 3) {
-          ctx.font = `${isHovered || isSelected ? '600 11px' : '500 10px'} 'Plus Jakarta Sans', sans-serif`;
-          ctx.fillStyle = isHovered || isSelected ? '#FFFFFF' : '#B2B7D6';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'top';
-          ctx.fillText(node.name, node.x, node.y + node.radius + 4);
+          g.font = `${isHovered || isSelected ? '600 11px' : '500 10px'} 'Plus Jakarta Sans', sans-serif`;
+          g.fillStyle = isHovered || isSelected ? '#FFFFFF' : '#B2B7D6';
+          g.textAlign = 'center';
+          g.textBaseline = 'top';
+          g.fillText(node.name, node.x, node.y + node.radius + 4);
         }
 
-        ctx.restore();
+        g.restore();
       }
 
-      ctx.restore();
+      g.restore();
 
-      animationFrameId = requestAnimationFrame(render);
+      if (animate && !stopped) animationFrameId = requestAnimationFrame(render);
     };
 
-    render();
+    // A still frame: settle the layout once (bounded), then paint.
+    function paintStill() {
+      if (!settledRef.current) { for (let i = 0; i < 160; i++) render(); settledRef.current = true; }
+      else render();
+    }
+
+    if (lastDataKeyRef.current !== graphDataKey) { lastDataKeyRef.current = graphDataKey; settledRef.current = false; }
+    ready = true;
+    resize();
+    if (animate) render();
+    else paintStill();
 
     return () => {
+      stopped = true;
       cancelAnimationFrame(animationFrameId);
       window.removeEventListener('resize', resize);
+      ro?.disconnect();
     };
   }, [
     isSimulating, repulsion, linkDistance, gravity, 
     particleSpeed, showSynapseParticles, searchTerm, 
     selectedTagFilter, selectedFolderFilter, layoutMode, 
-    selectedNoteId, hoveredNode
+    selectedNoteId, hoveredNode, animate, graphDataKey
   ]);
 
   // Pointer Interaction Handlers (Pan, Zoom, Drag, Hover)
@@ -840,7 +893,20 @@ export const ObsidianGraphMind: React.FC<ObsidianGraphMindProps> = ({
         isFullscreen ? 'fixed inset-4 z-50 rounded-2xl border-[#615EFF]' : 'w-full'
       }`}
       style={{ height: isFullscreen ? 'calc(100vh - 2rem)' : height }}
+      data-testid="obsidian-graph-mind"
+      data-motion={canvasUnsupported ? 'static-fallback' : animate ? 'animating' : prefersReducedMotion ? 'reduced-motion' : 'paused'}
     >
+      {canvasUnsupported && (
+        <div className="absolute inset-0 z-10 p-4 overflow-y-auto text-xs text-[#C9CCE6]" data-testid="obsidian-graph-static-fallback">
+          <div className="text-white font-bold mb-1">Knowledge graph (static view)</div>
+          <div className="text-[#8E94B8] mb-2">This browser cannot draw the graph canvas. {initialNodes.length} nodes and {initialLinks.length} links, listed by connections:</div>
+          <ul className="space-y-0.5">
+            {[...initialNodes].sort((a, b) => b.degree - a.degree).slice(0, 40).map((n) => (
+              <li key={n.id}><span style={{ color: n.color }}>●</span> {n.name} <span className="text-[#6A7097]">· {n.type} · {n.degree} links</span></li>
+            ))}
+          </ul>
+        </div>
+      )}
       {/* Canvas */}
       <canvas
         ref={canvasRef}

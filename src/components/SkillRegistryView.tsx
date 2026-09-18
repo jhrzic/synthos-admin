@@ -47,6 +47,8 @@ interface McpProbeResult {
 
 interface SkillRegistryViewProps {
   activeWorkspaceId?: string;
+  /** Cross-links to Agent Registry and Tools (the app's navigation). */
+  onNavigate?: (tab: 'agent-fleet' | 'tool-registry' | 'model-registry') => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -60,12 +62,14 @@ interface SkillRegistryViewProps {
 // attempts, never hardcoded.
 // ---------------------------------------------------------------------------
 
-export const SkillRegistryView: React.FC<SkillRegistryViewProps> = ({ activeWorkspaceId }) => {
+export const SkillRegistryView: React.FC<SkillRegistryViewProps> = ({ activeWorkspaceId, onNavigate }) => {
   const workspaceId = activeWorkspaceId || 'ws-synthos-primary';
 
   const [skills, setSkills] = useState<SkillRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Why the list is empty matters: none installed, not accessible, or failed to load.
+  const [errorKind, setErrorKind] = useState<'INACCESSIBLE' | 'FAILED' | null>(null);
 
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -106,13 +110,16 @@ export const SkillRegistryView: React.FC<SkillRegistryViewProps> = ({ activeWork
       const data = await res.json();
       if (!res.ok || data.success === false) {
         setError(data.error || `HTTP ${res.status}`);
+        setErrorKind(res.status === 401 || res.status === 403 ? 'INACCESSIBLE' : 'FAILED');
         setSkills([]);
       } else {
+        setErrorKind(null);
         setSkills(data.skills || []);
         setActiveSkillId((prev) => prev && (data.skills || []).some((s: SkillRecord) => s.skill_id === prev) ? prev : (data.skills || [])[0]?.skill_id || null);
       }
     } catch (err: any) {
       setError(err?.message || 'Network error contacting the Skills API.');
+      setErrorKind('FAILED');
       setSkills([]);
     } finally {
       setLoading(false);
@@ -432,8 +439,10 @@ export const SkillRegistryView: React.FC<SkillRegistryViewProps> = ({ activeWork
               })}
 
               {filteredSkills.length === 0 && (
-                <div className="p-8 text-center bg-[#0D0E1A] border border-[#1E2238] rounded-xl text-[#5F6589] text-xs">
-                  {skills.length === 0 ? 'No skills are installed for this workspace.' : 'No skills matching the current filter.'}
+                <div className="p-8 text-center bg-[#0D0E1A] border border-[#1E2238] rounded-xl text-[#5F6589] text-xs" data-testid="skills-empty-state" data-empty-kind={errorKind ?? (skills.length === 0 ? 'NONE_INSTALLED' : 'FILTERED')}>
+                  {errorKind === 'INACCESSIBLE' ? 'The skills registry is not accessible with your role in this workspace. This is not an empty registry.'
+                    : errorKind === 'FAILED' ? 'The skills registry failed to load. This is not an empty registry — nothing is known about installed skills until it loads.'
+                    : skills.length === 0 ? 'No skills are installed for this workspace.' : 'No skills matching the current filter.'}
                 </div>
               )}
             </div>
@@ -478,6 +487,27 @@ export const SkillRegistryView: React.FC<SkillRegistryViewProps> = ({ activeWork
                   </div>
                 </div>
 
+                {/* The skill record, field by field, from the canonical skills
+                    authority (lib/skills.ts). What it does not record is shown
+                    as NOT RECORDED — never inferred. */}
+                <div className="bg-[#121424] border border-[#1E2238] p-3.5 rounded-xl" data-testid="skill-record">
+                  <div className="text-[10px] font-mono uppercase tracking-wider text-[#A5A2FF] mb-2">Skill record</div>
+                  <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-[11px] font-mono">
+                    <dt className="text-[#5F6589]">ID</dt><dd className="text-white break-all">{activeSkill.skill_id}</dd>
+                    <dt className="text-[#5F6589]">Name / version</dt><dd className="text-white">{activeSkill.name} · v{activeSkill.version}</dd>
+                    <dt className="text-[#5F6589]">Owner / source</dt><dd className="text-[#C9CCE6]">owner NOT RECORDED · {activeSkill.source_type}{activeSkill.source_ref ? `: ${activeSkill.source_ref}` : ''}</dd>
+                    <dt className="text-[#5F6589]">Status</dt><dd className="text-[#C9CCE6]">{activeSkill.status}</dd>
+                    <dt className="text-[#5F6589]">Installed / enabled</dt><dd className="text-[#C9CCE6]">installed · {activeSkill.enabled ? 'ENABLED' : 'DISABLED'}</dd>
+                    <dt className="text-[#5F6589]">Compatible agents</dt><dd className="text-[#C9CCE6]">NOT RECORDED — agents do not yet declare skills{onNavigate && <> · <button className="text-[#8C8AFF] underline" onClick={() => onNavigate('agent-fleet')}>Agent Registry</button></>}</dd>
+                    <dt className="text-[#5F6589]">Required tools / connectors</dt><dd className="text-[#C9CCE6]">{activeSkill.execution_target_type ? `${activeSkill.execution_target_type}${activeSkill.execution_target_ref ? `: ${activeSkill.execution_target_ref}` : ''}` : 'none — no execution target set'}{activeSkill.category === 'mcp' ? ` · credential ${activeSkill.credential_configured ? 'configured' : 'not configured'}` : ''}{onNavigate && <> · <button className="text-[#8C8AFF] underline" onClick={() => onNavigate('tool-registry')}>Tools</button></>}</dd>
+                    <dt className="text-[#5F6589]">Input / output contract</dt><dd className="text-[#C9CCE6]">NOT RECORDED</dd>
+                    <dt className="text-[#5F6589]">Validation / evaluation</dt><dd className="text-[#C9CCE6]">{activeSkill.callCount === 0 ? 'never tested' : `${activeSkill.successCount}/${activeSkill.callCount} test attempts succeeded · last ${activeSkill.lastTestedAt ?? 'UNKNOWN'}`}</dd>
+                    <dt className="text-[#5F6589]">Permissions / approval</dt><dd className="text-[#C9CCE6]">execute: workspace admin, rate-limited, explicit request only · edit: workspace admin · nothing runs or installs automatically</dd>
+                    <dt className="text-[#5F6589]">Last update</dt><dd className="text-[#C9CCE6]">{activeSkill.updated_at}</dd>
+                    <dt className="text-[#5F6589]">Usable</dt><dd className={executability?.executable ? 'text-[#00D26A]' : 'text-[#E8A845]'} data-testid="skill-blocking-reason">{executability ? (executability.executable ? 'READY' : `${executability.reason}: ${executability.message}`) : 'UNKNOWN (executability not loaded)'}</dd>
+                  </dl>
+                </div>
+
                 <div className="bg-[#121424] border border-[#1E2238] p-3.5 rounded-xl space-y-2">
                   <div className="text-[10px] font-mono uppercase tracking-wider text-[#A5A2FF] flex items-center gap-1.5">
                     <Shield className="w-3.5 h-3.5 text-[#615EFF]" />
@@ -514,7 +544,7 @@ export const SkillRegistryView: React.FC<SkillRegistryViewProps> = ({ activeWork
                       className="bg-[#141628] border border-[#1E2238] rounded-lg p-2 text-xs text-white focus:outline-none focus:border-[#615EFF]"
                     >
                       <option value="">No target (NOT_EXECUTABLE)</option>
-                      <option value="model">Model (Gemini via provider router)</option>
+                      <option value="model">Model (via the canonical router)</option>
                       <option value="deterministic">Deterministic action</option>
                       <option value="mcp_tool">MCP tool</option>
                       <option value="hermes_runtime">Hermes dedicated runtime</option>
@@ -523,7 +553,7 @@ export const SkillRegistryView: React.FC<SkillRegistryViewProps> = ({ activeWork
                       type="text"
                       value={targetRef}
                       onChange={(e) => setTargetRef(e.target.value)}
-                      placeholder={targetType === 'model' ? 'gemini-3.1-flash-lite' : targetType === 'deterministic' ? 'vault.list | memory.search' : targetType === 'mcp_tool' ? 'tool name' : 'n/a'}
+                      placeholder={targetType === 'model' ? 'provider/model id from the Model Registry' : targetType === 'deterministic' ? 'vault.list | memory.search' : targetType === 'mcp_tool' ? 'tool name' : 'n/a'}
                       disabled={!targetType || targetType === 'hermes_runtime'}
                       className="bg-[#141628] border border-[#1E2238] rounded-lg p-2 text-xs text-white font-mono placeholder-[#5F6589] focus:outline-none focus:border-[#615EFF] disabled:opacity-40"
                     />
@@ -666,7 +696,7 @@ export const SkillRegistryView: React.FC<SkillRegistryViewProps> = ({ activeWork
               </div>
             ) : (
               <div className="p-12 text-center bg-[#0D0E1A] border border-[#1E2238] rounded-2xl text-[#5F6589]">
-                {skills.length === 0 ? 'No skills are installed for this workspace.' : 'Select a skill from the left directory to inspect it.'}
+                {errorKind ? 'Nothing to inspect: the skills registry did not load.' : skills.length === 0 ? 'No skills are installed for this workspace.' : 'Select a skill from the left directory to inspect it.'}
               </div>
             )}
           </div>

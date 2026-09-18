@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
+import { NAV_DESTINATIONS } from '../src/navigation/canonical-nav';
 
 // ---------------------------------------------------------------------------
 // P1-B — the Windmill external execution control plane (ADR-006) is real
@@ -101,6 +102,7 @@ describe('5: reachable', () => {
   it('is mounted and present in navigation', () => {
     expect(appContent).toContain("activeTab === 'external-executions'");
     expect(appContent).toContain('<ExternalExecutionsView');
-    expect(sidebar).toContain("id: 'external-executions' as ActiveTab");
+    expect(sidebar).toContain('navGroupsFor({ platformRole })');
+    expect(NAV_DESTINATIONS.find((d) => d.tabId === 'external-executions')?.group).toBe('OPERATIONS');
   });
 });

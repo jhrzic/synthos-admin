@@ -72,7 +72,7 @@ import { installBundledPlugins } from "./lib/registry/install";
 import { resolveTaskClass } from "./lib/registry/qualification";
 import { routedModelCall, previewRoutedCall } from "./lib/fabric/routed-call";
 import { getMembership } from "./lib/workspaces";
-import { routeIdentity, listFamiliesAndVersions, approveRouteMapping } from "./lib/registry/identity";
+import { routeIdentity, listFamiliesAndVersions, approveRouteMapping, listDeploymentIds } from "./lib/registry/identity";
 import { runRouteImport, refreshRoute, listRouteImportStatus, getRouteRefreshSettings, setRouteRefreshSettings } from "./lib/registry/route-import";
 import { readOllamaSubstance, substanceHash } from "./lib/registry/substance";
 import { listTaskClasses, upsertTaskClass, listQualifications, startQualificationRun, recordCaseResult, evaluateRun, approveQualification, revokeQualification, getRun as getQualificationRun } from "./lib/registry/qualification";
@@ -108,7 +108,7 @@ import { resolveAutonomyLevel, AUTONOMY_LEVELS, describeAutonomyLevel, isAutonom
 import { getAntigravityControlStatus } from "./lib/antigravity-control";
 import { setPlatformSetting } from "./lib/platform-settings";
 import { describeAntigravityEnablement } from "./lib/antigravity-client";
-import { settleInterruptedAtShutdown } from "./lib/continuity/orphans";
+import { settleInterruptedAtShutdown, reconcileAmbiguousExecution, reconciliationGuide, reconciliationTrail, RECONCILIATION_FINDINGS } from "./lib/continuity/orphans";
 import { reviewQueuedTasks, applyQueueAction, type QueueAction } from "./lib/task-queue-review";
 import { readBuildInfo, runtimeVersionReport } from "./lib/build-info";
 import {
@@ -6885,7 +6885,7 @@ Rules for spokenSummary specifically:
   app.get("/api/registry/identity", requireWorkspaceMember(fromQuery), (_req, res) => {
     const models = listModelViews();
     const routes = models.map((m) => ({ displayName: m.displayName, ...routeIdentity(m.providerId, m.modelId) }));
-    return res.json({ success: true, providerCallsMade: 0, families: listFamiliesAndVersions(), routes });
+    return res.json({ success: true, providerCallsMade: 0, families: listFamiliesAndVersions(), routes, deployments: listDeploymentIds() });
   });
 
   app.post("/api/registry/route-mappings/approve", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-mapping"), (req, res) => {
@@ -7074,6 +7074,45 @@ Rules for spokenSummary specifically:
     if (!resolution) return res.status(400).json({ success: false, error: "resolution must be NOT_ACCEPTED, ACCEPTED or ABANDON" });
     const r = resolveUnknownSegment({ taskId, segmentId: String(req.body?.segmentId || ""), resolution, actor: (req as AuthedRequest).authUser!.user_id, evidence: String(req.body?.evidence || "") });
     return res.status(r.ok ? 200 : 400).json({ success: r.ok, ...r, ...continuityView(taskId) });
+  });
+
+  // ---------------------------------------------------------------------------
+  // AMBIGUOUS-EXECUTION RECONCILIATION (lib/continuity/orphans.ts). Reading the
+  // guide and trail is local; submitting records an operator finding. Neither
+  // calls a provider or retries anything.
+  // ---------------------------------------------------------------------------
+  app.get("/api/tasks/:taskId/execution-reconciliation", requireWorkspaceMember(fromQuery), (req, res) => {
+    const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+    const taskId = String(req.params.taskId);
+    if (!taskInWorkspace(taskId, workspaceId)) return res.status(404).json({ success: false, error: "not found" });
+    return res.json({ success: true, findings: RECONCILIATION_FINDINGS, guide: reconciliationGuide(taskId), trail: reconciliationTrail(taskId) });
+  });
+
+  app.post("/api/tasks/:taskId/execution-reconciliation", requireWorkspaceAdmin(fromBody), (req, res) => {
+    const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+    const taskId = String(req.params.taskId);
+    if (!taskInWorkspace(taskId, workspaceId)) return res.status(404).json({ success: false, error: "not found" });
+    if (req.body?.confirm !== true) return res.status(400).json({ success: false, error: "an explicit confirmation is required" });
+    const b = req.body || {};
+    const r = reconcileAmbiguousExecution({
+      workspaceId, taskId, actor: (req as AuthedRequest).authUser!.user_id,
+      finding: String(b.finding || ""), evidenceSource: b.evidenceSource, windowStart: b.windowStart, windowEnd: b.windowEnd,
+      provider: b.provider, model: b.model, dashboardFinding: b.dashboardFinding, note: b.note,
+      providerResponseId: b.providerResponseId ?? null, usage: b.usage ?? null, correctsEventId: b.correctsEventId ?? null,
+    });
+    return res.status(r.ok ? 200 : 400).json(r.ok ? { success: true, ...r, trail: reconciliationTrail(taskId) } : { success: false, error: r.error });
+  });
+
+  // ACTIVITY LEDGER — the server's append-only activity_events for one
+  // workspace (read-only). Replaces the browser-local ledger the screen used to show.
+  app.get("/api/activity-ledger", requireWorkspaceMember(fromQuery), (req, res) => {
+    const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+    const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
+    const taskId = typeof req.query.taskId === "string" && req.query.taskId ? req.query.taskId : null;
+    const rows = getDatabase().prepare(`SELECT a.event_id, a.task_id, a.event_type, a.agent_id, a.payload_json, a.created_at, t.title AS task_title, t.assigned_model
+      FROM activity_events a JOIN tasks t ON t.task_id = a.task_id WHERE t.workspace_id = ?${taskId ? " AND a.task_id = ?" : ""} ORDER BY a.created_at DESC, a.rowid DESC LIMIT ?`).all(...(taskId ? [workspaceId, taskId, limit] : [workspaceId, limit])) as any[];
+    const total = (getDatabase().prepare("SELECT COUNT(*) AS n FROM activity_events a JOIN tasks t ON t.task_id = a.task_id WHERE t.workspace_id = ?").get(workspaceId) as any).n;
+    return res.json({ success: true, workspaceId, total, events: rows.map((r) => { let payload: any = null; try { payload = JSON.parse(r.payload_json || "null"); } catch { payload = null; } return { eventId: r.event_id, taskId: r.task_id, taskTitle: r.task_title, eventType: r.event_type, actor: r.agent_id, model: r.assigned_model ?? null, payload, createdAt: r.created_at }; }) });
   });
 
   app.get("/api/status", requireAuth, (req, res) => {

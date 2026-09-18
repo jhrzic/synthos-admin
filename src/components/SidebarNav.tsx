@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ActiveTab, AIModelInfo, AgentInfo, KANBAN_COLUMN_IDS } from '../types';
+import { navGroupsFor, isDestinationActive, NAV_DESTINATIONS } from '../navigation/canonical-nav';
+import { BuildIdentityFooter } from './BuildIdentityFooter';
 import { 
   LayoutDashboard, Layers, GitMerge, Database, Globe, Sliders, 
   ChevronLeft, ChevronRight, ChevronDown, Menu, Kanban, Activity, Bot, 
@@ -24,6 +26,8 @@ interface SidebarNavProps {
   onSwitchWorkspace?: (workspaceId: string) => void;
   /** Real, authenticated user's own workspace memberships (Pass IV / E1) — never a hardcoded sample list. */
   authorizedWorkspaces?: Array<{ workspace_id: string; workspace_name: string }>;
+  /** The signed-in user's platform role; platform-admin destinations are hidden from others (the server enforces it too). */
+  platformRole?: string | null;
 }
 
 export const SidebarNav: React.FC<SidebarNavProps> = ({
@@ -36,6 +40,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
   activeWorkspaceId = 'ws-synthos-primary',
   onSwitchWorkspace,
   authorizedWorkspaces = [],
+  platformRole = null,
 }) => {
   // Collapsed rail state persisted locally, default to FALSE for clear navigation accessibility
   const [isCollapsed, setIsCollapsed] = useState<boolean>(() => {
@@ -55,6 +60,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
     } catch {}
     return {
       'OPERATIONS': true,
+      'AGENTS': true,
       'WORKSPACES': true,
       'BUILD': true,
       'KNOWLEDGE': true,
@@ -126,114 +132,20 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
     isWorkspaces?: boolean;
   }
 
-  // Canonical Navigation Structure
-  const navigationGroups: NavGroup[] = [
-    {
-      category: 'OPERATIONS',
-      items: [
-        { id: 'overview' as ActiveTab, label: 'Overview', icon: LayoutDashboard, color: '#A5A2FF' },
-        { id: 'kanban' as ActiveTab, label: 'Kanban', icon: Kanban, badge: `${KANBAN_COLUMN_IDS.length} Stg`, color: '#00D26A' },
-        { id: 'graph-runs' as ActiveTab, label: 'Active Runs', icon: Activity, color: '#EC4899' },
-        { id: 'agent-fleet' as ActiveTab, label: 'Agent Fleet', icon: Bot, color: '#EAB308' },
-        { id: 'guardian-aegis' as ActiveTab, label: 'Approvals', icon: ShieldCheck, color: '#F59E0B' },
-        { id: 'receipts' as ActiveTab, label: 'Receipts', icon: FileCheck, color: '#38BDF8' },
-        { id: 'scheduler' as ActiveTab, label: 'Scheduler', icon: Clock, color: '#EC4899' },
-        { id: 'external-executions' as ActiveTab, label: 'External Executions', icon: Server, color: '#38BDF8' },
-      ]
-    },
-    {
-      category: 'WORKSPACES',
-      isWorkspaces: true,
-      items: [
-        // Pass X / Workstream A2/F — statusTag badges (LIVE/PARTIAL/NOT
-        // CONNECTED) removed below: none were derived from any real signal,
-        // and Codex/Cursor/Antigravity/OpenClaw are not in this app's real
-        // stack at all (see CLAUDE.md). Hermes has a real health source
-        // (useHermesHealth, already used by AirbyteHeader) that could wire
-        // a genuine badge here in a future pass.
-        { id: 'agent-orchestrator' as ActiveTab, label: 'Orchestrator', icon: Crown, color: '#EC4899' },
-        { id: 'hermes-core' as ActiveTab, label: 'Hermes', icon: Cpu, color: '#615EFF' },
-        { id: 'agent-claude' as ActiveTab, label: 'Claude', icon: Sparkles, color: '#F97316' },
-        { id: 'agent-gemini' as ActiveTab, label: 'Gemini', icon: Sparkles, color: '#1A73E8' },
-        { id: 'agent-codex' as ActiveTab, label: 'Codex', icon: Code2, color: '#00D26A' },
-        { id: 'agent-cursor' as ActiveTab, label: 'Cursor', icon: Terminal, color: '#A855F7' },
-        { id: 'agent-antigravity' as ActiveTab, label: 'Antigravity', icon: Compass, color: '#8A5CF5' },
-        { id: 'agent-openclaw' as ActiveTab, label: 'OpenClaw', icon: Globe, color: '#14B8A6' },
-      ]
-    },
-    {
-      category: 'BUILD',
-      items: [
-        { id: 'development' as ActiveTab, label: 'Development', icon: Code2, color: '#615EFF' },
-        { id: 'graph-builder' as ActiveTab, label: 'Graph Builder', icon: GitMerge, color: '#38BDF8' },
-        { id: 'graph-runs' as ActiveTab, navId: 'graph-runs-orchestration', label: 'Graph Runtime', icon: Activity, color: '#EC4899' },
-        { id: 'skill-registry' as ActiveTab, label: 'Skills Registry', icon: Cpu, color: '#615EFF' },
-        { id: 'tool-registry' as ActiveTab, label: 'Tool Registry', icon: Wrench, color: '#38BDF8' },
-        { id: 'bot-mode' as ActiveTab, label: 'Automation', icon: Terminal, color: '#F59E0B' },
-        { id: 'startup-generator' as ActiveTab, label: 'Launchpad', icon: Zap, color: '#00D26A' },
-      ]
-    },
-    {
-      category: 'KNOWLEDGE',
-      items: [
-        { id: 'agent-memory' as ActiveTab, label: 'Memory', icon: HardDrive, color: '#8C8AFF' },
-        { id: 'obsidian' as ActiveTab, label: 'Obsidian / Vault', icon: Database, badge: `${notesCount}`, color: '#EC4899' },
-        { id: 'hermes-oracle' as ActiveTab, label: 'Intelligence', icon: Sparkles, color: '#A5A2FF' },
-        { id: 'aeo-audit' as ActiveTab, label: 'SEO / AEO / GEO Audit', icon: Search, color: '#20B2AA' },
-        { id: 'business-assistant' as ActiveTab, label: 'Business Assistant', icon: MessageSquare, color: '#8C8AFF' },
-        { id: 'lead-scraper' as ActiveTab, label: 'Radar', icon: Globe, color: '#20B2AA' },
-        { id: 'content-library' as ActiveTab, label: 'Research Library', icon: Layers, color: '#38BDF8' },
-      ]
-    },
-    {
-      category: 'GOVERNANCE',
-      items: [
-        { id: 'approval-queue' as ActiveTab, label: 'Approval Queue', icon: ShieldCheck, color: '#F59E0B' },
-        { id: 'guardian-aegis' as ActiveTab, navId: 'guardian-aegis-governance', label: 'Approvals', icon: Shield, color: '#F59E0B' },
-        { id: 'system-audit' as ActiveTab, label: 'Aegis Verifier', icon: ShieldCheck, color: '#00D26A' },
-        { id: 'receipts' as ActiveTab, navId: 'receipts-governance', label: 'Receipts', icon: FileCheck, color: '#38BDF8' },
-        { id: 'activity-ledger' as ActiveTab, label: 'Activity Ledger', icon: Activity, color: '#A5A2FF' },
-      ]
-    },
-    {
-      category: 'PRODUCTS',
-      items: [
-        { id: 'twins' as ActiveTab, label: 'Twins Concierge', icon: Sparkles, color: '#A5A2FF' },
-        { id: 'ton' as ActiveTab, label: 'TON Network', icon: Globe, color: '#0088CC' },
-        { id: 'demos' as ActiveTab, label: 'Product Demos', icon: Code2, color: '#00D26A' },
-        { id: 'workspaces' as ActiveTab, label: 'Customer Workspaces', icon: Building2, color: '#F59E0B' },
-      ]
-    },
-    {
-      category: 'SYSTEM',
-      items: [
-        { id: 'jarvis' as ActiveTab, label: 'Jarvis Executive Hub', icon: Sparkles, color: '#EAB308' },
-        { id: 'model-router' as ActiveTab, label: 'Model Router', icon: Sliders, color: '#38BDF8' },
-        { id: 'hermes-mcps' as ActiveTab, label: 'MCP Registry', icon: Server, color: '#F59E0B' },
-        { id: 'message-bridge' as ActiveTab, label: 'Integrations & Bridge', icon: Network, color: '#615EFF' },
-        { id: 'users-roles' as ActiveTab, label: 'Users & Roles', icon: UserCheck, color: '#00D26A' },
-        { id: 'hermes-analytics' as ActiveTab, label: 'Usage & Costs', icon: BarChart2, color: '#00D26A' },
-        { id: 'upstream-registry' as ActiveTab, label: 'Upstream Watchers', icon: Crown, color: '#D97706' },
-        { id: 'settings' as ActiveTab, label: 'System Settings', icon: Sliders, color: '#9AA2C6' },
-      ]
-    },
-    {
-      category: 'MASTER ADMIN',
-      items: [
-        { id: 'master-admin-walkthrough' as ActiveTab, label: '12-Step Walkthrough', icon: CheckSquare, badge: 'SETUP', color: '#615EFF' },
-        { id: 'master-admin-platform' as ActiveTab, label: 'Platform & Port 3000', icon: Server, color: '#38BDF8' },
-        { id: 'master-admin-providers' as ActiveTab, label: 'Providers Matrix', icon: Zap, color: '#EAB308' },
-        { id: 'master-admin-hermes' as ActiveTab, label: 'Hermes Admin', icon: Cpu, color: '#EC4899' },
-        { id: 'master-admin-voice' as ActiveTab, label: 'Voice & Apollo', icon: Radio, color: '#FF5E8E' },
-        { id: 'master-admin-mcps' as ActiveTab, label: 'MCPs & Tools', icon: Terminal, color: '#F59E0B' },
-        { id: 'master-admin-storage' as ActiveTab, label: 'Storage & Vaults', icon: HardDrive, color: '#8C8AFF' },
-        { id: 'master-admin-database' as ActiveTab, label: 'Database (board.db)', icon: Database, color: '#00D26A' },
-        { id: 'master-admin-security' as ActiveTab, label: 'Security & Guardian', icon: Shield, color: '#F59E0B' },
-        { id: 'master-admin-health' as ActiveTab, label: 'Health & Ping', icon: BarChart2, color: '#00D26A' },
-        { id: 'master-admin-audit' as ActiveTab, label: '32-Step Audit', icon: FileCheck, color: '#38BDF8' },
-      ]
-    }
-  ];
+  // Derived from the ONE canonical navigation definition
+  // (src/navigation/canonical-nav.ts). The mobile drawer is this same rail.
+  const navigationGroups: NavGroup[] = navGroupsFor({ platformRole }).map((g) => ({
+    category: g.group,
+    isWorkspaces: g.group === 'WORKSPACES' || undefined,
+    items: g.items.map((dest) => ({
+      id: dest.tabId,
+      label: dest.label,
+      icon: dest.icon,
+      color: dest.color,
+      badge: dest.badge === 'notes' ? `${notesCount}` : dest.badge === 'kanbanStages' ? `${KANBAN_COLUMN_IDS.length} Stg` : undefined,
+      navId: dest.key,
+    })),
+  }));
 
   return (
     <>
@@ -340,12 +252,14 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
                   <div className="space-y-0.5">
                     {group.items.map((item) => {
                       const Icon = item.icon;
-                      const isActive = activeTab === item.id || (item.hasSubMenu && activeTab.startsWith('hermes-'));
+                      const isActive = isDestinationActive(NAV_DESTINATIONS.find((x) => x.key === item.navId)!, activeTab);
 
                       return (
-                        <div key={item.id} className="space-y-0.5">
+                        <div key={item.navId} className="space-y-0.5">
                           <button
-                            id={`nav-${(item as { navId?: string }).navId ?? item.id}`}
+                            id={`nav-${item.id}`}
+                            data-nav-key={item.navId}
+                            aria-current={isActive ? 'page' : undefined}
                             onClick={() => {
                               setActiveTab(item.id);
                               setIsMobileOpen(false);
@@ -409,7 +323,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
 
         {/* Footer info */}
         <div className="pt-2 border-t border-[#151728] flex items-center justify-between px-1 text-[10px] text-[#8E94B8] shrink-0">
-          {!isCollapsed && <span>SYNTHOS v3.2</span>}
+          <div className="min-w-0 flex-1 pr-1"><BuildIdentityFooter compact={isCollapsed} /></div>
           {onOpenHelp && (
             <button 
               onClick={onOpenHelp}

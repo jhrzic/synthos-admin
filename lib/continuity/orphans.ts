@@ -25,7 +25,10 @@
 // ---------------------------------------------------------------------------
 
 import { getDatabase, updateTaskStatus, recordActivityEvent } from '../persistence';
+import crypto from 'node:crypto';
 import { recordRegistryEvent } from '../registry/store';
+import { recordAdminAuditEvent } from '../audit';
+import { resolveUnknownSegment } from './controller';
 
 /**
  * From this instant every provider call reserved a spend-ledger row BEFORE
@@ -193,4 +196,240 @@ export function settleInterruptedAtShutdown(p: { processStartedAt?: string; acto
   }
   recordRegistryEvent('SHUTDOWN_SETTLED', { actor: p.actor, releasedReservations: out.releasedReservations.length, markedUnknown: out.markedUnknown.length, tasks: out.tasks.map((x) => `${x.taskId}:${x.outcome}`) });
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// OPERATOR RECONCILIATION OF AN AMBIGUOUS EXECUTION — the one audited action
+// that ends (or records evidence about) RECONCILING_UNKNOWN_EXECUTION.
+//
+// The operator checks the provider's own records (dashboard logs / usage) and
+// submits a FINDING with its evidence. This action only RECORDS what the
+// operator found; it never calls a provider, never retries, never edits an
+// earlier status or event, and never fabricates output, tokens, response ids,
+// artifacts, reviews, receipts or ledger rows. Operator-reported usage stays
+// inside the reconciliation event, labelled as operator-reported.
+//
+//   PROVIDER_CONFIRMED_COMPLETED               → INCOMPLETE (the output never reached SynthOS)
+//   PROVIDER_USAGE_FOUND_RESPONSE_UNAVAILABLE  → INCOMPLETE
+//   PROVIDER_CONFIRMED_FAILED                  → FAILED
+//   PROVIDER_CONFIRMED_NO_REQUEST              → CANCELLED (never dispatched; not re-run by this action)
+//   EVIDENCE_INCONCLUSIVE                      → stays RECONCILING_UNKNOWN_EXECUTION
+//
+// None of these can make a task DONE/VERIFIED: a success needs a real
+// artifact, Aegis verification and a receipt, which only execution produces.
+//
+// Idempotent: the same evidence submission (by content hash) changes nothing.
+// A later, different finding on a task already reconciled is a CORRECTION: it
+// must name the event it corrects, and it is appended — never an edit.
+// Tasks under the continuity controller with an UNKNOWN segment are delegated
+// to its segment resolver so there is one reconciliation system.
+// ---------------------------------------------------------------------------
+
+export const RECONCILIATION_FINDINGS = [
+  'PROVIDER_CONFIRMED_COMPLETED',
+  'PROVIDER_CONFIRMED_FAILED',
+  'PROVIDER_CONFIRMED_NO_REQUEST',
+  'PROVIDER_USAGE_FOUND_RESPONSE_UNAVAILABLE',
+  'EVIDENCE_INCONCLUSIVE',
+] as const;
+export type ReconciliationFinding = (typeof RECONCILIATION_FINDINGS)[number];
+
+const FINDING_STATUS: Record<ReconciliationFinding, string> = {
+  PROVIDER_CONFIRMED_COMPLETED: 'INCOMPLETE',
+  PROVIDER_USAGE_FOUND_RESPONSE_UNAVAILABLE: 'INCOMPLETE',
+  PROVIDER_CONFIRMED_FAILED: 'FAILED',
+  PROVIDER_CONFIRMED_NO_REQUEST: 'CANCELLED',
+  EVIDENCE_INCONCLUSIVE: 'RECONCILING_UNKNOWN_EXECUTION',
+};
+const RECONCILED_STATUSES = new Set(['INCOMPLETE', 'FAILED', 'CANCELLED']);
+const RECONCILIATION_EVENTS = ['EXECUTION_RECONCILED', 'EXECUTION_RECONCILIATION_EVIDENCE', 'EXECUTION_RECONCILIATION_CORRECTED'];
+
+export interface ReconciliationSubmission {
+  workspaceId: string;
+  taskId: string;
+  actor: string;
+  finding: string;
+  evidenceSource: string;
+  windowStart: string;
+  windowEnd: string;
+  provider: string;
+  model: string;
+  dashboardFinding: string;
+  note: string;
+  providerResponseId?: string | null;
+  usage?: { inputTokens?: number | null; outputTokens?: number | null; costUsd?: number | null } | null;
+  /** Required when the task has already been reconciled: the event this submission corrects. */
+  correctsEventId?: string | null;
+}
+
+export interface ReconciliationTrailEntry {
+  eventId: string;
+  eventType: string;
+  actor: string;
+  at: string;
+  finding: string;
+  resultingStatus: string;
+  submissionHash: string;
+  evidence: Record<string, unknown>;
+  correctsEventId: string | null;
+}
+
+const UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+const text = (v: unknown, min: number, max: number) => typeof v === 'string' && v.trim().length >= min && v.trim().length <= max;
+
+export function reconciliationTrail(taskId: string): ReconciliationTrailEntry[] {
+  const rows = getDatabase().prepare(`SELECT event_id, event_type, agent_id, payload_json, created_at FROM activity_events WHERE task_id = ? AND event_type IN (${RECONCILIATION_EVENTS.map(() => '?').join(',')}) ORDER BY rowid`).all(taskId, ...RECONCILIATION_EVENTS) as any[];
+  return rows.map((r) => {
+    let p: any = {};
+    try { p = JSON.parse(r.payload_json || '{}'); } catch { /* unreadable payload stays empty */ }
+    return { eventId: r.event_id, eventType: r.event_type, actor: r.agent_id, at: r.created_at, finding: p.finding, resultingStatus: p.resultingStatus, submissionHash: p.submissionHash, evidence: p.evidence ?? {}, correctsEventId: p.correctsEventId ?? null };
+  });
+}
+
+/** Where the dispatch would have gone, for the providers whose adapters SynthOS has used. */
+const DISPATCH_ENDPOINT: Record<string, string> = { openai: 'POST /v1/responses' };
+
+/**
+ * What an operator must look for in the provider's own records. Derived from
+ * the task's append-only evidence — nothing is fetched from any provider.
+ */
+export function reconciliationGuide(taskId: string): {
+  taskId: string; status: string; executionStartedAt: string | null; suggestedWindow: { start: string; end: string } | null;
+  model: string | null; provider: string | null; endpoint: string | null; instruction: string | null;
+  knownIdentifiers: { providerRequestIds: string[]; responseIds: string[] }; exclude: Array<{ taskId: string; startedAt: string; model: string | null }>;
+  evidence: OrphanEvidence | null;
+} | null {
+  const db = getDatabase();
+  const t = db.prepare('SELECT task_id, status, assigned_model, description FROM tasks WHERE task_id = ?').get(taskId) as any;
+  if (!t) return null;
+  const e = orphanEvidence(taskId);
+  const started = e?.executionStartedAt ?? null;
+  const model = t.assigned_model && t.assigned_model !== 'n/a' ? String(t.assigned_model) : null;
+  let provider: string | null = null;
+  if (model) {
+    try {
+      const routes = db.prepare('SELECT DISTINCT provider_id FROM registry_models WHERE model_id = ?').all(model) as any[];
+      if (routes.length === 1) provider = routes[0].provider_id;
+    } catch { /* registry not provisioned */ }
+    if (!provider) {
+      const ev = db.prepare("SELECT payload_json FROM activity_events WHERE task_id = ? AND event_type IN ('PROVIDER_COMPLETED','PROVIDER_FAILED') ORDER BY rowid DESC LIMIT 1").get(taskId) as any;
+      try { provider = ev ? JSON.parse(ev.payload_json)?.provider ?? null : null; } catch { /* stays null */ }
+    }
+    if (!provider) {
+      // Other tasks on the same model that did record their provider.
+      const ev = db.prepare("SELECT a.payload_json FROM activity_events a JOIN tasks t ON t.task_id = a.task_id WHERE t.assigned_model = ? AND a.event_type = 'PROVIDER_COMPLETED' ORDER BY a.rowid DESC LIMIT 1").get(model) as any;
+      try { provider = ev ? JSON.parse(ev.payload_json)?.provider ?? null : null; } catch { /* stays null */ }
+    }
+  }
+  let window: { start: string; end: string } | null = null;
+  let exclude: Array<{ taskId: string; startedAt: string; model: string | null }> = [];
+  if (started) {
+    const s = Date.parse(started);
+    // Through the end of the minute after the dispatch could have completed (~60 s adapter timeout).
+    const end = Math.ceil((s + 60_000) / 60_000) * 60_000;
+    window = { start: started, end: new Date(end).toISOString() };
+    exclude = (db.prepare("SELECT a.task_id, a.created_at, t.assigned_model FROM activity_events a JOIN tasks t ON t.task_id = a.task_id WHERE a.event_type = 'EXECUTION_STARTED' AND a.task_id != ? AND a.created_at > ? AND a.created_at <= ? ORDER BY a.created_at").all(taskId, started, new Date(s + 15 * 60_000).toISOString()) as any[])
+      .filter((r) => !model || r.assigned_model === model)
+      .map((r) => ({ taskId: r.task_id, startedAt: r.created_at, model: r.assigned_model ?? null }));
+  }
+  const ids = e?.ledgerRows.map((r) => r.providerRequestId).filter((x): x is string => !!x) ?? [];
+  return {
+    taskId, status: t.status, executionStartedAt: started, suggestedWindow: window, model, provider,
+    endpoint: provider ? DISPATCH_ENDPOINT[provider] ?? null : null,
+    instruction: t.description ? String(t.description).slice(0, 1000) : null,
+    knownIdentifiers: { providerRequestIds: ids, responseIds: [] }, exclude, evidence: e,
+  };
+}
+
+export function reconcileAmbiguousExecution(s: ReconciliationSubmission): { ok: true; changed: boolean; status: string; eventId: string; finding: ReconciliationFinding } | { ok: false; error: string } {
+  const db = getDatabase();
+  const t = db.prepare('SELECT task_id, workspace_id, status, assigned_model FROM tasks WHERE task_id = ?').get(s.taskId) as any;
+  if (!t || t.workspace_id !== s.workspaceId) return { ok: false, error: `task ${s.taskId} is not in workspace ${s.workspaceId}` };
+  if (!(RECONCILIATION_FINDINGS as readonly string[]).includes(s.finding)) return { ok: false, error: `finding must be one of ${RECONCILIATION_FINDINGS.join(', ')}` };
+  const finding = s.finding as ReconciliationFinding;
+
+  // ---- evidence validation (nothing is inferred or filled in) ----
+  if (!text(s.evidenceSource, 3, 200)) return { ok: false, error: 'evidence source is required (e.g. "OpenAI dashboard → Logs → Responses")' };
+  if (!UTC_RE.test(String(s.windowStart ?? '')) || !UTC_RE.test(String(s.windowEnd ?? ''))) return { ok: false, error: 'the UTC window start and end are required as ISO-8601 UTC times ending in Z' };
+  if (Date.parse(s.windowEnd) <= Date.parse(s.windowStart)) return { ok: false, error: 'the window end must be after its start' };
+  if (!text(s.provider, 2, 80) || !text(s.model, 2, 120)) return { ok: false, error: 'provider and model are required' };
+  if (!text(s.dashboardFinding, 10, 2000)) return { ok: false, error: 'the dashboard finding is required: what the provider records show, in words' };
+  if (!text(s.note, 10, 2000)) return { ok: false, error: 'an explanatory note is required' };
+  const assigned = t.assigned_model && t.assigned_model !== 'n/a' ? String(t.assigned_model) : null;
+  if (assigned && s.model.trim() !== assigned) return { ok: false, error: `the evidence is about model "${s.model.trim()}", but this task dispatched to "${assigned}"` };
+  const started = orphanEvidence(s.taskId)?.executionStartedAt ?? null;
+  if (started && (Date.parse(s.windowStart) > Date.parse(started) || Date.parse(s.windowEnd) < Date.parse(started))) {
+    return { ok: false, error: `the window must include the dispatch time ${started}` };
+  }
+  const responseId = s.providerResponseId == null || s.providerResponseId === '' ? null : String(s.providerResponseId).trim();
+  if (responseId !== null) {
+    if (!/^[A-Za-z0-9_.:-]{4,200}$/.test(responseId)) return { ok: false, error: 'the provider response id has an unexpected format' };
+    if (finding !== 'PROVIDER_CONFIRMED_COMPLETED' && finding !== 'PROVIDER_CONFIRMED_FAILED') return { ok: false, error: `a provider response id cannot accompany ${finding}` };
+  }
+  let usage: { inputTokens: number | null; outputTokens: number | null; costUsd: number | null } | null = null;
+  if (s.usage && Object.values(s.usage).some((v) => v !== null && v !== undefined && v !== ('' as any))) {
+    if (finding === 'PROVIDER_CONFIRMED_NO_REQUEST' || finding === 'EVIDENCE_INCONCLUSIVE') return { ok: false, error: `usage figures cannot accompany ${finding}` };
+    const n = (v: unknown, int: boolean) => (v === null || v === undefined || v === '' ? null : typeof v === 'number' && Number.isFinite(v) && v >= 0 && (!int || Number.isInteger(v)) ? v : NaN);
+    usage = { inputTokens: n(s.usage.inputTokens, true), outputTokens: n(s.usage.outputTokens, true), costUsd: n(s.usage.costUsd, false) };
+    if (Object.values(usage).some((v) => Number.isNaN(v))) return { ok: false, error: 'usage figures must be non-negative numbers (tokens as integers), and only those actually shown by the provider' };
+  }
+
+  const evidence = {
+    evidenceSource: s.evidenceSource.trim(), windowStart: s.windowStart, windowEnd: s.windowEnd,
+    provider: s.provider.trim(), model: s.model.trim(), dashboardFinding: s.dashboardFinding.trim(), note: s.note.trim(),
+    providerResponseId: responseId, operatorReportedUsage: usage,
+  };
+  const submissionHash = crypto.createHash('sha256').update(JSON.stringify({ finding, ...evidence })).digest('hex');
+  const trail = reconciliationTrail(s.taskId);
+  const same = trail.find((x) => x.submissionHash === submissionHash);
+  if (same) return { ok: true, changed: false, status: t.status, eventId: same.eventId, finding };
+
+  const decisive = [...trail].reverse().find((x) => x.finding !== 'EVIDENCE_INCONCLUSIVE');
+  let eventType = finding === 'EVIDENCE_INCONCLUSIVE' ? 'EXECUTION_RECONCILIATION_EVIDENCE' : 'EXECUTION_RECONCILED';
+  let correctsEventId: string | null = null;
+  if (t.status !== 'RECONCILING_UNKNOWN_EXECUTION') {
+    if (!decisive || !RECONCILED_STATUSES.has(t.status)) return { ok: false, error: `task is ${t.status}: only a task in RECONCILING_UNKNOWN_EXECUTION can be reconciled` };
+    if (!s.correctsEventId) return { ok: false, error: `task was already reconciled by ${decisive.eventId} (${decisive.finding}); conflicting evidence must be submitted as a correction naming that event` };
+    if (s.correctsEventId !== decisive.eventId) return { ok: false, error: `a correction must name the latest reconciliation event, ${decisive.eventId}` };
+    eventType = 'EXECUTION_RECONCILIATION_CORRECTED';
+    correctsEventId = decisive.eventId;
+  } else if (s.correctsEventId) {
+    return { ok: false, error: 'this task has not been reconciled yet; there is nothing to correct' };
+  }
+
+  // Continuity-managed tasks: the segment resolver owns the state change.
+  let continuityDelegated = false;
+  if (t.status === 'RECONCILING_UNKNOWN_EXECUTION' && finding !== 'EVIDENCE_INCONCLUSIVE') {
+    try {
+      const seg = db.prepare("SELECT segment_id FROM task_segments WHERE task_id = ? AND status = 'UNKNOWN' ORDER BY sequence DESC LIMIT 1").get(s.taskId) as any;
+      if (seg) continuityDelegated = true;
+    } catch { /* no continuity tables */ }
+  }
+
+  const resultingStatus = FINDING_STATUS[finding];
+  const eventId = recordActivityEvent({
+    taskId: s.taskId, expectedWorkspaceId: s.workspaceId, eventType, agentId: s.actor,
+    payload: {
+      finding, resultingStatus, fromStatus: t.status, submissionHash, correctsEventId, evidence,
+      provenance: 'OPERATOR_REPORTED — recorded as submitted; not verified against the provider by SynthOS',
+      fabricated: { output: false, tokens: false, responseId: false, artifact: false, review: false, receipt: false, ledgerRow: false },
+      retried: false,
+    },
+  });
+  const recordedId = eventId.event_id;
+
+  if (continuityDelegated) {
+    // The continuity controller owns segment and continuity state. NO_REQUEST
+    // maps to ABANDON (never NOT_ACCEPTED, which would resume the task: this
+    // action never re-runs anything).
+    const seg = db.prepare("SELECT segment_id FROM task_segments WHERE task_id = ? AND status = 'UNKNOWN' ORDER BY sequence DESC LIMIT 1").get(s.taskId) as any;
+    const r = resolveUnknownSegment({ taskId: s.taskId, segmentId: seg.segment_id, resolution: finding === 'PROVIDER_CONFIRMED_NO_REQUEST' ? 'ABANDON' : 'ACCEPTED', actor: s.actor, evidence: `${evidence.evidenceSource}: ${evidence.dashboardFinding}` });
+    const now = (db.prepare('SELECT status FROM tasks WHERE task_id = ?').get(s.taskId) as any).status;
+    if (r.ok && now !== resultingStatus) updateTaskStatus(s.taskId, resultingStatus, undefined, s.workspaceId);
+    if (!r.ok) updateTaskStatus(s.taskId, resultingStatus, undefined, s.workspaceId);
+  } else if (resultingStatus !== t.status) {
+    updateTaskStatus(s.taskId, resultingStatus, undefined, s.workspaceId);
+  }
+  recordAdminAuditEvent({ actorUserId: s.actor, eventType: 'EXECUTION_RECONCILED', targetType: 'task', targetId: s.taskId, detail: { workspaceId: s.workspaceId, activityEventId: recordedId, eventType, finding, fromStatus: t.status, resultingStatus, submissionHash, correctsEventId } });
+  return { ok: true, changed: true, status: resultingStatus, eventId: recordedId, finding };
 }

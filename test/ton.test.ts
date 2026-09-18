@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { NAV_DESTINATIONS } from '../src/navigation/canonical-nav';
 
 // A fresh, isolated SQLite file for this test file only — set BEFORE any
 // persistence function runs its first (lazy) getDatabase() call.
@@ -199,18 +200,16 @@ describe('TON UI truth: no fabricated status text anywhere in this repo', () => 
 
   it('14. FirstRunTour\'s agent-fleet target resolves to a real nav item', () => {
     expect(tourContent).toContain("target: '#nav-agent-fleet'");
-    expect(sidebarContent).toContain("id: 'agent-fleet'");
+    expect(NAV_DESTINATIONS.some((d) => d.tabId === 'agent-fleet')).toBe(true);
+    expect(sidebarContent).toContain('id={`nav-${item.id}`}');
   });
 
   it('15. Sidebar nav DOM ids are unique across the whole nav (item.navId ?? item.id, deduplicated)', () => {
     // Extract every { id: 'x' ... } or { id: 'x', navId: 'y' ... } object literal
     // from the navigationGroups source and compute the DOM id each would render.
-    const itemRe = /\{\s*id:\s*'([^']+)'\s*as ActiveTab(?:,\s*navId:\s*'([^']+)')?/g;
-    const domIds: string[] = [];
-    let match: RegExpExecArray | null;
-    while ((match = itemRe.exec(sidebarContent)) !== null) {
-      domIds.push(match[2] ?? match[1]);
-    }
+    // DOM id is nav-<tabId>; the canonical definition lists each tab once.
+    expect(sidebarContent).toContain('id={`nav-${item.id}`}');
+    const domIds = NAV_DESTINATIONS.map((d) => `nav-${d.tabId}`);
     expect(domIds.length).toBeGreaterThan(0);
     expect(new Set(domIds).size).toBe(domIds.length);
   });

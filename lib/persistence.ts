@@ -2898,6 +2898,61 @@ export function ensureSigningKeyPair(): { privateKeyPem: string; publicKeyPem: s
   return { privateKeyPem: privateKey, publicKeyPem: publicKey, fingerprint };
 }
 
+// ---------------------------------------------------------------------------
+// REVOKED RECEIPT-SIGNING KEYS — part of the receipt-verification authority.
+//
+// Only PUBLIC-key fingerprints are stored (SHA-256 of the SPKI DER encoding),
+// never private material. A key listed here is rejected everywhere: a receipt
+// whose public key (or the configured trusted key) matches it never verifies,
+// and nothing may be signed with it. Revocation is permanent; entries are
+// never removed.
+// ---------------------------------------------------------------------------
+
+export interface RevokedSigningKey {
+  fingerprint: string;
+  algorithm: 'Ed25519';
+  status: 'REVOKED';
+  reason: string;
+  discoveredAt: string;
+  affectedCommits: string[];
+  scope: string;
+}
+
+export const REVOKED_RECEIPT_SIGNING_KEYS: readonly RevokedSigningKey[] = Object.freeze([
+  {
+    fingerprint: 'sha256:7adbc0bb09b99bf93ad57a4ee29069592824ebdc56b1cdc3a4f0e169832cd6ab',
+    algorithm: 'Ed25519',
+    status: 'REVOKED',
+    reason: 'Private key data/keys/ed25519_private.pem was committed to the public jhrzic/synthos-admin repository; it remains recoverable from Git history.',
+    discoveredAt: '2026-09-18',
+    affectedCommits: ['0e09586', 'e2fd065', '7b07203'],
+    scope: 'Development-era receipt-signing key, replaced before the first production receipt (2026-09-08). No production receipt uses it. Rejected for all receipts, in every workspace, permanently.',
+  },
+]);
+
+/** sha256:<hex> of the key's SPKI DER encoding, or null when it is not a parseable public key. */
+export function receiptKeyFingerprint(publicKeyPem: string): string | null {
+  try {
+    const der = crypto.createPublicKey(publicKeyPem).export({ type: 'spki', format: 'der' });
+    return `sha256:${crypto.createHash('sha256').update(der).digest('hex')}`;
+  } catch {
+    return null;
+  }
+}
+
+// Test-only additions (synthetic keys), refused outside the test runner.
+const revokedForTest: RevokedSigningKey[] = [];
+export function revokeReceiptKeyForTest(entry: RevokedSigningKey): void {
+  if (!process.env.VITEST) throw new Error('revokeReceiptKeyForTest is only available under the test runner');
+  revokedForTest.push(entry);
+}
+
+export function revokedReceiptKey(publicKeyPem: string): RevokedSigningKey | null {
+  const fp = receiptKeyFingerprint(publicKeyPem);
+  if (!fp) return null;
+  return REVOKED_RECEIPT_SIGNING_KEYS.find((k) => k.fingerprint === fp) ?? revokedForTest.find((k) => k.fingerprint === fp) ?? null;
+}
+
 export function getSigningPublicKey(): { publicKeyPem: string; fingerprint: string; algorithm: string } {
   const { publicKeyPem, fingerprint } = ensureSigningKeyPair();
   return { publicKeyPem, fingerprint, algorithm: RECEIPT_SIGNING_ALGORITHM };
@@ -2919,6 +2974,8 @@ export function signReceiptPayload(canonicalPayloadStr: string): {
   fingerprint: string;
 } {
   const { privateKeyPem, publicKeyPem, fingerprint } = ensureSigningKeyPair();
+  const revoked = revokedReceiptKey(publicKeyPem);
+  if (revoked) throw new Error(`Refusing to sign: the configured receipt-signing key ${revoked.fingerprint} is REVOKED (${revoked.reason})`);
   const signatureBuffer = crypto.sign(null, Buffer.from(canonicalPayloadStr, 'utf8'), privateKeyPem);
   const signature = signatureBuffer.toString('hex');
   return {
@@ -2961,14 +3018,20 @@ export function verifyReceipt(receipt: {
       return false;
     }
 
-    // 2. Confirm receipt.public_key exactly matches the trusted SynthOS public key
+    // 2. A revoked key never verifies — neither as the receipt's key nor as
+    //    the configured trusted key — even with a mathematically valid signature.
+    if (revokedReceiptKey(receipt.public_key || '') || revokedReceiptKey(trustedKeyInfo.publicKeyPem || '')) {
+      return false;
+    }
+
+    // 3. Confirm receipt.public_key exactly matches the trusted SynthOS public key
     const cleanReceiptKey = (receipt.public_key || '').trim().replace(/\r\n/g, '\n');
     const cleanTrustedKey = (trustedKeyInfo.publicKeyPem || '').trim().replace(/\r\n/g, '\n');
     if (!cleanReceiptKey || cleanReceiptKey !== cleanTrustedKey) {
       return false;
     }
 
-    // 3. Cryptographically verify signature using trusted SynthOS public key
+    // 4. Cryptographically verify signature using trusted SynthOS public key
     return verifyReceiptSignature(
       receipt.payload_json,
       receipt.signature,

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { ActiveTab, ObsidianNote } from '../types';
+import { navGroupsFor } from '../navigation/canonical-nav';
 import { 
   Search, Terminal, Database, Bot, Sparkles, 
   Layers, ArrowRight, Zap, X, Brain, Code2, Globe, 
@@ -13,6 +14,8 @@ interface CommandPaletteProps {
   onClose: () => void;
   onSelectTab: (tab: ActiveTab) => void;
   notes: ObsidianNote[];
+  /** The signed-in user's platform role (platform-admin destinations are hidden from others; the server enforces it too). */
+  platformRole?: string | null;
 }
 
 export const CommandPalette: React.FC<CommandPaletteProps> = ({
@@ -20,6 +23,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   onClose,
   onSelectTab,
   notes,
+  platformRole = null,
 }) => {
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -37,249 +41,25 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   const isHoldingRef = useRef<boolean>(false);
   const latestTranscriptRef = useRef<string>('');
 
+  // Navigation actions derive from the ONE canonical navigation definition
+  // (src/navigation/canonical-nav.ts): same destinations, same names, same
+  // role filtering as the rail. No separate list lives here.
   const quickActions: Array<{
     id: ActiveTab;
     label: string;
     category: string;
     icon: React.ReactNode;
     keywords: string[];
-  }> = useMemo(() => [
-    { 
-      id: 'overview', 
-      label: 'Open Mission Control', 
-      category: 'Mission Control', 
-      icon: <Layers className="w-4 h-4 text-[#A5A2FF]" />,
-      keywords: ['mission control', 'overview', 'dashboard', 'hq', 'command center']
-    },
-    { 
-      id: 'agent-fleet', 
-      label: 'Open Workforce Overview', 
-      category: 'Workforce', 
-      icon: <Bot className="w-4 h-4 text-[#EC4899]" />,
-      keywords: ['agents', 'fleet', 'workforce', 'orchestrator', 'scout', 'scribe', 'reach', 'dev', 'analytics', 'openclaw']
-    },
-    { 
-      id: 'hermes-core', 
-      label: 'Open Hermes Workspace', 
-      category: 'Workforce', 
-      icon: <Sparkles className="w-4 h-4 text-[#615EFF]" />,
-      keywords: ['hermes', 'workspace', 'agent workspace', 'objective', 'command']
-    },
-    { 
-      id: 'kanban', 
-      label: 'Open Tasks Board', 
-      category: 'Flows', 
-      icon: <Kanban className="w-4 h-4 text-[#00D26A]" />,
-      keywords: ['tasks', 'kanban', 'flows', 'backlog', 'doing', 'done', 'dependencies']
-    },
-    { 
-      id: 'graph-builder', 
-      label: 'Open Graph Builder', 
-      category: 'Flows', 
-      icon: <GitMerge className="w-4 h-4 text-[#8C8AFF]" />,
-      keywords: ['graph builder', 'flows', 'workflow', 'dag', 'nodes', 'edges', 'canvas', 'pipeline', 'execution']
-    },
-    { 
-      id: 'graph-runs', 
-      label: 'Open Graph Runs', 
-      category: 'Flows', 
-      icon: <Activity className="w-4 h-4 text-[#38BDF8]" />,
-      keywords: ['graph runs', 'flows', 'execution', 'telemetry', 'logs', 'history', 'trace']
-    },
-    { 
-      id: 'bot-mode', 
-      label: 'Open Automation', 
-      category: 'Flows', 
-      icon: <Clock className="w-4 h-4 text-[#EAB308]" />,
-      keywords: ['automation', 'cron', 'schedules', 'jobs', 'bot mode', 'autonomous', 'timers']
-    },
-    { 
-      id: 'model-router', 
-      label: 'Open Model Router', 
-      category: 'Models', 
-      icon: <Network className="w-4 h-4 text-[#38BDF8]" />,
-      keywords: ['model router', 'models', 'providers', 'stacking', 'openrouter', 'cost', 'latency', 'gemini', 'openai', 'claude', 'deepseek', 'kimi']
-    },
-    { 
-      id: 'agent-memory', 
-      label: 'Open Memory', 
-      category: 'Knowledge', 
-      icon: <Database className="w-4 h-4 text-[#EC4899]" />,
-      keywords: ['brain', 'memory', 'knowledge', 'long-term', 'vector', 'context']
-    },
-    { 
-      id: 'obsidian', 
-      label: 'Open Vault / Obsidian', 
-      category: 'Knowledge', 
-      icon: <Database className="w-4 h-4 text-[#8C8AFF]" />,
-      keywords: ['vault', 'obsidian', 'knowledge', 'notes', 'wikilinks', 'content library', 'memos']
-    },
-    { 
-      id: 'model-router', 
-      label: 'Open Model Router', 
-      category: 'Models & Tools', 
-      icon: <Network className="w-4 h-4 text-[#00D26A]" />,
-      keywords: ['model router', 'models', 'providers', 'stacking', 'openrouter', 'cost', 'latency']
-    },
-    { 
-      id: 'skill-registry', 
-      label: 'Open Skills & MCP', 
-      category: 'Models & Tools', 
-      icon: <Terminal className="w-4 h-4 text-[#38BDF8]" />,
-      keywords: ['skills', 'mcp', 'tools', 'registry', 'parameters', 'functions']
-    },
-    { 
-      id: 'startup-generator', 
-      label: 'Open Intelligence', 
-      category: 'Intelligence', 
-      icon: <Rocket className="w-4 h-4 text-[#FF5E8E]" />,
-      keywords: ['intelligence', 'research', 'signals', 'lead scraper', 'auto content', 'repos']
-    },
-    { 
-      id: 'idea-strategy', 
-      label: 'Open Launchpad', 
-      category: 'Intelligence', 
-      icon: <Zap className="w-4 h-4 text-[#F59E0B]" />,
-      keywords: ['launchpad', 'ideas', 'validation', 'gtm', 'studio leadgen', 'triage']
-    },
-    { 
-      id: 'guardian-aegis', 
-      label: 'Open Guardian & Aegis', 
-      category: 'Governance', 
-      icon: <Shield className="w-4 h-4 text-[#EC4899]" />,
-      keywords: ['guardian', 'aegis', 'governance', 'policy', 'rules', 'security', 'audit']
-    },
-    { 
-      id: 'receipts', 
-      label: 'Open Execution Receipts', 
-      category: 'Governance', 
-      icon: <Check className="w-4 h-4 text-[#38BDF8]" />,
-      keywords: ['receipts', 'governance', 'proofs', 'hashes', 'verification']
-    },
-    { 
-      id: 'activity-ledger', 
-      label: 'Open Activity Ledger', 
-      category: 'Governance', 
-      icon: <Activity className="w-4 h-4 text-[#EAB308]" />,
-      keywords: ['activity ledger', 'governance', 'audit log', 'events', 'history']
-    },
-    { 
-      id: 'workspaces', 
-      label: 'Open Products / Workspaces', 
-      category: 'Workspaces', 
-      icon: <Layers className="w-4 h-4 text-[#00D26A]" />,
-      keywords: ['workspaces', 'products', 'environments', 'isolation', 'ton network', 'telegram']
-    },
-    { 
-      id: 'system-diagnostics', 
-      label: 'Open Infrastructure', 
-      category: 'System', 
-      icon: <Database className="w-4 h-4 text-[#00D26A]" />,
-      keywords: ['infrastructure', 'system', 'diagnostics', 'telemetry', 'health', 'vps']
-    },
-    { 
-      id: 'jarvis', 
-      label: 'Open Jarvis Executive Assistant', 
-      category: 'System', 
-      icon: <Sparkles className="w-4 h-4 text-[#FF5E8E]" />,
-      keywords: ['jarvis', 'assistant', 'executive', 'global assistant', 'ai', 'voice', 'hud', 'mind']
-    },
-    { 
-      id: 'settings', 
-      label: 'Open Settings', 
-      category: 'System', 
-      icon: <Terminal className="w-4 h-4 text-[#8E94B8]" />,
-      keywords: ['settings', 'config', 'voice', 'curriculum', 'guide', 'preferences']
-    },
-
-    // Models
-    { 
-      id: 'hermes', 
-      label: 'Nous Hermes 3 (405B / 70B)', 
-      category: 'Model', 
-      icon: <Sparkles className="w-4 h-4 text-[#EC4899]" />,
-      keywords: ['nous', 'hermes', 'hermes 3', '405b', '70b', 'nous research']
-    },
-    { 
-      id: 'chatgpt', 
-      label: 'ChatGPT o3 / GPT-4.5 Ultra', 
-      category: 'Model', 
-      icon: <Terminal className="w-4 h-4 text-[#10A37F]" />,
-      keywords: ['chatgpt', 'openai', 'o3', 'gpt', 'gpt-4.5', 'gpt 4']
-    },
-    { 
-      id: 'deepseek', 
-      label: 'DeepSeek R1 Mathematical Proofs', 
-      category: 'Model', 
-      icon: <Brain className="w-4 h-4 text-[#4D6BFE]" />,
-      keywords: ['deepseek', 'r1', 'reasoning', 'math', 'proofs', 'china']
-    },
-    { 
-      id: 'kimi', 
-      label: 'Kimi K1.5 (200k-2M Long Context)', 
-      category: 'Model', 
-      icon: <Layers className="w-4 h-4 text-[#3B82F6]" />,
-      keywords: ['kimi', 'k1.5', 'moonshot', 'long context']
-    },
-    { 
-      id: 'claudecode', 
-      label: 'Claude Code 3.7 Terminal Agent', 
-      category: 'Model', 
-      icon: <Terminal className="w-4 h-4 text-[#D97706]" />,
-      keywords: ['claude', 'claude code', 'anthropic', 'sonnet', '3.7']
-    },
-    { 
-      id: 'gemini', 
-      label: 'Gemini 3.7 / 3.6 Flash Multimodal Studio', 
-      category: 'Model', 
-      icon: <Sparkles className="w-4 h-4 text-[#615EFF]" />,
-      keywords: ['gemini', 'gemini 3.7', 'gemini 3.6', 'google', 'multimodal', 'flash']
-    },
-    { 
-      id: 'antigravity', 
-      label: 'Google Antigravity Meta-Agent', 
-      category: 'Model', 
-      icon: <Compass className="w-4 h-4 text-[#8A5CF5]" />,
-      keywords: ['antigravity', 'agent', 'deepmind', 'meta']
-    },
-    { 
-      id: 'perplexity', 
-      label: 'Perplexity Sonar Live Citations', 
-      category: 'Model', 
-      icon: <Globe className="w-4 h-4 text-[#20B2AA]" />,
-      keywords: ['perplexity', 'sonar', 'citations', 'search']
-    },
-    { 
-      id: 'codex', 
-      label: 'Codex WASM Sandbox Runner', 
-      category: 'Model', 
-      icon: <Code2 className="w-4 h-4 text-[#00D26A]" />,
-      keywords: ['codex', 'wasm', 'sandbox', 'runner']
-    },
-
-    // Autonomous & Executive
-    { 
-      id: 'bot-mode', 
-      label: 'BOT MODE Autonomous Swarm Execution', 
-      category: 'Autonomous', 
-      icon: <Bot className="w-4 h-4 text-[#00D26A]" />,
-      keywords: ['bot', 'bot mode', 'autonomous', 'swarm', 'auto execution']
-    },
-    { 
-      id: 'jarvis', 
-      label: 'Jarvis Executive Hub & Neural HUD', 
-      category: 'Executive', 
-      icon: <Sparkles className="w-4 h-4 text-[#EAB308]" />,
-      keywords: ['jarvis', 'executive', 'voice', 'hud', 'settings']
-    },
-    { 
-      id: 'settings', 
-      label: 'System Settings & API Keys', 
-      category: 'Settings', 
-      icon: <Activity className="w-4 h-4 text-[#8E94B8]" />,
-      keywords: ['settings', 'preferences', 'keys', 'config', 'security']
-    }
-  ], []);
+  }> = useMemo(() => navGroupsFor({ platformRole }).flatMap((g) => g.items.map((dest) => {
+    const Icon = dest.icon;
+    return {
+      id: dest.tabId,
+      label: `Open ${dest.label}`,
+      category: g.group.charAt(0) + g.group.slice(1).toLowerCase(),
+      icon: <Icon className="w-4 h-4" style={{ color: dest.color }} />,
+      keywords: [dest.label.toLowerCase(), ...dest.keywords],
+    };
+  })), [platformRole]);
 
   // Filter actions based on query
   const filteredActions = useMemo(() => {

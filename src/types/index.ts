@@ -52,6 +52,7 @@ export type ActiveTab =
   | 'schedule-cron'
   | 'guide-walkthrough'
   | 'model-router'
+  | 'model-registry'
   | 'obsidian'
   | 'bot-mode'
   // Specialist Fleet Agent Tabs

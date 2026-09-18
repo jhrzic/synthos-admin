@@ -14,7 +14,7 @@ import { createHash } from 'node:crypto';
 import { REGISTRY_SCHEMA_VERSION } from './registry/types';
 
 export type BuildTree = 'CLEAN' | 'MODIFIED' | 'UNKNOWN';
-export type BuildSource = 'LAUNCHER_GIT' | 'BUILD_MANIFEST' | 'UNKNOWN';
+export type BuildSource = 'LAUNCHER_GIT' | 'BUILD_MANIFEST' | 'DEPLOY_ARCHIVE' | 'UNKNOWN';
 
 export interface BuildInfo {
   /** Full 40-hex commit SHA, or UNKNOWN. */
@@ -25,12 +25,18 @@ export interface BuildInfo {
   ref: string;
   /** Whether the stamped checkout matched its commit exactly. */
   tree: BuildTree;
-  /** Who stamped it. */
+  /** Who stamped it. DEPLOY_ARCHIVE: built from `git archive <commit>` by scripts/deploy-admin-vm.sh. */
   source: BuildSource;
+  /** Which environment this process runs as (SYNTHOS_ENVIRONMENT, else NODE_ENV), or UNKNOWN. */
+  environment: string;
+  /** Which deployment/site this is (SYNTHOS_DEPLOYMENT_NAME), or UNKNOWN. */
+  deployment: string;
 }
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const REF_RE = /^[A-Za-z0-9._/-]{1,100}$/;
+const ENV_RE = /^[a-z][a-z0-9-]{1,30}$/;
+const DEPLOYMENT_RE = /^[A-Za-z0-9][A-Za-z0-9 ._:()/-]{0,99}$/;
 
 export function readBuildInfo(env: Record<string, string | undefined> = process.env): BuildInfo {
   const tree: BuildTree = env.SYNTHOS_BUILD_TREE === 'CLEAN' || env.SYNTHOS_BUILD_TREE === 'MODIFIED' ? env.SYNTHOS_BUILD_TREE : 'UNKNOWN';
@@ -41,8 +47,13 @@ export function readBuildInfo(env: Record<string, string | undefined> = process.
   const buildTime = rawTime && /^\d{4}-\d{2}-\d{2}T/.test(rawTime) && !Number.isNaN(Date.parse(rawTime)) ? new Date(rawTime).toISOString() : 'UNKNOWN';
   const rawRef = (env.SYNTHOS_BUILD_REF ?? '').trim();
   const ref = REF_RE.test(rawRef) ? rawRef : 'UNKNOWN';
-  const source: BuildSource = env.SYNTHOS_BUILD_SOURCE === 'LAUNCHER_GIT' || env.SYNTHOS_BUILD_SOURCE === 'BUILD_MANIFEST' ? env.SYNTHOS_BUILD_SOURCE : 'UNKNOWN';
-  return { commit, buildTime, ref, tree, source };
+  const source: BuildSource = env.SYNTHOS_BUILD_SOURCE === 'LAUNCHER_GIT' || env.SYNTHOS_BUILD_SOURCE === 'BUILD_MANIFEST' || env.SYNTHOS_BUILD_SOURCE === 'DEPLOY_ARCHIVE' ? env.SYNTHOS_BUILD_SOURCE : 'UNKNOWN';
+  const rawEnv = (env.SYNTHOS_ENVIRONMENT ?? '').trim();
+  const nodeEnv = (env.NODE_ENV ?? '').trim();
+  const environment = ENV_RE.test(rawEnv) ? rawEnv : ['production', 'development', 'test'].includes(nodeEnv) ? nodeEnv : 'UNKNOWN';
+  const rawDeployment = (env.SYNTHOS_DEPLOYMENT_NAME ?? '').trim();
+  const deployment = DEPLOYMENT_RE.test(rawDeployment) ? rawDeployment : 'UNKNOWN';
+  return { commit, buildTime, ref, tree, source, environment, deployment };
 }
 
 /**

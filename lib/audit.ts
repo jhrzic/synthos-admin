@@ -34,7 +34,8 @@ export type AdminEventType =
   | 'SPEND_USAGE_CLEARED'
   | 'MODEL_REGISTRY_CHANGED'
   | 'ARTIFACT_PURPOSE_CHANGED'
-  | 'TASK_QUEUE_ACTION';
+  | 'TASK_QUEUE_ACTION'
+  | 'EXECUTION_RECONCILED';
 
 export interface AdminAuditEventRecord {
   event_id: string;

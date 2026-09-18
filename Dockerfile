@@ -59,6 +59,26 @@ USER node
 # every restart is a fresh, empty deployment. See docs/OPERATOR-RUNBOOK.md.
 VOLUME ["/app/data", "/app/vault", "/app/backups"]
 
+# Build identity (lib/build-info.ts). The image has no .git, so the commit is
+# passed in by the builder — scripts/deploy-admin-vm.sh builds from
+# `git archive <commit>` and passes that exact commit, TREE=CLEAN and
+# SOURCE=DEPLOY_ARCHIVE. A plain `docker build` passes nothing and every
+# field reads UNKNOWN: nothing is guessed.
+ARG SYNTHOS_BUILD_SHA=""
+ARG SYNTHOS_BUILD_TIME=""
+ARG SYNTHOS_BUILD_REF=""
+ARG SYNTHOS_BUILD_TREE=""
+ARG SYNTHOS_BUILD_SOURCE=""
+ARG SYNTHOS_DEPLOYMENT_NAME=""
+ARG SYNTHOS_ENVIRONMENT=""
+ENV SYNTHOS_BUILD_SHA=${SYNTHOS_BUILD_SHA} \
+    SYNTHOS_BUILD_TIME=${SYNTHOS_BUILD_TIME} \
+    SYNTHOS_BUILD_REF=${SYNTHOS_BUILD_REF} \
+    SYNTHOS_BUILD_TREE=${SYNTHOS_BUILD_TREE} \
+    SYNTHOS_BUILD_SOURCE=${SYNTHOS_BUILD_SOURCE} \
+    SYNTHOS_DEPLOYMENT_NAME=${SYNTHOS_DEPLOYMENT_NAME} \
+    SYNTHOS_ENVIRONMENT=${SYNTHOS_ENVIRONMENT}
+
 EXPOSE 3000
 ENV PORT=3000
 # The server binds loopback unless told otherwise. Inside a container that

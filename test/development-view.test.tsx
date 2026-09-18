@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DevelopmentView } from '../src/components/DevelopmentView';
 import { ModelProviderCredentialsCard } from '../src/components/ModelProviderCredentialsCard';
+import { NAV_DESTINATIONS, NAV_GROUP_ORDER } from '../src/navigation/canonical-nav';
 
 // ---------------------------------------------------------------------------
 // PUSH 2C — the production Development workspace.
@@ -77,14 +78,13 @@ describe('1. NAVIGATION and SHELL integration — no second Admin', () => {
   });
 
   it('it lives in the existing BUILD group of the existing SidebarNav, not a new nav group', () => {
+    // The sidebar renders the canonical navigation definition.
     const nav = fs.readFileSync(path.resolve(process.cwd(), 'src/components/SidebarNav.tsx'), 'utf8');
-    const buildIdx = nav.indexOf("category: 'BUILD'");
-    const devIdx = nav.indexOf("id: 'development'");
-    expect(buildIdx).toBeGreaterThan(-1);
-    expect(devIdx).toBeGreaterThan(buildIdx);
-    // The six canonical groups are unchanged.
+    expect(nav).toContain('navGroupsFor({ platformRole })');
+    expect(NAV_DESTINATIONS.find((d) => d.tabId === 'development')?.group).toBe('BUILD');
+    // The canonical groups are all still there.
     for (const g of ['OPERATIONS', 'WORKSPACES', 'BUILD', 'KNOWLEDGE', 'GOVERNANCE', 'SYSTEM']) {
-      expect(nav).toContain(`category: '${g}'`);
+      expect(NAV_GROUP_ORDER).toContain(g);
     }
   });
 

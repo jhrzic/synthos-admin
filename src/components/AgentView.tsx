@@ -18,6 +18,8 @@ interface AgentViewProps {
   onUpdateTask: (id: string, updates: Partial<KanbanTask>) => void;
   onPushNoteToObsidian: (title: string, content: string, tags: string[]) => void;
   onUpdateAgent?: (role: AgentRole, updates: Partial<AgentInfo>) => void;
+  /** Opens the Skills registry (the canonical skills authority). */
+  onOpenSkills?: () => void;
 }
 
 export const AgentView: React.FC<AgentViewProps> = ({
@@ -29,6 +31,7 @@ export const AgentView: React.FC<AgentViewProps> = ({
   onUpdateTask,
   onPushNoteToObsidian,
   onUpdateAgent,
+  onOpenSkills,
 }) => {
   const [prompt, setPrompt] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -386,13 +389,17 @@ export const AgentView: React.FC<AgentViewProps> = ({
 
         {/* Capabilities Grid */}
         <div className="space-y-2">
-          <div className="text-[11px] font-mono text-[#6A7097] uppercase">Core Specialized Capabilities:</div>
+          <div className="text-[11px] font-mono text-[#6A7097] uppercase">Core Specialized Capabilities (descriptive labels, not skill records):</div>
           <div className="flex flex-wrap gap-2">
             {agent.capabilities.map((cap, i) => (
               <span key={i} className="text-xs font-mono bg-[#05060B] border border-[#1E223D] px-3 py-1 rounded-lg text-[#C0C5DE]">
                 ✓ {cap}
               </span>
             ))}
+          </div>
+          <div className="text-[11px] font-mono text-[#8E94B8]" data-testid="agent-skills-link">
+            Assigned skills: none recorded — agents do not yet declare skills in the skills registry.
+            {onOpenSkills && <> <button className="text-[#8C8AFF] underline" onClick={onOpenSkills}>Open Skills</button></>}
           </div>
         </div>
       </div>

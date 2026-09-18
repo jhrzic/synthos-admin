@@ -44,11 +44,17 @@ export const ModelFamiliesPanel: React.FC<Props> = ({ workspaceId, models, provi
   const [run, setRun] = useState<any | null>(null);
 
   const q = `workspaceId=${encodeURIComponent(workspaceId)}`;
+  // A failed read is shown as a failure — never as an empty registry.
+  const [loadErrors, setLoadErrors] = useState<Record<string, string>>({});
   const load = useCallback(() => {
-    fetch(`/api/registry/identity?${q}`).then((r) => r.json()).then((j) => j?.success && setIdentity(Array.isArray(j.routes) ? j : null)).catch(() => {});
-    fetch(`/api/registry/qualifications?${q}`).then((r) => r.json()).then((j) => j?.success && setQuals(Array.isArray(j.qualifications) ? j.qualifications : [])).catch(() => {});
-    fetch(`/api/registry/route-imports?${q}`).then((r) => r.json()).then((j) => j?.success && setImports(Array.isArray(j.importers) ? j : null)).catch(() => {});
-    fetch(`/api/registry/task-classes?${q}`).then((r) => r.json()).then((j) => { if (j?.success && Array.isArray(j.taskClasses)) { setTaskClasses(j.taskClasses); setQForm((f) => (f.taskClass ? f : { ...f, taskClass: j.taskClasses[0]?.taskClassId || '' })); } }).catch(() => {});
+    setLoadErrors({});
+    const get = (name: string, url: string, ok: (j: any) => boolean, apply: (j: any) => void) =>
+      fetch(url).then(async (r) => { const j = await r.json().catch(() => null); if (!r.ok || !j?.success || !ok(j)) throw new Error(j?.error || `HTTP ${r.status}`); apply(j); })
+        .catch((e) => setLoadErrors((prev) => ({ ...prev, [name]: String(e?.message || e) })));
+    get('identity', `/api/registry/identity?${q}`, (j) => Array.isArray(j.routes), (j) => setIdentity(j));
+    get('qualifications', `/api/registry/qualifications?${q}`, (j) => Array.isArray(j.qualifications), (j) => setQuals(j.qualifications));
+    get('route imports', `/api/registry/route-imports?${q}`, (j) => Array.isArray(j.importers), (j) => setImports(j));
+    get('task classes', `/api/registry/task-classes?${q}`, (j) => Array.isArray(j.taskClasses), (j) => { setTaskClasses(j.taskClasses); setQForm((f) => (f.taskClass ? f : { ...f, taskClass: j.taskClasses[0]?.taskClassId || '' })); });
   }, [q]);
   useEffect(() => { load(); }, [load]);
 
@@ -63,6 +69,7 @@ export const ModelFamiliesPanel: React.FC<Props> = ({ workspaceId, models, provi
 
   const byKey = useMemo(() => new Map(models.map((m) => [`${m.providerId}/${m.modelId}`, m])), [models]);
   const health = useMemo(() => new Map(providers.map((p) => [p.providerId, p.health])), [providers]);
+  const providerById = useMemo(() => new Map(providers.map((p) => [p.providerId, p])), [providers]);
   const routes: any[] = identity?.routes || [];
   const resolved = routes.filter((r) => r.resolved);
   const unresolved = routes.filter((r) => !r.resolved);
@@ -87,11 +94,24 @@ export const ModelFamiliesPanel: React.FC<Props> = ({ workspaceId, models, provi
           <span className="text-[#8E94B8]">health {health.get(r.providerId) ?? 'UNKNOWN'}</span>
         </div>
         {m && (
+          <div className="flex flex-wrap items-center gap-2 mt-0.5" data-testid="registry-route-state">
+            <Badge tone={m.adminState === 'ENABLED' ? 'success' : 'inert'}>{m.adminState}</Badge>
+            <span className="text-[#8E94B8]">deployment {(identity?.deployments?.[r.providerId] || ['UNKNOWN']).join(', ')}</span>
+            <span className="text-[#8E94B8]">config: credential {(() => { const c = providerById.get(r.providerId)?.credential; return c ? (c.ready ? 'READY' : 'NOT CONFIGURED') : 'UNKNOWN'; })()} · endpoint {(() => { const e = providerById.get(r.providerId)?.endpoint; return !e ? 'UNKNOWN' : e.ok ? 'OK' : `BLOCKED${e.reason ? ` (${e.reason})` : ''}`; })()}</span>
+            <span className="text-[#8E94B8]">metadata: {m.source ?? 'UNKNOWN'} · manifest {m.manifestVersion ?? 'UNKNOWN'} · {(m.capabilities || []).filter((c) => c.verification !== 'PUBLISHER_ASSERTED').length}/{(m.capabilities || []).length} capabilities independently verified</span>
+          </div>
+        )}
+        {m && (
           <div className="text-[#8E94B8] mt-0.5">
-            price {m.pricing.current ? `${m.pricing.current.rates.input}/${m.pricing.current.rates.output} ${m.pricing.current.currency}/M ${m.pricing.current.unit} (${m.pricing.state})` : m.paid ? `UNKNOWN (${m.pricing.state})` : 'no charge'}
+            price {m.pricing.current ? `${m.pricing.current.rates.input}/${m.pricing.current.rates.output} ${m.pricing.current.currency}/M ${m.pricing.current.unit} (${m.pricing.state}${(m.pricing.current as any).approval ? `, ${(m.pricing.current as any).approval}` : ''}; stale after ${String(m.pricing.current.staleAfter).slice(0, 10)})` : m.paid ? `UNKNOWN (${m.pricing.state})` : 'no charge'}
             {' '}· ctx {m.limits.contextTokens ?? 'UNKNOWN'} · out {m.limits.outputTokens ?? 'UNKNOWN'} · {m.capabilities.filter((c) => c.supported).map((c) => c.id).join(', ') || 'no capabilities declared'}
             {' '}· contracts {m.outputContracts.join('/')} · {m.lifecycle}{m.blockers.find((b) => b.state === 'DEPRECATED') ? ` · ${m.blockers.find((b) => b.state === 'DEPRECATED')!.reason}` : ''}
           </div>
+        )}
+        {m && (m.blockers || []).length > 0 && (
+          <ul className="mt-0.5 text-[#E8A845] list-disc ml-4" data-testid="registry-route-blockers">
+            {m.blockers.map((b, i) => <li key={i}>{b.state}: {b.reason}</li>)}
+          </ul>
         )}
         <div className="flex flex-wrap gap-1 mt-1">
           {rq.length === 0 ? <span className="text-[#7E8BB5]">Not qualified for any task class.</span> : rq.map((x) => (
@@ -113,6 +133,12 @@ export const ModelFamiliesPanel: React.FC<Props> = ({ workspaceId, models, provi
         <button className={btn} onClick={load}><RefreshCw className="w-3 h-3 inline" /></button>
       </div>
       {msg && <div className="text-[#C9CCE6]">{msg}</div>}
+      {Object.keys(loadErrors).length > 0 && (
+        <div className="text-[#FF6B6B]" data-testid="model-families-error">Could not read {Object.entries(loadErrors).map(([k, v]) => `${k} (${v})`).join('; ')}. What is shown below may be incomplete — this is not an empty registry.</div>
+      )}
+      {identity && (identity.families || []).length === 0 && routes.length === 0 && (
+        <div className="text-[#7E8BB5]" data-testid="model-families-empty">The registry has no model routes. Import a signed manifest or a route's model list below; nothing is fetched automatically.</div>
+      )}
 
       {(identity?.families || []).map((f: any) => (
         <div key={f.familyId} className={box} data-testid="registry-family">

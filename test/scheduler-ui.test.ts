@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
+import { NAV_DESTINATIONS } from '../src/navigation/canonical-nav';
 
 // ---------------------------------------------------------------------------
 // P0-B — the canonical scheduler shipped with 7 routes, real occurrence records
@@ -102,7 +103,8 @@ describe('4: the surface is reachable and honest', () => {
   it('is mounted and present in Operations navigation', () => {
     expect(appContent).toContain("activeTab === 'scheduler'");
     expect(appContent).toContain('<SchedulerView');
-    expect(sidebar).toContain("id: 'scheduler' as ActiveTab");
+    expect(sidebar).toContain('navGroupsFor({ platformRole })');
+    expect(NAV_DESTINATIONS.find((d) => d.tabId === 'scheduler')?.group).toBe('OPERATIONS');
   });
 
   it('shows UNKNOWN rather than a fabricated timestamp or count', () => {

@@ -21,6 +21,7 @@ import { VerificationOutcomePanel, TaskStatusBadge } from './verification/outcom
 import { RegistryModelSelect } from './registry/RegistryModelSelect';
 import { EvaluationRequestPanel } from './registry/EvaluationRequestPanel';
 import { TaskRoutingPanel } from './registry/TaskRoutingPanel';
+import { ExecutionReconciliationPanel } from './registry/ExecutionReconciliationPanel';
 
 interface KanbanViewProps {
   tasks: KanbanTask[];
@@ -1415,7 +1416,10 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
               )}
 
               {detailTab === 'routing' && (
-                <TaskRoutingPanel workspaceId={activeWorkspaceId || ""} taskId={selectedTaskForDetail.id} />
+                <div className="space-y-4">
+                  <ExecutionReconciliationPanel workspaceId={activeWorkspaceId || ""} taskId={selectedTaskForDetail.id} />
+                  <TaskRoutingPanel workspaceId={activeWorkspaceId || ""} taskId={selectedTaskForDetail.id} />
+                </div>
               )}
 
               {detailTab === 'trace' && (

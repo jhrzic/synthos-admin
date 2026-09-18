@@ -218,6 +218,7 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
 
   useEffect(() => { fetchSources(); }, [fetchSources]);
 
+
   /** Real vault notes mapped onto the shape the graph already speaks. No field is invented. */
   const brainNotes = React.useMemo<ObsidianNote[]>(
     () => brainNotesRaw.map((n) => ({
@@ -263,7 +264,8 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
       n.topics.some((t) => t.toLowerCase().includes(q))
     );
   }, [brainNotesRaw, brainQuery]);
-
+  // Notes the graph would draw for the selected source.
+  const graphNoteCount = (sourceFilter === 'EXTERNAL' ? 0 : brainNotes.length) + (sourceFilter === 'BRAIN' ? 0 : (externalSources?.length ?? 0));
   const selectedBrainNote = React.useMemo(
     () => brainNotesRaw.find((n) => n.vaultRelativePath === selectedBrainPath) || null,
     [brainNotesRaw, selectedBrainPath]
@@ -558,14 +560,25 @@ export const ObsidianView: React.FC<ObsidianViewProps> = ({
 
           {/* An empty vault is shown as empty. A graph of nothing is not drawn
               as a graph of something. */}
-          {!brainLoading && !brainError && brainNotes.length === 0 ? (
-            <div className="p-8 bg-[#090A14] border border-dashed border-[#1E223D] rounded-2xl text-center">
-              <span className="text-sm font-mono font-bold text-white block">No SynthOS knowledge notes yet</span>
-              <span className="text-xs font-mono text-[#7B82A8] mt-2 block">
-                {brainVault?.root
-                  ? `Nothing has been written under ${brainVault.root}/${brainVault.writeSubdirectory}/ yet. The mesh renders real notes only — no sample graph is drawn.`
-                  : 'No vault is configured, so there is nothing to render.'}
+          {/* Empty means empty FOR THE SELECTED SOURCE: an empty Brain no longer
+              hides external vault notes the operator asked to see. */}
+          {!brainLoading && !brainError && graphNoteCount === 0 && (sourceFilter === 'BRAIN' || externalAttempted) ? (
+            <div className="p-8 bg-[#090A14] border border-dashed border-[#1E223D] rounded-2xl text-center" data-testid="obsidian-graph-empty">
+              <span className="text-sm font-mono font-bold text-white block">
+                {sourceFilter === 'BRAIN' ? 'No SynthOS knowledge notes yet' : externalSources === null ? 'The external vault could not be read' : 'No notes in the selected source'}
               </span>
+              <span className="text-xs font-mono text-[#7B82A8] mt-2 block">
+                {sourceFilter !== 'BRAIN' && externalSources === null
+                  ? 'UNKNOWN — this is a read failure, not an empty vault.'
+                  : brainVault?.root
+                    ? `Nothing has been written under ${brainVault.root}/${brainVault.writeSubdirectory}/ yet. The mesh renders real notes only — no sample graph is drawn.`
+                    : 'No vault is configured, so there is nothing to render.'}
+              </span>
+              {sourceFilter === 'BRAIN' && brainVault?.root && (
+                <button onClick={() => setSourceFilter('ALL')} className="mt-3 px-3 py-1.5 text-xs font-mono rounded-lg border border-[#2D3352] text-[#C9CCE6] hover:border-[#615EFF]" data-testid="obsidian-show-external">
+                  Include the external vault's notes
+                </button>
+              )}
             </div>
           ) : (
           /* Animated interactive wikilink graph — the restored design, real data */

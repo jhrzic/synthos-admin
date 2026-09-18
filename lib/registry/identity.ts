@@ -292,3 +292,13 @@ export function storedDeployment(providerId: string, deploymentId: string): (Dep
 export function privacyRank(p: PrivacyClass | string | null | undefined): number {
   return ['STANDARD', 'NO_TRAINING', 'ZERO_RETENTION', 'LOCAL_ONLY'].indexOf(String(p ?? 'STANDARD'));
 }
+
+/** Every registered deployment id, by provider (local registry read). */
+export function listDeploymentIds(): Record<string, string[]> {
+  ensureIdentityTables();
+  const out: Record<string, string[]> = {};
+  for (const r of getDatabase().prepare('SELECT provider_id, deployment_id FROM registry_deployments ORDER BY provider_id, deployment_id').all() as any[]) {
+    (out[r.provider_id] ||= []).push(r.deployment_id);
+  }
+  return out;
+}

@@ -39,6 +39,8 @@ import { JarvisOverlayHUD } from './components/JarvisOverlayHUD';
 import { GlobalVoiceOverlay } from './components/GlobalVoiceOverlay';
 const KanbanView = lazy(() => import('./components/KanbanView').then((m) => ({ default: m.KanbanView })));
 import { ModelRouterView } from './components/ModelRouterView';
+import { hashForTab, tabForHash } from './navigation/canonical-nav';
+import { RENDERED_TABS } from './navigation/rendered-tabs';
 import { AgentView } from './components/AgentView';
 import { OverviewOfficeView } from './components/OverviewOfficeView';
 import { TelegramChatView } from './components/TelegramChatView';
@@ -88,6 +90,7 @@ import { FirstRunTour } from './components/FirstRunTour';
 import { RightActivityPane } from './components/RightActivityPane';
 import { RunDetailModal } from './components/RunDetailModal';
 import { JulianGoldieAuditRunner } from './components/JulianGoldieAuditRunner';
+const ProviderModelCatalog = lazy(() => import('./components/ProviderModelCatalog').then((m) => ({ default: m.ProviderModelCatalog })));
 const MasterAdminView = lazy(() => import('./components/MasterAdminView').then((m) => ({ default: m.MasterAdminView })));
 import { GitMerge } from 'lucide-react';
 
@@ -100,7 +103,22 @@ interface AppProps {
 const LAST_WORKSPACE_STORAGE_KEY = 'synthos_last_workspace_id';
 
 export default function App({ currentUser, authorizedWorkspaces = [], onLogout }: AppProps = {}) {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('overview');
+  // Deep links (#/agents, #/skills, #/agents/<role>…) resolve through the
+  // canonical navigation; an unknown hash falls back to the overview.
+  const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
+    try { return tabForHash(window.location.hash, RENDERED_TABS) ?? 'overview'; } catch { return 'overview'; }
+  });
+  useEffect(() => {
+    try {
+      const want = hashForTab(activeTab);
+      if (window.location.hash !== want) window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}${want}`);
+    } catch { /* no history API (tests) */ }
+  }, [activeTab]);
+  useEffect(() => {
+    const onHash = () => { const t = tabForHash(window.location.hash, RENDERED_TABS); if (t) setActiveTab(t); };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
   // E1/E3: the switcher's real options are the caller's own authorized
   // workspaces (from /api/auth/me via AuthGate) — never a hardcoded
   // sample list. Initial selection: a previously-selected workspace IF it
@@ -1495,7 +1513,9 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
 
   const isModelTab = (tab: ActiveTab): boolean => {
     return [
-      'hermes', 'claude', 'claudecode', 'kimi3', 'kimi', 
+      // Hermes is not a model seat: it is the Hermes workspace (HermesCoreView).
+      // Listing it here rendered both screens stacked on the Hermes tab.
+      'claude', 'claudecode', 'kimi3', 'kimi', 
       'deepseek', 'chatgpt', 'codex', 'cursor', 'antigravity', 
       'perplexity', 'elevenlabs', 'el', 'gemini', 'openclaw'
     ].includes(tab);
@@ -1533,7 +1553,6 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         activeWorkspaceName={authorizedWorkspaces.find((w) => w.workspace_id === activeWorkspaceId)?.workspace_name}
-        obsidianSyncStatus="ONLINE (4 VAULTS)"
         botModeActive={botTasks.some(t => t.status === 'running')}
         onOpenQuickPrompt={() => setIsCommandPaletteOpen(true)}
         isSidebarVisible={isSidebarVisible}
@@ -1562,6 +1581,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           activeWorkspaceId={activeWorkspaceId}
           onSwitchWorkspace={setActiveWorkspaceId}
           authorizedWorkspaces={authorizedWorkspaces.map((w) => ({ workspace_id: w.workspace_id, workspace_name: w.workspace_name }))}
+          platformRole={currentUser?.platform_role ?? null}
         />
 
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -1576,7 +1596,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
 
           <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 overflow-y-auto overflow-x-hidden bg-radial-vignette">
           {/* Pass VIII / Workstream W — one Suspense boundary around the
-              whole tab-content area. Only ever one {activeTab === 'x' &&
+              whole tab-content area. Only ever one {activeTab === '<id>' &&
               <X/>} block renders at a time, so this is a standard, safe
               route-level code-split: a lazy view (KanbanView,
               GraphBuilderView, MasterAdminView, SettingsView,
@@ -1629,7 +1649,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
 
           {/* Skill Registry & Model Context Protocol (MCP) Manager */}
           {activeTab === 'skill-registry' && (
-            <SkillRegistryView activeWorkspaceId={activeWorkspaceId} />
+            <SkillRegistryView activeWorkspaceId={activeWorkspaceId} onNavigate={setActiveTab} />
           )}
 
           {/* TOOL PACK 1 — production tools exposed through the Execution Fabric */}
@@ -1800,9 +1820,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
 
           {/* SynthOS Activity & Governance Ledger */}
           {activeTab === 'activity-ledger' && (
-            <ActivityLedgerView
-              events={synthosControl.getLedger()}
-            />
+            <ActivityLedgerView workspaceId={activeWorkspaceId} />
           )}
 
           {/* Canonical, Ed25519-signed execution receipts. This nav slot used to
@@ -2025,7 +2043,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           )}
 
           {(activeTab === 'hermes-skills' || activeTab === 'hermes-mcps' || activeTab === 'hermes-tools') && (
-            <SkillRegistryView activeWorkspaceId={activeWorkspaceId} />
+            <SkillRegistryView activeWorkspaceId={activeWorkspaceId} onNavigate={setActiveTab} />
           )}
 
           {activeTab === 'hermes-cron' && (
@@ -2082,9 +2100,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           )}
 
           {activeTab === 'hermes-activity' && (
-            <ActivityLedgerView
-              events={synthosControl.getLedger()}
-            />
+            <ActivityLedgerView workspaceId={activeWorkspaceId} />
           )}
 
           {activeTab === 'hermes-gateway' && (
@@ -2108,9 +2124,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           )}
 
           {activeTab === 'hermes-logs' && (
-            <ActivityLedgerView
-              events={synthosControl.getLedger()}
-            />
+            <ActivityLedgerView workspaceId={activeWorkspaceId} />
           )}
 
           {activeTab === 'hermes-updates' && (
@@ -2183,6 +2197,13 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           )}
 
           {/* Canonical Model Router view */}
+          {/* Model Registry — the local canonical registry by family → version → route. */}
+          {activeTab === 'model-registry' && (
+            <div className="p-6 max-w-7xl mx-auto" data-testid="model-registry-view">
+              <ProviderModelCatalog workspaceId={activeWorkspaceId} />
+            </div>
+          )}
+
           {activeTab === 'model-router' && (
             <ModelRouterView
               workspaceId={activeWorkspaceId}
@@ -2216,6 +2237,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
                 onUpdateTask={handleUpdateKanbanTask}
                 onPushNoteToObsidian={(title, content, tags) => handleAddNoteToVault(title, content, tags, 'Agent-Syntheses')}
                 onUpdateAgent={handleUpdateAgent}
+                onOpenSkills={() => setActiveTab('skill-registry')}
               />
             ) : (
               <div className="p-8 text-sm text-[#8E94B8]">
@@ -2364,6 +2386,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
         onClose={() => setIsCommandPaletteOpen(false)}
         onSelectTab={setActiveTab}
         notes={notes}
+        platformRole={currentUser?.platform_role ?? null}
       />
 
       {/* Page Help Drawer */}
