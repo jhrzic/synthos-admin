@@ -33,6 +33,9 @@ import path from 'node:path';
 
 const JSON_OUT = process.argv.includes('--json');
 const SCAN_ALL = process.argv.includes('--all');
+// --paths <file...>: scan exactly these files (used by the scanner's own tests).
+const PATHS_AT = process.argv.indexOf('--paths');
+const EXPLICIT_PATHS = PATHS_AT >= 0 ? process.argv.slice(PATHS_AT + 1).filter((a) => !a.startsWith('--')) : null;
 
 // Token families relevant to this repository. Keep this list as the single
 // place coverage is added — including families the repo does not use yet, so
@@ -123,11 +126,27 @@ const SKIP_PATHS = [/^package-lock\.json$/, /^bun\.lock$/, /^node_modules\//, /^
 const BINARY_EXT = /\.(png|jpg|jpeg|gif|webp|ico|pdf|zip|tar|gz|woff2?|ttf|eot|mp4|mp3|db)$/i;
 
 function fileList() {
+  if (EXPLICIT_PATHS) return EXPLICIT_PATHS;
   const cmd = SCAN_ALL
     ? 'git ls-files'
     : 'git diff --name-only origin/main...HEAD; git status --porcelain | cut -c4-';
   const out = execSync(cmd, { encoding: 'utf8', shell: '/bin/bash' });
   return [...new Set(out.split('\n').map((s) => s.trim()).filter(Boolean))];
+}
+
+/**
+ * A PEM private key is judged by its BODY, not its header: the header alone is
+ * short, so judging it like a token would excuse every real key. A body of
+ * real key material is long base64; a test vector's is absent, a word, or
+ * filler.
+ */
+function isSyntheticPem(file, body) {
+  if (SYNTHETIC_FILES.some((f) => file === f)) return true;
+  const b64 = body.replace(/[^A-Za-z0-9+/=]/g, '');
+  if (b64.length < 64) return true;
+  const lower = body.toLowerCase();
+  if (['deadbeef', 'example', 'placeholder', 'notreal', 'redacted', 'xxxxxxxx'].some((m) => lower.includes(m))) return true;
+  return entropyPerChar(b64) < ENTROPY_FLOOR;
 }
 
 function isSynthetic(file, match) {
@@ -162,7 +181,15 @@ for (const file of fileList()) {
       // Report a short prefix only — never echo a full candidate credential.
       const redacted = `${m[0].slice(0, 12)}…(${m[0].length} chars)`;
       const entry = { family: name, file, line, preview: redacted, context: (lines[line - 1] || '').trim().slice(0, 100) };
-      (isSynthetic(file, m[0]) ? synthetic : findings).push(entry);
+      let synth;
+      if (name === 'private-key') {
+        const after = text.slice(m.index + m[0].length, m.index + m[0].length + 8000);
+        const end = after.indexOf('-----END');
+        synth = isSyntheticPem(file, end >= 0 ? after.slice(0, end) : after);
+      } else {
+        synth = isSynthetic(file, m[0]);
+      }
+      (synth ? synthetic : findings).push(entry);
     }
   }
 }

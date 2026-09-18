@@ -12,9 +12,9 @@
 #     people to ignore it. Moderate findings are printed; HIGH and CRITICAL
 #     fail the build.
 #   * It does not claim to be a secret scanner in the GitHub Advanced
-#     Security sense. It runs this repo's own secret-guard tests plus a
-#     shape-based scan of tracked files. Push protection is a repository
-#     setting, not something a workflow can provide.
+#     Security sense. It runs this repo's own secret-guard tests plus the
+#     canonical scanner (scripts/secret-scan.mjs). Push protection is a
+#     repository setting, not something a workflow can provide.
 # ---------------------------------------------------------------------------
 name: security
 
@@ -47,15 +47,10 @@ jobs:
       - name: Typecheck
         run: npm run lint
 
-      # The suite includes the authorization, execution-evidence, redaction
-      # and client-bundle guards, so a security regression fails here rather
-      # than in a later review.
-      - name: Test suite
-        run: npx vitest run
-
-      # Production build verification: the build must succeed AND emit the
-      # two artifacts the runtime actually serves. A build that "passes"
-      # without producing dist/server.cjs is not a passing build.
+      # Production build FIRST: several tests exercise the real bundle
+      # (test/graceful-shutdown.test.ts boots dist/server.cjs and asserts it
+      # exists, so a missing bundle can never read as a pass). The build must
+      # succeed AND emit the two artifacts the runtime actually serves.
       - name: Production build
         run: npm run build
 
@@ -68,8 +63,13 @@ jobs:
           echo "build outputs present:"
           ls -l dist/server.cjs dist/index.html
 
-      # The bundle guard is only meaningful against a real build, so it runs
-      # again here now that dist/ exists.
+      # The FULL suite, against the real build. It includes the authorization,
+      # execution-evidence, redaction, client-bundle and bundle-boot guards,
+      # so a security regression fails here rather than in a later review.
+      - name: Test suite
+        run: npx vitest run
+
+      # Explicit, separately reported: the client bundle carries no secret.
       - name: Client bundle secret guard (post-build)
         run: npx vitest run test/client-bundle-secrets.test.ts
 
@@ -127,27 +127,12 @@ jobs:
         run: npm ci
 
       - name: Repo secret-guard tests
-        run: npx vitest run test/client-bundle-secrets.test.ts test/redaction.test.ts test/model-credential-authority.test.ts
+        run: npx vitest run test/client-bundle-secrets.test.ts test/redaction.test.ts test/model-credential-authority.test.ts test/secret-scan.test.ts
 
-      # Shape-based scan over TRACKED files only, so it cannot be tripped by
-      # a developer's local .env (which is gitignored and never committed).
-      - name: Scan tracked files for credential shapes
-        run: |
-          set -uo pipefail
-          # Patterns are real key shapes, not the word "key" — the codebase
-          # legitimately contains identifiers such as `apiKey`.
-          PATTERNS='sk-[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{30,}|xox[baprs]-[A-Za-z0-9-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
-          # Excludes: this workflow (it names the patterns), the redaction
-          # module and its tests (same reason).
-          HITS=$(git ls-files -z \
-            | grep -zv -e '^\.github/workflows/security\.yml$' \
-                       -e '^lib/redact\.ts$' \
-                       -e '^test/redaction\.test\.ts$' \
-                       -e '^test/client-bundle-secrets\.test\.ts$' \
-            | xargs -0 grep -nEI "$PATTERNS" 2>/dev/null || true)
-          if [ -n "$HITS" ]; then
-            echo "::error::credential-shaped strings found in tracked files:"
-            echo "$HITS"
-            exit 1
-          fi
-          echo "no credential-shaped strings in tracked files"
+      # THE canonical scanner (scripts/secret-scan.mjs) over every TRACKED
+      # file — the single CI authority. It fails on any credential-shaped value
+      # that is not recognisably synthetic (and judges PEM keys by their body),
+      # while listing the repository's deliberate test vectors as SYNTHETIC.
+      # It never scans a developer's local .env (gitignored, never tracked).
+      - name: Canonical secret scan (tracked files)
+        run: node scripts/secret-scan.mjs --all
