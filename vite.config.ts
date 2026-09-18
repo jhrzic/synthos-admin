@@ -28,7 +28,9 @@ export default defineConfig(() => {
       // containerised deployment that genuinely needs 0.0.0.0.
       host: process.env.SYNTHOS_BIND_HOST || '127.0.0.1',
       allowedHosts: true as const,
-      cors: true,
+      // No CORS: a wildcard let any web page in the operator's browser read
+      // files this server returned (it served the database). Same-origin only.
+      cors: false,
       // ALWAYS-ON RUNTIME — `hmr: false` alone does NOT stop Vite opening a
       // websocket server. In Vite 6 the only switch for that is
       // `server.ws: false` (vite/dist/node: createWebSocketServer returns a
@@ -77,7 +79,7 @@ export default defineConfig(() => {
       port: 3000,
       host: process.env.SYNTHOS_BIND_HOST || '127.0.0.1',
       allowedHosts: true as const,
-      cors: true,
+      cors: false,
     },
   };
 });

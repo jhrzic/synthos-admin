@@ -6,6 +6,7 @@ import fs from "fs";
 import crypto from "node:crypto";
 import { exec, spawn } from "child_process";
 import { createServer as createViteServer } from "vite";
+import { devAssetGuard } from "./lib/http/dev-asset-guard";
 import dotenv from "dotenv";
 import { 
   createInitialTask, 
@@ -8300,6 +8301,9 @@ Rules for spokenSummary specifically:
       server: { middlewareMode: true },
       appType: "spa",
     });
+    // Only source, dependencies and Vite internals — never data, keys,
+    // vault or backups (lib/http/dev-asset-guard.ts).
+    app.use(devAssetGuard as any);
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
