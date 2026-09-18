@@ -32,6 +32,7 @@ function entryHashOf(e, version) {
       e.approvalId ?? '', e.requestedBy ?? '', e.decidedBy ?? '', e.guardianDecision ?? '', e.inputDigest ?? '',
       e.selfApproved === null || e.selfApproved === undefined ? '' : e.selfApproved ? '1' : '0',
       e.recordedAt, e.prevHash,
+      ...(e.kind === 'OUTCOME' ? ['OUTCOME', e.subjectReceiptId ?? '', e.outcomeLabel ?? ''] : []),
     ].join('|'),
   );
 }
@@ -54,6 +55,8 @@ export function verifyBundle(bundle, pinnedKey = null) {
   if (bundle?.format !== 'synthos-authority-record') return { ok: false, problems: ['not a SynthOS authority record'] };
   const v = bundle.version;
   const receipts = new Map((bundle.receipts || []).map((r) => [r.receiptId, r]));
+  const outcomes = new Map((bundle.outcomes || []).map((o) => [o.outcomeId, o]));
+  const receiptSeqs = new Set();
   const keys = new Set();
 
   let prev = GENESIS;
@@ -65,6 +68,15 @@ export function verifyBundle(bundle, pinnedKey = null) {
     if (entryHashOf(e, v) !== e.entryHash) problems.push(`entry ${e.seq}: contents changed after recording`);
     hashes.set(e.seq, e.entryHash);
     prev = e.entryHash;
+
+    if (e.kind === 'OUTCOME') {
+      const o = outcomes.get(e.receiptId);
+      if (!o) problems.push(`entry ${e.seq}: result ${e.receiptId} is not in the record`);
+      else if (sha256(o.payloadJson) !== e.receiptDigest) problems.push(`result ${e.receiptId}: differs from what was chained`);
+      if (!receiptSeqs.has(e.subjectReceiptId)) problems.push(`entry ${e.seq}: result refers to an action not earlier in the record`);
+      return;
+    }
+    receiptSeqs.add(e.receiptId);
 
     const r = receipts.get(e.receiptId);
     if (!r) {
@@ -92,10 +104,14 @@ export function verifyBundle(bundle, pinnedKey = null) {
     problems.push('more than one signing key appears in this record');
   }
 
-  const entries = bundle.entries || [];
+  const all = bundle.entries || [];
+  const entries = all.filter((e) => e.kind !== 'OUTCOME');
+  const results = {};
+  for (const e of all) if (e.kind === 'OUTCOME') results[e.outcomeLabel] = (results[e.outcomeLabel] || 0) + 1;
   const summary = {
     workspace: bundle.workspaceId,
     actions: entries.length,
+    results,
     withApproval: entries.filter((e) => e.approvalId).length,
     selfApproved: entries.filter((e) => e.selfApproved === true).length,
     noApprovalOnRecord: entries.filter((e) => !e.approvalId).length,
@@ -126,6 +142,8 @@ if (isMain) {
   console.log(r.ok ? 'VERIFIED' : 'PROBLEMS FOUND');
   if (r.summary) {
     console.log(`workspace ${s.workspace}: ${s.actions} actions; ${s.withApproval} with a recorded approval (${s.selfApproved} self-approved); ${s.noApprovalOnRecord} with no approval on record; ${s.checkpoints} signed checkpoint(s).`);
+    const res = Object.entries(s.results || {});
+    if (res.length) console.log(`results recorded: ${res.map(([k, n]) => `${k} ×${n}`).join(', ')}`);
     if (!s.keyPinned) console.log('Note: signing key not pinned. Pass --key with the public key you got from SynthOS separately to rule out a substituted key.');
   }
   for (const p of r.problems) console.log(`  - ${p}`);

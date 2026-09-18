@@ -581,6 +581,12 @@ export function startScheduler(intervalMs = 10000): void {
       .then((m) => m.reconcileStaleUsage())
       .catch(() => { /* bookkeeping must never stop scheduled work */ });
 
+    // AUTHORITY RECORD — sign each moved workspace's chain head at most once a
+    // day (throttled to one sweep an hour). Local database work only.
+    import('../authority-ledger')
+      .then((m) => m.authorityTickForScheduler())
+      .catch(() => { /* bookkeeping must never stop scheduled work */ });
+
     import('./orchestrator')
       .then((m) => m.orchestrationTickForScheduler())
       .then((result) => {

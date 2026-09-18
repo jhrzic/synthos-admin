@@ -13,6 +13,9 @@ import {
   ledgerEntries,
   signCheckpoint,
   entryHashOf,
+  recordOutcome,
+  summarizeAuthority,
+  checkpointDueWorkspaces,
 } from '../lib/authority-ledger';
 import { verifyBundle } from '../tools/verify-authority-record.mjs';
 
@@ -170,5 +173,55 @@ describe('offline verifier (trusts nothing but the public key)', () => {
     const no = run(bad);
     expect(no.status).toBe(1);
     expect(no.stdout).toMatch(/PROBLEMS FOUND/);
+  });
+});
+
+describe('outcomes and routine checkpoints', () => {
+  it('attaches results to earlier actions and verifies them offline', () => {
+    const w = ws();
+    approve(w, 't1', 'alice', 'bob');
+    const r = receipt(w, 't1');
+    recordOutcome({ workspaceId: w, receiptId: r.receipt_id, label: 'visit_booked', recordedBy: 'alice' });
+    recordOutcome({ workspaceId: w, receiptId: r.receipt_id, label: 'sale_closed', detail: 'queen hybrid', recordedBy: 'alice' });
+    const s = summarizeAuthority(w);
+    expect(s).toMatchObject({ actions: 1, withApproval: 1, outcomes: { visit_booked: 1, sale_closed: 1 }, headSeq: 3 });
+    expect(s.integrity.ok).toBe(true);
+    const v = verifyBundle(JSON.parse(JSON.stringify(exportAuthorityRecord(w))));
+    expect(v.ok).toBe(true);
+    expect(v.summary.results).toEqual({ visit_booked: 1, sale_closed: 1 });
+  });
+
+  it('refuses results for actions not on this workspace record, and bad labels', () => {
+    const a = ws();
+    const b = ws();
+    const r = receipt(a, 't1');
+    expect(() => recordOutcome({ workspaceId: b, receiptId: r.receipt_id, label: 'sale_closed', recordedBy: 'x' })).toThrow(/not on this workspace/);
+    expect(() => recordOutcome({ workspaceId: a, receiptId: r.receipt_id, label: 'Sale Closed!', recordedBy: 'x' })).toThrow(/label/);
+  });
+
+  it('catches an edited or deleted result', () => {
+    const w = ws();
+    const r = receipt(w, 't1');
+    const e = recordOutcome({ workspaceId: w, receiptId: r.receipt_id, label: 'sale_closed', recordedBy: 'a' });
+    getDatabase().prepare('UPDATE authority_outcomes SET payload_json = replace(payload_json, ?, ?) WHERE outcome_id = ?').run('sale_closed', 'refund_issued', e.receiptId);
+    expect(summarizeAuthority(w).integrity.problems.join()).toMatch(/altered/);
+    const b = exportAuthorityRecord(w);
+    expect(verifyBundle(JSON.parse(JSON.stringify(b))).ok).toBe(false);
+  });
+
+  it('signs a checkpoint only for workspaces that moved and are due', () => {
+    const w = ws();
+    receipt(w, 't1');
+    const now = Date.now();
+    expect(checkpointDueWorkspaces(24 * 3600_000, now)).toBeGreaterThanOrEqual(1);
+    const signedFor = summarizeAuthority(w).lastCheckpoint;
+    expect(signedFor?.seq).toBe(1);
+    // Nothing moved: no new checkpoint even when due.
+    checkpointDueWorkspaces(0, now + 1);
+    expect(summarizeAuthority(w).lastCheckpoint?.seq).toBe(1);
+    // Moved but not yet a day: still none.
+    receipt(w, 't2');
+    checkpointDueWorkspaces(24 * 3600_000, now + 1000);
+    expect(summarizeAuthority(w).lastCheckpoint?.seq).toBe(1);
   });
 });

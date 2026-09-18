@@ -40,7 +40,15 @@ export interface LedgerAuthority {
   selfApproved: boolean | null;
 }
 
+export type EntryKind = 'RECEIPT' | 'OUTCOME';
+
 export interface LedgerEntry extends LedgerAuthority {
+  /** RECEIPT: an action's signed receipt. OUTCOME: a later result attached to an earlier receipt. */
+  kind?: EntryKind;
+  /** OUTCOME only: the receipt this result belongs to. */
+  subjectReceiptId?: string | null;
+  /** OUTCOME only: short result label, e.g. "visit_booked", "sale_closed". */
+  outcomeLabel?: string | null;
   workspaceId: string;
   seq: number;
   receiptId: string;
@@ -74,6 +82,8 @@ export function entryHashOf(e: Omit<LedgerEntry, 'entryHash'>): string {
     e.recordedAt,
     e.prevHash,
   ];
+  // Receipt entries hash exactly as in v1. Outcome entries also bind what they refer to.
+  if (e.kind === 'OUTCOME') fields.push('OUTCOME', e.subjectReceiptId ?? '', e.outcomeLabel ?? '');
   return sha256(fields.join('|'));
 }
 
@@ -108,7 +118,26 @@ export function ensureLedgerTables(): void {
       signature TEXT NOT NULL,
       PRIMARY KEY (workspace_id, seq)
     );
+    CREATE TABLE IF NOT EXISTS authority_outcomes (
+      outcome_id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      receipt_id TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
   `);
+  // Columns added after the first release of this table; ALTER is a no-op error if present.
+  for (const col of [
+    "ALTER TABLE authority_ledger ADD COLUMN kind TEXT NOT NULL DEFAULT 'RECEIPT'",
+    'ALTER TABLE authority_ledger ADD COLUMN subject_receipt_id TEXT',
+    'ALTER TABLE authority_ledger ADD COLUMN outcome_label TEXT',
+  ]) {
+    try {
+      getDatabase().exec(col);
+    } catch {
+      /* column already exists */
+    }
+  }
   ensured = true;
 }
 
@@ -152,7 +181,9 @@ function workspaceOf(payloadJson: string): string {
 }
 
 function rowToEntry(r: any): LedgerEntry {
+  const kind: EntryKind = r.kind === 'OUTCOME' ? 'OUTCOME' : 'RECEIPT';
   return {
+    ...(kind === 'OUTCOME' ? { kind, subjectReceiptId: r.subject_receipt_id, outcomeLabel: r.outcome_label } : {}),
     workspaceId: r.workspace_id,
     seq: r.seq,
     receiptId: r.receipt_id,
@@ -167,6 +198,22 @@ function rowToEntry(r: any): LedgerEntry {
     prevHash: r.prev_hash,
     entryHash: r.entry_hash,
   };
+}
+
+function insertEntry(entry: LedgerEntry): void {
+  getDatabase()
+    .prepare(
+      `INSERT INTO authority_ledger (workspace_id, seq, receipt_id, receipt_digest, approval_id, requested_by, decided_by,
+         guardian_decision, input_digest, self_approved, recorded_at, prev_hash, entry_hash, kind, subject_receipt_id, outcome_label)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      entry.workspaceId, entry.seq, entry.receiptId, entry.receiptDigest, entry.approvalId, entry.requestedBy,
+      entry.decidedBy, entry.guardianDecision, entry.inputDigest,
+      entry.selfApproved === null ? null : entry.selfApproved ? 1 : 0,
+      entry.recordedAt, entry.prevHash, entry.entryHash,
+      entry.kind ?? 'RECEIPT', entry.subjectReceiptId ?? null, entry.outcomeLabel ?? null,
+    );
 }
 
 /**
@@ -201,21 +248,70 @@ export function appendReceiptToLedger(receipt: {
       prevHash: head ? head.entry_hash : GENESIS_HASH,
     };
     const entry: LedgerEntry = { ...base, entryHash: entryHashOf(base) };
-    db.prepare(
-      `INSERT INTO authority_ledger (workspace_id, seq, receipt_id, receipt_digest, approval_id, requested_by, decided_by,
-         guardian_decision, input_digest, self_approved, recorded_at, prev_hash, entry_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      entry.workspaceId, entry.seq, entry.receiptId, entry.receiptDigest, entry.approvalId, entry.requestedBy,
-      entry.decidedBy, entry.guardianDecision, entry.inputDigest,
-      entry.selfApproved === null ? null : entry.selfApproved ? 1 : 0,
-      entry.recordedAt, entry.prevHash, entry.entryHash,
-    );
+    insertEntry(entry);
     db.exec('RELEASE authority_append');
     return entry;
   } catch (err) {
     db.exec('ROLLBACK TO authority_append');
     db.exec('RELEASE authority_append');
+    throw err;
+  }
+}
+
+export const OUTCOME_LABEL = /^[a-z][a-z0-9_]{1,39}$/;
+
+/**
+ * Attach a later result to an earlier action ("visit_booked", "sale_closed",
+ * "email_replied", "refund_issued"…). Appended as its own chained entry, so
+ * results can be added but never silently rewritten or removed.
+ */
+export function recordOutcome(params: {
+  workspaceId: string;
+  receiptId: string;
+  label: string;
+  detail?: string;
+  recordedBy: string;
+  at?: string;
+}): LedgerEntry {
+  ensureLedgerTables();
+  if (!OUTCOME_LABEL.test(params.label)) throw new Error('Outcome label must be lower_snake_case, 2–40 characters.');
+  const db = getDatabase();
+  const subject: any = db
+    .prepare("SELECT seq FROM authority_ledger WHERE workspace_id = ? AND receipt_id = ? AND kind = 'RECEIPT'")
+    .get(params.workspaceId, params.receiptId);
+  if (!subject) throw new Error('That action is not on this workspace\'s record.');
+  const at = params.at || new Date().toISOString();
+  const outcomeId = `out-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  const payloadJson = JSON.stringify({
+    outcomeId, receiptId: params.receiptId, label: params.label,
+    detail: (params.detail || '').slice(0, 500), recordedBy: params.recordedBy, at,
+  });
+  db.exec('SAVEPOINT authority_outcome');
+  try {
+    db.prepare('INSERT INTO authority_outcomes (outcome_id, workspace_id, receipt_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(outcomeId, params.workspaceId, params.receiptId, payloadJson, at);
+    const head: any = db
+      .prepare('SELECT seq, entry_hash FROM authority_ledger WHERE workspace_id = ? ORDER BY seq DESC LIMIT 1')
+      .get(params.workspaceId);
+    const base: Omit<LedgerEntry, 'entryHash'> = {
+      kind: 'OUTCOME',
+      subjectReceiptId: params.receiptId,
+      outcomeLabel: params.label,
+      workspaceId: params.workspaceId,
+      seq: head.seq + 1,
+      receiptId: outcomeId,
+      receiptDigest: sha256(payloadJson),
+      approvalId: null, requestedBy: params.recordedBy, decidedBy: null, guardianDecision: null, inputDigest: null, selfApproved: null,
+      recordedAt: at,
+      prevHash: head.entry_hash,
+    };
+    const entry: LedgerEntry = { ...base, entryHash: entryHashOf(base) };
+    insertEntry(entry);
+    db.exec('RELEASE authority_outcome');
+    return entry;
+  } catch (err) {
+    db.exec('ROLLBACK TO authority_outcome');
+    db.exec('RELEASE authority_outcome');
     throw err;
   }
 }
@@ -305,6 +401,12 @@ export function auditWorkspace(workspaceId: string): ChainCheck {
   const result = checkChain(entries);
   const db = getDatabase();
   for (const e of entries) {
+    if (e.kind === 'OUTCOME') {
+      const o: any = db.prepare('SELECT payload_json FROM authority_outcomes WHERE outcome_id = ?').get(e.receiptId);
+      if (!o) result.problems.push(`entry ${e.seq}: result ${e.receiptId} is missing`);
+      else if (sha256(o.payload_json) !== e.receiptDigest) result.problems.push(`entry ${e.seq}: result ${e.receiptId} was altered`);
+      continue;
+    }
     const r: any = db.prepare('SELECT payload_json, signature FROM receipts WHERE receipt_id = ?').get(e.receiptId);
     if (!r) result.problems.push(`entry ${e.seq}: receipt ${e.receiptId} is missing`);
     else if (receiptDigest(r.payload_json, r.signature) !== e.receiptDigest)
@@ -321,6 +423,7 @@ export interface AuthorityRecordBundle {
   exportedAt: string;
   entries: LedgerEntry[];
   receipts: { receiptId: string; algorithm: string; publicKey: string; payloadJson: string; signature: string }[];
+  outcomes: { outcomeId: string; payloadJson: string }[];
   checkpoints: Checkpoint[];
 }
 
@@ -329,6 +432,7 @@ export function exportAuthorityRecord(workspaceId: string): AuthorityRecordBundl
   const entries = ledgerEntries(workspaceId);
   const db = getDatabase();
   const receipts = entries
+    .filter((e) => e.kind !== 'OUTCOME')
     .map((e) => db.prepare('SELECT receipt_id, algorithm, public_key, payload_json, signature FROM receipts WHERE receipt_id = ?').get(e.receiptId))
     .filter(Boolean)
     .map((r: any) => ({ receiptId: r.receipt_id, algorithm: r.algorithm, publicKey: r.public_key, payloadJson: r.payload_json, signature: r.signature }));
@@ -339,5 +443,81 @@ export function exportAuthorityRecord(workspaceId: string): AuthorityRecordBundl
       workspaceId: c.workspace_id, seq: c.seq, headHash: c.head_hash, signedAt: c.signed_at,
       algorithm: c.algorithm, publicKey: c.public_key, fingerprint: c.fingerprint, signature: c.signature,
     }));
-  return { format: 'synthos-authority-record', version: LEDGER_VERSION, workspaceId, exportedAt: new Date().toISOString(), entries, receipts, checkpoints };
+  const outcomes = entries
+    .filter((e) => e.kind === 'OUTCOME')
+    .map((e) => db.prepare('SELECT outcome_id, payload_json FROM authority_outcomes WHERE outcome_id = ?').get(e.receiptId))
+    .filter(Boolean)
+    .map((o: any) => ({ outcomeId: o.outcome_id, payloadJson: o.payload_json }));
+  return { format: 'synthos-authority-record', version: LEDGER_VERSION, workspaceId, exportedAt: new Date().toISOString(), entries, receipts, outcomes, checkpoints };
+}
+
+export interface AuthoritySummary {
+  workspaceId: string;
+  actions: number;
+  withApproval: number;
+  selfApproved: number;
+  noApprovalOnRecord: number;
+  outcomes: Record<string, number>;
+  lastCheckpoint: { seq: number; signedAt: string } | null;
+  headSeq: number;
+  integrity: ChainCheck;
+}
+
+/** Everything the Admin panel shows, computed from the ledger itself. */
+export function summarizeAuthority(workspaceId: string): AuthoritySummary {
+  const entries = ledgerEntries(workspaceId);
+  const actions = entries.filter((e) => e.kind !== 'OUTCOME');
+  const outcomes: Record<string, number> = {};
+  for (const e of entries) if (e.kind === 'OUTCOME' && e.outcomeLabel) outcomes[e.outcomeLabel] = (outcomes[e.outcomeLabel] ?? 0) + 1;
+  const cp: any = getDatabase()
+    .prepare('SELECT seq, signed_at FROM authority_checkpoints WHERE workspace_id = ? ORDER BY seq DESC LIMIT 1')
+    .get(workspaceId);
+  return {
+    workspaceId,
+    actions: actions.length,
+    withApproval: actions.filter((e) => e.approvalId).length,
+    selfApproved: actions.filter((e) => e.selfApproved === true).length,
+    noApprovalOnRecord: actions.filter((e) => !e.approvalId).length,
+    outcomes,
+    lastCheckpoint: cp ? { seq: cp.seq, signedAt: cp.signed_at } : null,
+    headSeq: entries.length ? entries[entries.length - 1]!.seq : 0,
+    integrity: auditWorkspace(workspaceId),
+  };
+}
+
+/**
+ * Sign a checkpoint for every workspace whose chain moved since its last
+ * checkpoint and whose last checkpoint is older than `minAgeMs`. Returns how
+ * many were signed. Driven by startAuthorityCheckpointTimer().
+ */
+export function checkpointDueWorkspaces(minAgeMs = 24 * 3600_000, now = Date.now()): number {
+  ensureLedgerTables();
+  const rows: any[] = getDatabase()
+    .prepare(
+      `SELECT l.workspace_id AS w, MAX(l.seq) AS head,
+              (SELECT MAX(seq) FROM authority_checkpoints c WHERE c.workspace_id = l.workspace_id) AS cp_seq,
+              (SELECT MAX(signed_at) FROM authority_checkpoints c WHERE c.workspace_id = l.workspace_id) AS cp_at
+         FROM authority_ledger l GROUP BY l.workspace_id`,
+    )
+    .all();
+  let n = 0;
+  for (const r of rows) {
+    const moved = r.cp_seq === null || r.head > r.cp_seq;
+    const old = r.cp_at === null || now - Date.parse(r.cp_at) >= minAgeMs;
+    if (moved && old && signCheckpoint(r.w)) n++;
+  }
+  return n;
+}
+
+let lastSweepAt = 0;
+/**
+ * Driven by the ONE scheduler timer (lib/fabric/scheduler.ts), not a timer of
+ * its own. Local database work only — no outbound connection. Throttled to
+ * one sweep an hour; each workspace still gets at most one checkpoint a day.
+ */
+export function authorityTickForScheduler(now = Date.now()): number {
+  if (now - lastSweepAt < 3600_000) return 0;
+  lastSweepAt = now;
+  backfillLedger();
+  return checkpointDueWorkspaces(24 * 3600_000, now);
 }

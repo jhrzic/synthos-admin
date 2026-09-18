@@ -4,6 +4,7 @@ import {
   ChevronDown, ChevronRight, Key, Hash, Box, Cpu, Search
 } from 'lucide-react';
 import { ReceiptOutcomeBadge, RetrievalBadge } from './verification/outcome';
+import { AuthorityRecordPanel } from './AuthorityRecordPanel';
 
 // ---------------------------------------------------------------------------
 // CANONICAL EXECUTION RECEIPTS — the real, Ed25519-signed receipts the
@@ -110,6 +111,7 @@ export const CanonicalReceiptsView: React.FC<CanonicalReceiptsViewProps> = ({ ac
 
   return (
     <div className="space-y-6 font-mono pb-12">
+      <AuthorityRecordPanel workspaceId={workspaceId} />
       <div className="bg-gradient-to-r from-[#00D26A]/15 via-[#0B0D1B] to-[#38BDF8]/15 border border-[#00D26A]/40 rounded-2xl p-6 space-y-4">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="flex items-center gap-3">
