@@ -104,6 +104,7 @@ import { resolveAutonomyLevel, AUTONOMY_LEVELS, describeAutonomyLevel, isAutonom
 import { getAntigravityControlStatus } from "./lib/antigravity-control";
 import { setPlatformSetting } from "./lib/platform-settings";
 import { describeAntigravityEnablement } from "./lib/antigravity-client";
+import { readBuildInfo } from "./lib/build-info";
 import {
   summarizeExternalSources,
   indexExternalVaultSources,
@@ -6592,9 +6593,12 @@ Rules for spokenSummary specifically:
         requiredEnvMissing: envReport.requiredMissing,
         requiredEnvInvalid: envReport.invalid,
         systems: runtime.systems.map((s) => ({ system: s.system, status: s.status })),
+        // Exactly which commit this process runs — stamped outside the
+        // process when the code was fixed; UNKNOWN when not stamped.
+        version: readBuildInfo(),
       });
     } catch (err: any) {
-      res.status(503).json({ ready: false, error: "Readiness check failed to run.", timestamp: new Date().toISOString() });
+      res.status(503).json({ ready: false, error: "Readiness check failed to run.", timestamp: new Date().toISOString(), version: readBuildInfo() });
     }
   });
 

@@ -109,6 +109,25 @@ fi
 # after confirming you can still log in.
 MODE="${SYNTHOS_SERVICE_MODE:-development}"
 
+# --- Running-version evidence (reported by /api/ready) -------------------
+# Stamped here, from the exact code about to run, never by the server:
+#   production  — the manifest `npm run build` wrote next to the bundle;
+#   development — this checkout, with a SHA ONLY if `git status` is clean.
+# Only validated SYNTHOS_BUILD_* lines are exported. Anything missing reads
+# UNKNOWN in /api/ready; nothing is inferred.
+unset SYNTHOS_BUILD_SHA SYNTHOS_BUILD_TIME SYNTHOS_BUILD_REF SYNTHOS_BUILD_TREE SYNTHOS_BUILD_SOURCE
+if [[ "${MODE}" == "production" ]]; then
+  BUILD_LINES="$("${NODE_BIN}" "${REPO}/scripts/write-build-info.mjs" --from dist/build-info.json --shell 2>/dev/null)"
+else
+  BUILD_LINES="$(PATH="/usr/bin:${PATH}" "${NODE_BIN}" "${REPO}/scripts/write-build-info.mjs" --shell 2>/dev/null)"
+fi
+for line in ${(f)BUILD_LINES}; do
+  if [[ "${line}" =~ '^SYNTHOS_BUILD_(SHA|TIME|REF|TREE|SOURCE)=[A-Za-z0-9._:/-]+$' ]]; then
+    export "${line}"
+  fi
+done
+say "version commit=${SYNTHOS_BUILD_SHA:-UNKNOWN} tree=${SYNTHOS_BUILD_TREE:-UNKNOWN} ref=${SYNTHOS_BUILD_REF:-UNKNOWN}"
+
 if [[ "${MODE}" == "production" ]]; then
   [[ -f "${REPO}/dist/server.cjs" ]] || refuse "SYNTHOS_SERVICE_MODE=production but dist/server.cjs is missing. Run: npm run build"
   [[ -f "${REPO}/dist/index.html" ]] || refuse "SYNTHOS_SERVICE_MODE=production but dist/index.html is missing. Run: npm run build"
