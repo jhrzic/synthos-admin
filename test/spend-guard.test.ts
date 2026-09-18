@@ -152,8 +152,10 @@ describe('THE NETWORK BOUNDARY', () => {
     policy();
     let second: unknown = null;
     await guardedPaidCall({ provider: 'openai', model: 'gpt-test-standard', callSite: 'test', idempotencyKey: key(), inputChars: 5, maxOutputTokens: 16 }, async () => {
-      await fetch(`${base}/v1/responses`, { method: 'POST', body: JSON.stringify({ model: 'gpt-test-standard' }) });
-      try { await fetch(`${base}/v1/responses`, { method: 'POST', body: JSON.stringify({ model: 'gpt-test-other' }) }); } catch (e) { second = e; }
+      // Both bodies match what was priced, so the ONLY reason the second is refused is that it is a second request.
+      const body = JSON.stringify({ model: 'gpt-test-standard', input: 'hello', max_output_tokens: 16 });
+      await fetch(`${base}/v1/responses`, { method: 'POST', body });
+      try { await fetch(`${base}/v1/responses`, { method: 'POST', body }); } catch (e) { second = e; }
       return { ok: true };
     });
     expect((second as any)?.code).toBe('SECOND_PAID_REQUEST_REFUSED');

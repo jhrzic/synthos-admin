@@ -357,9 +357,18 @@ export async function guardedPaidCall<T>(req: PaidCallRequest, fn: (grant: PaidC
     return auth;
   }
 
+  const policyNow = getSpendPolicy();
   const permit: SpendPermit = {
     usageId: auth.usageId,
     provider: req.provider,
+    // Bind the network request to exactly what was priced (network-guard verifies the body).
+    priced: {
+      model: req.model,
+      maxOutputTokens: req.provider === 'antigravity'
+        ? (auth.maxTotalTokens ?? null)
+        : (req.provider === 'openai' || req.provider === 'gemini') ? (req.maxOutputTokens ?? policyNow.task.maxOutputTokens) : null,
+      maxInputChars: req.inputChars,
+    },
     maxDispatches: 1,
     dispatched: 0,
     lastStatus: null,

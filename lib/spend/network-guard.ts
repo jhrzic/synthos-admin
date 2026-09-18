@@ -46,9 +46,23 @@ export const REAL_PAID_HOSTS = [
  */
 export const PROVIDER_METADATA_HOSTS = ['platform.openai.com', 'developers.openai.com', 'openai.com', 'ai.google.dev'];
 
+/**
+ * What the spend guard PRICED. The outgoing request must match it: the same
+ * model, an output ceiling no higher, and no more input than was estimated.
+ * A request that differs — or whose body cannot be read to check — is refused
+ * before it leaves the process, so nothing can be changed after reservation.
+ */
+export interface PricedRequest {
+  model: string;
+  /** Tokens for inference; for Antigravity this is max_total_tokens. null = not applicable (speech). */
+  maxOutputTokens: number | null;
+  maxInputChars: number;
+}
+
 export interface SpendPermit {
   usageId: string;
   provider: string;
+  priced?: PricedRequest;
   maxDispatches: number;
   dispatched: number;
   lastStatus: number | null;
@@ -133,6 +147,67 @@ function classifyFetchError(err: any): SpendPermit['lastErrorKind'] {
   return 'NETWORK';
 }
 
+function sumTextFields(v: unknown, depth = 0): number {
+  if (depth > 12 || v === null || v === undefined) return 0;
+  if (Array.isArray(v)) return v.reduce((n, x) => n + sumTextFields(x, depth + 1), 0);
+  if (typeof v === 'object') {
+    let n = 0;
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+      n += k === 'text' && typeof x === 'string' ? x.length : sumTextFields(x, depth + 1);
+    }
+    return n;
+  }
+  return 0;
+}
+
+/**
+ * Check a paid request against what was priced. Returns null when it matches,
+ * otherwise the reason it does not. Unknown request shapes FAIL CLOSED.
+ */
+export function verifyPricedRequest(url: URL, bodyText: string | null, priced: PricedRequest, headers?: Record<string, string>): string | null {
+  if (bodyText === null) return 'the request body could not be read to verify it against the reservation';
+  let body: any;
+  try { body = JSON.parse(bodyText); } catch { return 'the request body is not JSON, so it cannot be verified'; }
+  const p = url.pathname;
+  const tooLong = (n: number) => n > priced.maxInputChars ? `input is ${n} characters; ${priced.maxInputChars} were priced` : null;
+
+  if (/\/responses$/.test(p)) {
+    if (body.model !== priced.model) return `model "${body.model}" differs from the priced "${priced.model}"`;
+    if (typeof body.max_output_tokens !== 'number') return 'no max_output_tokens was sent';
+    if (priced.maxOutputTokens !== null && body.max_output_tokens > priced.maxOutputTokens) return `max_output_tokens ${body.max_output_tokens} exceeds the priced ${priced.maxOutputTokens}`;
+    return tooLong(typeof body.input === 'string' ? body.input.length : JSON.stringify(body.input ?? '').length);
+  }
+  if (/\/audio\/speech$/.test(p)) {
+    if (body.model !== priced.model) return `model "${body.model}" differs from the priced "${priced.model}"`;
+    return tooLong(String(body.input ?? '').length);
+  }
+  const gm = /\/models\/([^/:]+):(generateContent|streamGenerateContent)$/.exec(p);
+  if (gm) {
+    if (decodeURIComponent(gm[1]) !== priced.model) return `model "${gm[1]}" differs from the priced "${priced.model}"`;
+    const out = body.generationConfig?.maxOutputTokens;
+    if (typeof out !== 'number') return 'no maxOutputTokens was sent';
+    if (priced.maxOutputTokens !== null && out > priced.maxOutputTokens) return `maxOutputTokens ${out} exceeds the priced ${priced.maxOutputTokens}`;
+    return tooLong(sumTextFields({ contents: body.contents, systemInstruction: body.systemInstruction }));
+  }
+  if (/\/interactions$/.test(p)) {
+    if (body.agent !== priced.model) return `agent "${body.agent}" differs from the priced "${priced.model}"`;
+    const cap = body.agent_config?.max_total_tokens;
+    if (typeof cap !== 'number') return 'no agent_config.max_total_tokens was sent';
+    if (priced.maxOutputTokens !== null && cap > priced.maxOutputTokens) return `max_total_tokens ${cap} exceeds the priced ${priced.maxOutputTokens}`;
+    return tooLong(String(body.input ?? '').length);
+  }
+  if (/\/text-to-speech\//.test(p)) {
+    if (body.model_id !== priced.model) return `model "${body.model_id}" differs from the priced "${priced.model}"`;
+    return tooLong(String(body.text ?? '').length);
+  }
+  if (/\/v1\/tts$/.test(p)) {
+    const hdrModel = headers?.model ?? headers?.Model;
+    if (hdrModel !== undefined && hdrModel !== priced.model) return `model "${hdrModel}" differs from the priced "${priced.model}"`;
+    return tooLong(String(body.text ?? '').length);
+  }
+  return `the request shape at ${p} is not one the spend guard can verify`;
+}
+
 let installed = false;
 let unguardedAttemptsBlocked = 0;
 
@@ -189,6 +264,15 @@ export function installPaidEndpointGuard(): void {
         'SECOND_PAID_REQUEST_REFUSED',
         `This call already sent its one permitted paid request; a second (retry or fallback) was refused. Policy is NO_PAID_FALLBACK.`,
       );
+    }
+
+    if (permit.priced) {
+      const bodyText = typeof init?.body === 'string' ? init.body : null;
+      const headers = init?.headers && typeof init.headers === 'object' && !(typeof (init.headers as any).get === 'function') ? (init.headers as Record<string, string>) : undefined;
+      const mismatch = verifyPricedRequest(url, bodyText, permit.priced, headers);
+      if (mismatch) {
+        throw new PaidEndpointBlockedError('REQUEST_DIFFERS_FROM_RESERVATION', `Refused before sending: ${mismatch}. A different request needs its own reservation.`);
+      }
     }
 
     permit.dispatched += 1;
