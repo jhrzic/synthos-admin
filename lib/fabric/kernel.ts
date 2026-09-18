@@ -263,7 +263,7 @@ export async function executeAgentTask(
     return { status: 503, body: { success: false, status: "REFUSED", reason: "SERVICE_DRAINING", error: "The service is shutting down; no new task is started. Submit it again after the restart.", taskId: body.taskId } };
   }
   // QUEUED-TASK PROCESSING OFF (fail closed): no model task starts.
-  const gate = queuedTaskProcessingRefusal('kernel.executeEnvelope');
+  const gate = queuedTaskProcessingRefusal('kernel.executeAgentTask', { taskId: body.taskId, workspaceId: resolvedWorkspaceId });
   if (gate) return { status: 503, body: { success: false, status: "REFUSED", reason: "QUEUED_TASK_PROCESSING_DISABLED", error: gate.message, taskId: body.taskId } };
   const finished = noteExecutionStarted(body.taskId, 'kernel.task');
   try {

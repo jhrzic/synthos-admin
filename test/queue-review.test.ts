@@ -85,8 +85,8 @@ describe('runtime version report', () => {
     for (const k of ['SYNTHOS_BUILD_SHA', 'SYNTHOS_BUILD_TIME', 'SYNTHOS_BUILD_REF', 'SYNTHOS_BUILD_TREE', 'SYNTHOS_BUILD_SOURCE']) delete process.env[k];
     try {
       const v = runtimeVersionReport(getDatabase());
-      expect(v).toMatchObject({ commit: 'UNKNOWN', buildTime: 'UNKNOWN', ref: 'UNKNOWN', tree: 'UNKNOWN', source: 'UNKNOWN', node: process.version, registrySchema: 'synthos.registry/v1', databaseSchema: { version: 2, supported: 'UNKNOWN' } });
-      expect(runtimeVersionReport(getDatabase(), 2).databaseSchema).toMatchObject({ version: 2, supported: 2 });
+      expect(v).toMatchObject({ commit: 'UNKNOWN', buildTime: 'UNKNOWN', ref: 'UNKNOWN', tree: 'UNKNOWN', source: 'UNKNOWN', node: process.version, registrySchema: 'synthos.registry/v1', databaseSchema: { version: 3, supported: 'UNKNOWN' } });
+      expect(runtimeVersionReport(getDatabase(), 3).databaseSchema).toMatchObject({ version: 3, supported: 3 });
       expect(v.databaseSchema.fingerprint).toMatch(/^sha256:[0-9a-f]{64}$/);
       expect(runtimeVersionReport(null).databaseSchema).toEqual({ version: 'UNKNOWN', supported: 'UNKNOWN', fingerprint: 'UNKNOWN' });
       process.env.SYNTHOS_BUILD_SHA = 'a'.repeat(40); process.env.SYNTHOS_BUILD_TREE = 'CLEAN';

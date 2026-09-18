@@ -26,7 +26,7 @@ describe('schema version', () => {
   it('migrations are contiguous from 1, and the supported version is the last one', () => {
     expect(SCHEMA_MIGRATIONS.map((m) => m.version)).toEqual(SCHEMA_MIGRATIONS.map((_, i) => i + 1));
     expect(SCHEMA_VERSION).toBe(SCHEMA_MIGRATIONS.length);
-    expect(SCHEMA_VERSION).toBe(2);
+    expect(SCHEMA_VERSION).toBe(3);
   });
 
   it('a fresh database opens at the current version', () => {
@@ -47,11 +47,20 @@ describe('schema version', () => {
     expect(out.t).toContain('artifact_purpose_events');
   });
 
-  it('a database at version 1 applies only migration 2', () => {
+  it('a database at version 1 applies only migrations 2 and 3', () => {
     const db = new DatabaseSync(path.join(TMP, 'v1.db'));
     db.exec('PRAGMA user_version = 1');
-    expect(applySchemaMigrations(db)).toEqual({ from: 1, to: 2, applied: [2] });
+    expect(applySchemaMigrations(db)).toEqual({ from: 1, to: 3, applied: [2, 3] });
     expect(tables(db)).toContain('artifact_purpose_events');
+    expect(tables(db)).toContain('queued_task_activations');
+    db.close();
+  });
+
+  it('a database at version 2 applies only migration 3, which creates an empty activation table', () => {
+    const db = new DatabaseSync(path.join(TMP, 'v2.db'));
+    db.exec('PRAGMA user_version = 2');
+    expect(applySchemaMigrations(db)).toEqual({ from: 2, to: 3, applied: [3] });
+    expect((db.prepare('SELECT COUNT(*) AS n FROM queued_task_activations').get() as any).n).toBe(0);
     db.close();
   });
 
@@ -65,7 +74,7 @@ describe('schema version', () => {
     // A migration applied to a database that already has its table (the lazily-created case) is harmless.
     const db = new DatabaseSync(p);
     db.exec('PRAGMA user_version = 1');
-    expect(applySchemaMigrations(db).applied).toEqual([2]);
+    expect(applySchemaMigrations(db).applied).toEqual([2, 3]);
     db.close();
   });
 

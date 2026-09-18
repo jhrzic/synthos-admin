@@ -49,7 +49,8 @@
 import { isDraining } from '../runtime-lifecycle';
 import {
   listOrchestratorEligibleTasks,
-  claimTaskForOrchestration,
+  claimTaskForOrchestrationDetailed,
+  ORCHESTRATOR_ELIGIBLE_STATUSES,
   releaseTaskClaim,
   getOrchestratorTask,
   listStrandedOrchestrationTasks,
@@ -74,6 +75,7 @@ import { listApprovalsForCorrelation } from '../approvals';
 import { scrubSecrets } from '../redact';
 import { SPEND_WAIT_CODES } from '../spend/guard';
 import { queuedTaskProcessingRefusal } from '../queued-task-processing';
+import { selectIssuedActivation, verifyIssuedActivationFor, settleActivation, finishActivation } from '../task-activation';
 
 export type OrchestrationOutcome =
   | 'ADVANCED'            // the task ran and reached a terminal state
@@ -114,6 +116,8 @@ export interface OrchestrationTickResult {
   resumed: Array<{ taskId: string; to: string; approvalId: string }>;
   /** Set when the tick did nothing because queued-task processing is not ENABLED. */
   refused?: string;
+  /** Set when the tick ran the one task named by an ISSUED task activation. */
+  activationId?: string;
 }
 
 /** Health, exposed for the Admin surface and /api/ready. Process-local, like the scheduler's. */
@@ -289,9 +293,18 @@ export async function advanceTask(task: OrchestratorTaskRow): Promise<Orchestrat
   const base = { taskId: task.task_id, workspaceId, capability: task.capability, correlationId };
   // DRAINING: nothing is claimed or started; the task stays exactly as it was.
   if (isDraining()) return { ...base, outcome: 'DEFERRED', reason: 'SERVICE_DRAINING: the service is shutting down; the task was not claimed.' } as OrchestrationStep;
-  // Immediately before the claim: queued-task processing must be ENABLED.
-  const gate = queuedTaskProcessingRefusal('orchestrator.advanceTask');
-  if (gate) return { ...base, outcome: 'DEFERRED', reason: gate.message } as OrchestrationStep;
+  // Immediately before the claim: queued-task processing must be ENABLED, or
+  // an ISSUED task activation must name exactly this task (task, workspace,
+  // capability, parameter hash — re-read from the database).
+  let pendingActivationId: string | null = null;
+  const gate = queuedTaskProcessingRefusal('orchestrator.advanceTask', { taskId: task.task_id, workspaceId });
+  if (gate) {
+    const issued = verifyIssuedActivationFor(task);
+    if (!issued.ok) return { ...base, outcome: 'DEFERRED', reason: `${gate.message} ${issued.reason}.` } as OrchestrationStep;
+    pendingActivationId = issued.activationId;
+  }
+  /** Set only when THIS call won the activation claim; only it may settle the activation. */
+  let heldActivationId: string | null = null;
 
   // Declared before the claim so every exit path can settle it.
   let settle: ((outcome: OrchestrationOutcome) => void) | null = null;
@@ -315,6 +328,13 @@ export async function advanceTask(task: OrchestratorTaskRow): Promise<Orchestrat
       settle(step.outcome);
       settle = null;
     }
+    // TASK ACTIVATION — single use. The holder records COMPLETED only if the
+    // normal evidence chain succeeded; every other ending aborts it. An exit
+    // before the claim (other than losing it) also aborts: it is never reused.
+    try {
+      if (heldActivationId) settleActivation(heldActivationId, step.outcome);
+      else if (pendingActivationId && step.outcome !== 'NOT_CLAIMED') finishActivation(pendingActivationId, 'ABORTED', `run ended ${step.outcome} before the claim`);
+    } catch { /* an unsettled activation expires; it can never be reused */ }
     recordOrchestrationEvent(step);
     health.lastStep = step;
     return step;
@@ -365,9 +385,11 @@ export async function advanceTask(task: OrchestratorTaskRow): Promise<Orchestrat
   // mechanism the envelope already uses for tool idempotency — so tool tasks
   // were never exposed, and this makes model tasks equally safe rather than
   // inventing a third approach.
-  if (!claimTaskForOrchestration(task.task_id, workspaceId)) {
+  const claim = claimTaskForOrchestrationDetailed(task.task_id, workspaceId);
+  if (!claim.won) {
     return finish({ ...base, outcome: 'NOT_CLAIMED', reason: 'Another worker claimed this task first; not executed here.' });
   }
+  heldActivationId = claim.activationId;
 
   // DISTINCT KEY NAMESPACE, and this collision is worth recording because it
   // broke three tests the moment the durable claim was added.
@@ -765,7 +787,19 @@ export async function runOrchestrationTick(opts: { maxTasks?: number; workspaceI
   // QUEUED-TASK PROCESSING OFF (fail closed): claim nothing, resume nothing —
   // not even approved tasks. Checked every tick, before any read of the queue.
   const gate = queuedTaskProcessingRefusal('orchestrator.tick');
-  if (gate) return { level, considered: 0, steps, stranded, resumed, refused: gate.message };
+  if (gate) {
+    // TASK ACTIVATION: the one ISSUED activation's root task is the only task
+    // this tick may consider. No approved-task resume, no other task.
+    const activation = selectIssuedActivation();
+    if (activation && (!opts.workspaceId || opts.workspaceId === activation.workspace_id)) {
+      const row = getOrchestratorTask(activation.root_task_id, activation.workspace_id);
+      if (row && Number(row.autonomy_eligible) === 1 && (ORCHESTRATOR_ELIGIBLE_STATUSES as readonly string[]).includes(String(row.status))) {
+        steps.push(await advanceTask(row));
+        return { level, considered: 1, steps, stranded, resumed, refused: gate.message, activationId: activation.activation_id };
+      }
+    }
+    return { level, considered: 0, steps, stranded, resumed, refused: gate.message };
+  }
 
   const workspaceIds = opts.workspaceId
     ? [opts.workspaceId]

@@ -380,7 +380,7 @@ export interface SubmitExternalExecutionResult {
  */
 export async function submitExternalExecution(params: SubmitExternalExecutionParams): Promise<SubmitExternalExecutionResult> {
   // QUEUED-TASK PROCESSING OFF (fail closed): no Windmill / Antigravity dispatch.
-  assertQueuedTaskProcessing('externalExecutions.dispatch');
+  assertQueuedTaskProcessing('externalExecutions.dispatch', { taskId: params.taskId ?? null, workspaceId: params.workspaceId, idempotencyKey: params.idempotencyKey ?? null });
   const db = getDatabase();
   const runtime: ExternalRuntime = params.runtime || 'windmill';
 

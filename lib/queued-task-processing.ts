@@ -21,6 +21,7 @@
 
 import { getDatabase } from './persistence';
 import { getStoredPlatformSetting } from './platform-settings';
+import { verifyActivationLease, abortActivationIfRelated, type GateScope } from './task-activation';
 
 export const QUEUED_TASK_PROCESSING_SETTING = 'execution.queuedTaskProcessing';
 export const QUEUED_TASK_PROCESSING_DEFAULT = Object.freeze({ queuedTaskProcessingEnabled: false });
@@ -43,7 +44,8 @@ export const QUEUED_TASK_PROCESSING_GATES = [
   'persistence.claimOrchestratorTask',  // lib/persistence.ts — the atomic READY/TODO → RUNNING claim
   'persistence.updateTaskStatus.RUNNING', // lib/persistence.ts — any transition INTO RUNNING
   'persistence.claimExecution',         // lib/persistence.ts — execution_claims insert
-  'kernel.executeEnvelope',             // lib/fabric/kernel.ts — every capability execution
+  'kernel.executeEnvelope',             // lib/fabric/envelope.ts executeEnvelope — every capability execution
+  'kernel.executeAgentTask',            // lib/fabric/kernel.ts executeAgentTask — every model task
   'spend.authorizePaidCall',            // lib/spend/guard.ts — provider/local/Antigravity dispatch, before any ledger row
   'scheduler.runDueSchedules',          // lib/fabric/scheduler.ts — scheduled work: no occurrence, no enqueue
   'continuity.tryResume',               // lib/continuity/resume.ts — scheduler tick and operator resume
@@ -87,21 +89,33 @@ export function readQueuedTaskProcessing(): QueuedTaskProcessingStatus {
 }
 
 const blocked: Record<string, number> = {};
+const PRE_CLAIM_GATES = new Set<string>(['orchestrator.tick', 'orchestrator.advanceTask', 'persistence.claimOrchestratorTask']);
 /** In-memory counters of refusals per gate (diagnostics only; no writes). */
 export function queuedTaskProcessingRefusals(): Record<string, number> { return { ...blocked }; }
 
-/** Throw unless queued-task processing is ENABLED. Call immediately before the guarded action. */
-export function assertQueuedTaskProcessing(gate: QueuedTaskProcessingGate): void {
+/**
+ * Throw unless queued-task processing is ENABLED — or, for the three lease
+ * gates only, a CLAIMED task activation (lib/task-activation.ts) re-read from
+ * the database covers exactly the action described by `scope`. A refusal that
+ * names the live activation's task aborts that activation.
+ */
+export function assertQueuedTaskProcessing(gate: QueuedTaskProcessingGate, scope?: GateScope): void {
   const s = readQueuedTaskProcessing();
-  if (!s.enabled) {
-    blocked[gate] = (blocked[gate] ?? 0) + 1;
-    throw new QueuedTaskProcessingDisabledError(gate, s);
+  if (s.enabled) return;
+  // Pre-claim gates (tick, advanceTask, the claim) are refused here; their
+  // callers verify an ISSUED activation themselves (lib/task-activation.ts).
+  if (!PRE_CLAIM_GATES.has(gate)) {
+    const lease = verifyActivationLease(gate, scope);
+    if (lease.ok) return;
+    try { abortActivationIfRelated(gate, scope, lease.reason); } catch { /* the refusal stands either way */ }
   }
+  blocked[gate] = (blocked[gate] ?? 0) + 1;
+  throw new QueuedTaskProcessingDisabledError(gate, s);
 }
 
 /** Non-throwing form for paths that return a refusal value instead. */
-export function queuedTaskProcessingRefusal(gate: QueuedTaskProcessingGate): QueuedTaskProcessingDisabledError | null {
-  try { assertQueuedTaskProcessing(gate); return null; } catch (e) { return e as QueuedTaskProcessingDisabledError; }
+export function queuedTaskProcessingRefusal(gate: QueuedTaskProcessingGate, scope?: GateScope): QueuedTaskProcessingDisabledError | null {
+  try { assertQueuedTaskProcessing(gate, scope); return null; } catch (e) { return e as QueuedTaskProcessingDisabledError; }
 }
 
 /** Persist the default OFF value if (and only if) no value is stored. Never overwrites. */

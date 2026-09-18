@@ -326,7 +326,7 @@ describe('Guardian is revalidated at dispatch', () => {
 
   it('Guardian runs at dispatch, not at queue time', () => {
     const src = fs.readFileSync(path.join(process.cwd(), 'lib/fabric/orchestrator.ts'), 'utf8');
-    const claimAt = src.indexOf('claimTaskForOrchestration(task.task_id');
+    const claimAt = src.indexOf('claimTaskForOrchestrationDetailed(task.task_id');
     const guardianAt = src.indexOf('const guardian = guardianCheckInstruction(guardianSubject)');
     const dispatchAt = src.indexOf('const result: ExecutionEnvelopeResult = await executeEnvelope(');
     expect(claimAt).toBeGreaterThan(-1);

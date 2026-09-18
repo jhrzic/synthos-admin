@@ -245,7 +245,7 @@ export function authorizePaidCall(req: PaidCallRequest): { permitted: false; usa
   // QUEUED-TASK PROCESSING OFF (fail closed): no provider, local or
   // Antigravity dispatch — and, unlike every other refusal here, NO ledger
   // row: the gate is checked before anything is read or written.
-  const gate = queuedTaskProcessingRefusal('spend.authorizePaidCall');
+  const gate = queuedTaskProcessingRefusal('spend.authorizePaidCall', { taskId: req.taskId ?? null, workspaceId: req.workspaceId ?? null, idempotencyKey: req.correlationId ?? null });
   if (gate) return { permitted: false, usageId: 'NOT_RECORDED', status: 'BLOCKED', code: gate.code, reason: gate.message, estimatedCostUsd: null };
   const policy = getSpendPolicy();
   const prior = listUsageForKey(req.idempotencyKey);

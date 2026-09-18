@@ -4,7 +4,8 @@ export { RECEIPT_SIGNING_ALGORITHM, receiptAlgorithmLabel };
 import { appendReceiptToLedger } from './authority-ledger';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { assertQueuedTaskProcessing } from './queued-task-processing';
+import { assertQueuedTaskProcessing, readQueuedTaskProcessing } from './queued-task-processing';
+import { claimTaskUnderActivation } from './task-activation';
 // @ts-ignore
 import { DatabaseSync } from 'node:sqlite';
 import {
@@ -1359,6 +1360,28 @@ export function getDatabase(): any {
 // There is no second migration system; this list is it.
 // ---------------------------------------------------------------------------
 
+/** Task-scoped activations (lib/task-activation.ts). One ISSUED/CLAIMED row at most. */
+export const ACTIVATION_TABLE_SQL = `CREATE TABLE IF NOT EXISTS queued_task_activations (
+    activation_id TEXT PRIMARY KEY,
+    root_task_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    parameter_hash TEXT NOT NULL,
+    correlation_id TEXT NOT NULL,
+    child_task_id TEXT NOT NULL,
+    approved_by TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('ISSUED','CLAIMED','COMPLETED','ABORTED','EXPIRED')),
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    lease_id TEXT,
+    claimed_at TEXT,
+    finished_at TEXT,
+    finish_reason TEXT
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_queued_task_activation_live
+    ON queued_task_activations ((workspace_id IS NOT NULL)) WHERE status IN ('ISSUED','CLAIMED');
+  CREATE INDEX IF NOT EXISTS idx_queued_task_activations_root ON queued_task_activations (root_task_id, status);`;
+
 export interface SchemaMigration {
   version: number;
   description: string;
@@ -1379,6 +1402,11 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = Object.freeze([
         purpose TEXT NOT NULL, retrieval_policy TEXT NOT NULL, reason TEXT NOT NULL, actor TEXT NOT NULL, created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_artifact_purpose_events_artifact ON artifact_purpose_events (artifact_id, created_at);`),
+  },
+  {
+    version: 3,
+    description: 'queued_task_activations — task-scoped, single-use activation and execution lease (lib/task-activation.ts). Empty on creation.',
+    up: (db: any) => db.exec(ACTIVATION_TABLE_SQL),
   },
 ]);
 
@@ -1700,10 +1728,24 @@ export function getOrchestratorTask(taskId: string, workspaceId: string): Orches
  * Returns true if THIS caller now owns the task.
  */
 export function claimTaskForOrchestration(taskId: string, workspaceId: string, nowIso?: string): boolean {
-  // Fail closed: no claim while queued-task processing is not explicitly ENABLED.
-  assertQueuedTaskProcessing('persistence.claimOrchestratorTask');
-  const db = getDatabase();
+  return claimTaskForOrchestrationDetailed(taskId, workspaceId, nowIso).won;
+}
+
+/**
+ * The claim, reporting whether it was won under a task activation. While
+ * queued-task processing is OFF the only way to win is an ISSUED activation
+ * naming this exact task (lib/task-activation.ts): activation and task change
+ * in one transaction. With no such activation the claim is refused (throws).
+ */
+export function claimTaskForOrchestrationDetailed(taskId: string, workspaceId: string, nowIso?: string): { won: boolean; activationId: string | null } {
   const now = nowIso || new Date().toISOString();
+  if (!readQueuedTaskProcessing().enabled) {
+    const activated = claimTaskUnderActivation(taskId, workspaceId, now);
+    if (activated) return activated;
+  }
+  // Fail closed: no claim while queued-task processing is not explicitly ENABLED.
+  assertQueuedTaskProcessing('persistence.claimOrchestratorTask', { taskId, workspaceId });
+  const db = getDatabase();
   const eligible = ORCHESTRATOR_ELIGIBLE_STATUSES.map(() => '?').join(', ');
   const res: any = db.prepare(
     `UPDATE tasks SET status = 'RUNNING', updated_at = ?
@@ -1714,7 +1756,7 @@ export function claimTaskForOrchestration(taskId: string, workspaceId: string, n
     db.prepare('INSERT INTO task_status_history (task_id, status, created_at) VALUES (?, ?, ?)')
       .run(taskId, 'RUNNING', now);
   }
-  return won;
+  return { won, activationId: null };
 }
 
 /** Release a claim back to READY — used when dispatch is refused before any work happened. */
@@ -1842,7 +1884,7 @@ export function acquireExecutionClaim(params: {
   taskId: string;
 }): ExecutionClaimAcquisition {
   // Fail closed: no execution claim while queued-task processing is not ENABLED.
-  assertQueuedTaskProcessing('persistence.claimExecution');
+  assertQueuedTaskProcessing('persistence.claimExecution', { taskId: params.taskId, workspaceId: params.workspaceId, capability: params.capability, idempotencyKey: params.idempotencyKey, payloadHash: params.payloadHash, actorUserId: params.actorUserId });
   const db = getDatabase();
   const now = new Date().toISOString();
   const claimId = `claim-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
@@ -2160,7 +2202,11 @@ export class TaskWorkspaceMismatchError extends Error {
 export function updateTaskStatus(taskId: string, status: string, timestamp?: string, expectedWorkspaceId?: string): void {
   // Backstop for every caller: nothing transitions INTO RUNNING while
   // queued-task processing is not explicitly ENABLED (checked before any write).
-  if (status === 'RUNNING') assertQueuedTaskProcessing('persistence.updateTaskStatus.RUNNING');
+  if (status === 'RUNNING') {
+    let ws: string | null | undefined = expectedWorkspaceId;
+    if (ws === undefined) { try { ws = getTaskWorkspaceId(taskId); } catch { ws = null; } }
+    assertQueuedTaskProcessing('persistence.updateTaskStatus.RUNNING', { taskId, workspaceId: ws ?? null });
+  }
   const db = getDatabase();
 
   if (expectedWorkspaceId !== undefined) {

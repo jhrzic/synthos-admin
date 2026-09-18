@@ -295,7 +295,7 @@ export async function executeEnvelope(input: ExecutionEnvelopeInput): Promise<Ex
   input = { ...input, __consumedApprovalId: null };
   // QUEUED-TASK PROCESSING OFF (fail closed): no capability runs — nothing is
   // claimed, started, dispatched or recorded as an attempt.
-  const gate = queuedTaskProcessingRefusal('kernel.executeEnvelope');
+  const gate = queuedTaskProcessingRefusal('kernel.executeEnvelope', { taskId: input.taskId ?? null, workspaceId: input.workspaceId, capability: input.capability, parameters: input.parameters ?? {}, idempotencyKey: input.idempotencyKey ?? null, actorUserId: input.actorUserId });
   if (gate) return { outcome: 'BLOCKED', capability: input.capability, reason: gate.message };
   const startedAt = Date.now();
   let result: ExecutionEnvelopeResult;

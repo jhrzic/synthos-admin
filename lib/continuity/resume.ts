@@ -23,7 +23,7 @@ const lastChecked = new Map<string, number>();
 export function tryResume(c: ContinuityRecord, actor: string, force = false): { resumed: boolean; reason: string } {
   // QUEUED-TASK PROCESSING OFF (fail closed): nothing is resumed, by the
   // scheduler sweep or by an operator, and nothing is written.
-  const gate = queuedTaskProcessingRefusal('continuity.tryResume');
+  const gate = queuedTaskProcessingRefusal('continuity.tryResume', { taskId: c.taskId, workspaceId: c.workspaceId });
   if (gate) return { resumed: false, reason: gate.message };
   if (c.state === 'PAUSED_AWAITING_APPROVAL' && !force) return { resumed: false, reason: 'waiting for a human approval' };
   // Stalled progress needs a person: the sweep never resumes it.
