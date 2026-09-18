@@ -156,9 +156,15 @@ export const ExecutionReconciliationPanel: React.FC<{ workspaceId: string; taskI
               {t.evidence.providerResponseId ? ` · response ${t.evidence.providerResponseId}` : ''}
               {t.evidence.operatorReportedUsage ? ` · operator-reported usage ${JSON.stringify(t.evidence.operatorReportedUsage)}` : ''}
             </div>
-            <div className="mt-1" data-testid="reconciliation-truths">
-              provider truth <span className="font-mono text-white">{t.finding}</span> · SynthOS execution truth <span className="font-mono text-white">{t.executionTruth ?? 'NOT RECORDED on this event'}</span>{t.reasonCode ? <> · reason <span className="font-mono">{t.reasonCode}</span></> : null}
-              {t.transition ? <div className="font-mono text-[#8E94B8]">{t.transition.join(' → ')}</div> : null}
+            <div className="mt-1 font-mono" data-testid="reconciliation-truths">
+              <div>provider truth <span className="text-white">{t.providerTruth ?? t.finding}</span></div>
+              {t.synthosReceiptTruth ? (
+                <div>SynthOS receipt <span className="text-white">{t.synthosReceiptTruth}</span> · persistence <span className="text-white">{t.persistenceTruth}</span> · completion <span className="text-white">{t.completionTruth}</span> · reason <span className="text-white">{t.reasonCode}</span> · status <span className="text-white">{t.resultingStatus}</span></div>
+              ) : (
+                <div className="text-[#8E94B8]">SynthOS dimensions NOT RECORDED on this event{t.legacyExecutionTruth ? ` (stored executionTruth ${t.legacyExecutionTruth}${t.reasonCode ? `, reason ${t.reasonCode}` : ''}, from the finding-level mapping of commit 7a00e33)` : ''}</div>
+              )}
+              {t.transition ? <div className="text-[#8E94B8]">{t.transition.join(' → ')}</div> : null}
+              {t.synthosEvidenceBasis ? <ul className="list-disc ml-4 text-[#6A7097]">{t.synthosEvidenceBasis.map((b: string, i: number) => <li key={i}>{b}</li>)}</ul> : null}
             </div>
             <div className="mt-1">{t.evidence.dashboardFinding}</div>
             <div className="mt-1 text-[#8E94B8]">{t.evidence.note}</div>

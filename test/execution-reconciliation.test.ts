@@ -17,7 +17,8 @@ isolateVaultForTest('recon');
 
 import { getDatabase } from '../lib/persistence';
 import { ensureWorkspace } from '../lib/workspaces';
-import { reconcileAmbiguousExecution, reconciliationTrail, reconciliationGuide, RECONCILIATION_FINDINGS, RECONCILIATION_SEMANTICS } from '../lib/continuity/orphans';
+import { reconcileAmbiguousExecution, reconciliationTrail, reconciliationGuide, RECONCILIATION_FINDINGS, assessSynthosExecutionEvidence, deriveReconciliationOutcome, SYNTHOS_RECEIPT_TRUTHS, PERSISTENCE_TRUTHS, COMPLETION_TRUTHS } from '../lib/continuity/orphans';
+import { signReceiptPayload } from '../lib/persistence';
 
 let fetchCalls = 0;
 const WS = 'ws-recon';
@@ -49,7 +50,7 @@ const base = (taskId: string, extra: Record<string, unknown> = {}) => ({
 beforeAll(() => {
   (globalThis as any).fetch = () => { fetchCalls += 1; throw new Error('network forbidden'); };
   getDatabase(); ensureWorkspace(WS, 'Recon'); ensureWorkspace(OTHER, 'Other');
-  for (const id of ['t-valid', 't-noreq', 't-complete', 't-usage', 't-failed', 't-incon', 't-idem', 't-correct', 't-scope', 't-clarify']) seed(id);
+  for (const id of ['t-valid', 't-noreq', 't-complete', 't-usage', 't-failed', 't-incon', 't-idem', 't-correct', 't-scope', 't-clarify', 'd-notrecv', 'd-unknown', 'd-notpersist', 'd-notvalid', 'd-validated', 'd-legacy']) seed(id);
   getDatabase().prepare("INSERT INTO tasks (task_id, workspace_id, title, description, assigned_agent, assigned_model, status, created_at, updated_at) VALUES ('t-done', ?, 'done', 'd', 'scribe', 'gpt-test-model', 'DONE', '2026-09-17T00:00:00Z', '2026-09-17T00:00:00Z')").run(WS);
   // A sibling started a few minutes later on the same model: must be listed for exclusion.
   getDatabase().prepare("INSERT INTO tasks (task_id, workspace_id, title, description, assigned_agent, assigned_model, status, created_at, updated_at) VALUES ('t-sibling', ?, 's', 'd', 'scribe', 'gpt-test-model', 'CANCELLED', '2026-09-17T20:53:37Z', '2026-09-17T20:53:37Z')").run(WS);
@@ -163,25 +164,85 @@ describe('idempotency and corrections', () => {
   });
 });
 
-describe('provider truth vs SynthOS execution truth', () => {
-  it('no finding can lead to DONE; provider completion is RESPONSE_NOT_RECEIVED → INCOMPLETE', () => {
-    for (const f of RECONCILIATION_FINDINGS) expect(RECONCILIATION_SEMANTICS[f].transition).not.toContain('DONE');
-    expect(RECONCILIATION_SEMANTICS.PROVIDER_CONFIRMED_COMPLETED).toEqual({ executionTruth: 'RESPONSE_NOT_RECEIVED', reasonCode: 'RESPONSE_NOT_RECEIVED', transition: ['DISPATCHED/UNKNOWN', 'PROVIDER_CONFIRMED_COMPLETED', 'RESPONSE_NOT_RECEIVED', 'INCOMPLETE'] });
+describe('independent evidence dimensions (provider truth never implies SynthOS truth)', () => {
+  const ev = (id: string, type: string, at = '2026-09-18T13:30:52.828Z') => getDatabase().prepare('INSERT INTO activity_events (event_id, task_id, event_type, agent_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(`act-${type}-${id}`, id, type, 'test', '{}', at);
+  const completed = (id: string) => reconcileAmbiguousExecution(base(id, { finding: 'PROVIDER_CONFIRMED_COMPLETED' })) as any;
+  const lastPayload = (id: string) => JSON.parse(events(id).at(-1).payload_json);
+
+  it('provider completed + response NOT received (owning process recorded as stopped, no response on record) → INCOMPLETE / RESPONSE_NOT_RECEIVED', () => {
+    ev('d-notrecv', 'RECONCILIATION_REQUIRED');
+    expect(assessSynthosExecutionEvidence('d-notrecv')).toMatchObject({ synthosReceiptTruth: 'RESPONSE_NOT_RECEIVED', persistenceTruth: 'NOT_PERSISTED', completionTruth: 'NOT_VALIDATED' });
+    expect(completed('d-notrecv')).toMatchObject({ ok: true, status: 'INCOMPLETE' });
+    expect(lastPayload('d-notrecv')).toMatchObject({ providerTruth: 'PROVIDER_CONFIRMED_COMPLETED', synthosReceiptTruth: 'RESPONSE_NOT_RECEIVED', persistenceTruth: 'NOT_PERSISTED', completionTruth: 'NOT_VALIDATED', reasonCode: 'RESPONSE_NOT_RECEIVED', resultingStatus: 'INCOMPLETE', transition: ['DISPATCHED/UNKNOWN', 'PROVIDER_CONFIRMED_COMPLETED', 'RESPONSE_NOT_RECEIVED', 'INCOMPLETE'] });
+    expect(lastPayload('d-notrecv').synthosEvidenceBasis.join(' | ')).toMatch(/owning process recorded as stopped: RECONCILIATION_REQUIRED/);
+    // A same-finding clarification: appended correction naming the event, still INCOMPLETE, no status row, earlier events untouched.
+    const firstId = events('d-notrecv').at(-1).event_id;
+    const h0 = history('d-notrecv'); const e0 = events('d-notrecv');
+    const c = reconcileAmbiguousExecution(base('d-notrecv', { finding: 'PROVIDER_CONFIRMED_COMPLETED', correctsEventId: firstId, note: `Correction to ${firstId}: provider completion confirmed; SynthOS task completion is not.` })) as any;
+    expect(c).toMatchObject({ ok: true, changed: true, status: 'INCOMPLETE' });
+    expect(history('d-notrecv')).toEqual(h0);
+    expect(events('d-notrecv').slice(0, e0.length)).toEqual(e0);
+    expect(events('d-notrecv').at(-1).event_type).toBe('EXECUTION_RECONCILIATION_CORRECTED');
+    expect(lastPayload('d-notrecv')).toMatchObject({ correctsEventId: firstId, synthosReceiptTruth: 'RESPONSE_NOT_RECEIVED', reasonCode: 'RESPONSE_NOT_RECEIVED' });
+    expect(counts('d-notrecv')).toEqual({ artifacts: 0, reviews: 0, receipts: 0, ledger: 0 });
   });
 
-  it('a same-finding clarification is an appended correction naming the event: provider truth kept, task stays INCOMPLETE, earlier event byte-identical', () => {
-    const first = reconcileAmbiguousExecution(base('t-clarify', { finding: 'PROVIDER_CONFIRMED_COMPLETED' })) as any;
-    expect(first).toMatchObject({ ok: true, status: 'INCOMPLETE' });
-    const h0 = history('t-clarify'); const e0 = events('t-clarify');
-    const c = reconcileAmbiguousExecution(base('t-clarify', { finding: 'PROVIDER_CONFIRMED_COMPLETED', correctsEventId: first.eventId, note: `Correction to ${first.eventId}: provider completion confirmed; SynthOS task completion is not.` })) as any;
-    expect(c).toMatchObject({ ok: true, changed: true, status: 'INCOMPLETE', finding: 'PROVIDER_CONFIRMED_COMPLETED' });
-    expect(history('t-clarify')).toEqual(h0); // no status row: INCOMPLETE → INCOMPLETE is not a transition
-    expect(events('t-clarify').slice(0, e0.length)).toEqual(e0);
-    const p = JSON.parse(events('t-clarify').at(-1).payload_json);
-    expect(p).toMatchObject({ finding: 'PROVIDER_CONFIRMED_COMPLETED', providerTruth: 'PROVIDER_CONFIRMED_COMPLETED', executionTruth: 'RESPONSE_NOT_RECEIVED', reasonCode: 'RESPONSE_NOT_RECEIVED', resultingStatus: 'INCOMPLETE', correctsEventId: first.eventId, transition: ['DISPATCHED/UNKNOWN', 'PROVIDER_CONFIRMED_COMPLETED', 'RESPONSE_NOT_RECEIVED', 'INCOMPLETE'] });
-    expect(events('t-clarify').at(-1).event_type).toBe('EXECUTION_RECONCILIATION_CORRECTED');
-    expect(status('t-clarify')).toBe('INCOMPLETE');
-    expect(counts('t-clarify')).toEqual({ artifacts: 0, reviews: 0, receipts: 0, ledger: 0 });
+  it('provider completed + receipt UNKNOWN (nothing shows the owner stopped) → not DONE, and NOT claimed as not-received', () => {
+    expect(assessSynthosExecutionEvidence('d-unknown').synthosReceiptTruth).toBe('UNKNOWN');
+    expect(completed('d-unknown')).toMatchObject({ ok: true, status: 'INCOMPLETE' });
+    expect(lastPayload('d-unknown')).toMatchObject({ synthosReceiptTruth: 'UNKNOWN', reasonCode: 'RESPONSE_RECEIPT_UNKNOWN' });
+    expect(status('d-unknown')).not.toBe('DONE');
+  });
+
+  it('provider completed + response received but not persisted → not DONE (RESPONSE_NOT_PERSISTED)', () => {
+    ev('d-notpersist', 'PROVIDER_COMPLETED', '2026-09-17T20:48:40.000Z');
+    expect(assessSynthosExecutionEvidence('d-notpersist')).toMatchObject({ synthosReceiptTruth: 'RESPONSE_RECEIVED', persistenceTruth: 'NOT_PERSISTED' });
+    expect(completed('d-notpersist')).toMatchObject({ ok: true, status: 'INCOMPLETE' });
+    expect(lastPayload('d-notpersist')).toMatchObject({ synthosReceiptTruth: 'RESPONSE_RECEIVED', persistenceTruth: 'NOT_PERSISTED', reasonCode: 'RESPONSE_NOT_PERSISTED' });
+    expect(status('d-notpersist')).not.toBe('DONE');
+  });
+
+  it('provider completed + received and persisted, but no validated completion evidence/receipt → not DONE (COMPLETION_NOT_VALIDATED)', () => {
+    ev('d-notvalid', 'PROVIDER_COMPLETED', '2026-09-17T20:48:40.000Z');
+    getDatabase().prepare("INSERT INTO artifacts (artifact_id, task_id, relative_path, disk_path, content_hash, size_bytes, created_at) VALUES ('art-d-notvalid', 'd-notvalid', 'x.md', '/tmp/x.md', 'h', 1, '2026-09-17T20:48:41.000Z')").run();
+    expect(assessSynthosExecutionEvidence('d-notvalid')).toMatchObject({ synthosReceiptTruth: 'RESPONSE_RECEIVED', persistenceTruth: 'PERSISTED', completionTruth: 'NOT_VALIDATED' });
+    expect(completed('d-notvalid')).toMatchObject({ ok: true, status: 'INCOMPLETE' });
+    expect(lastPayload('d-notvalid')).toMatchObject({ reasonCode: 'COMPLETION_NOT_VALIDATED', resultingStatus: 'INCOMPLETE' });
+    expect(status('d-notvalid')).not.toBe('DONE');
+  });
+
+  it('validated completion evidence already on record: the action refuses rather than record anything (it is not ambiguous)', () => {
+    ev('d-validated', 'PROVIDER_COMPLETED', '2026-09-17T20:48:40.000Z');
+    const db = getDatabase();
+    db.prepare("INSERT INTO quality_reviews (review_id, task_id, reviewer, method, score, decision, checks_json, evidence_json, created_at) VALUES ('qr-dv', 'd-validated', 'aegis', 'deterministic', 100, 'VERIFIED', '[]', '{}', '2026-09-17T20:48:42.000Z')").run();
+    const payload = '{"t":"d-validated"}'; const sig = signReceiptPayload(payload);
+    db.prepare("INSERT INTO receipts (receipt_id, task_id, review_id, algorithm, public_key, payload_json, signature, created_at) VALUES ('rc-dv', 'd-validated', 'qr-dv', 'Ed25519', ?, ?, ?, '2026-09-17T20:48:43.000Z')").run(sig.publicKeyPem, payload, sig.signature);
+    const e0 = events('d-validated');
+    expect(completed('d-validated')).toMatchObject({ ok: false, error: expect.stringMatching(/validated completion evidence/) });
+    expect(events('d-validated')).toEqual(e0);
+    expect(status('d-validated')).toBe('RECONCILING_UNKNOWN_EXECUTION');
+  });
+
+  it('no provider finding, under any combination of SynthOS evidence, produces DONE', () => {
+    for (const f of RECONCILIATION_FINDINGS) for (const r of SYNTHOS_RECEIPT_TRUTHS) for (const p of PERSISTENCE_TRUTHS) for (const c of COMPLETION_TRUTHS) {
+      const o = deriveReconciliationOutcome(f, { synthosReceiptTruth: r, persistenceTruth: p, completionTruth: c, basis: [] });
+      if (o.ok) { expect(o.resultingStatus, `${f}/${r}/${p}/${c}`).not.toBe('DONE'); expect(o.transition).not.toContain('DONE'); }
+    }
+    // and RESPONSE_NOT_RECEIVED only ever comes from the receipt dimension, never from the finding alone
+    for (const r of ['RESPONSE_RECEIVED', 'UNKNOWN'] as const) {
+      const o = deriveReconciliationOutcome('PROVIDER_CONFIRMED_COMPLETED', { synthosReceiptTruth: r, persistenceTruth: 'NOT_PERSISTED', completionTruth: 'NOT_VALIDATED', basis: [] }) as any;
+      expect(o.reasonCode).not.toBe('RESPONSE_NOT_RECEIVED');
+    }
+  });
+
+  it('events recorded before the refactor stay byte-identical and are read as stored (legacy executionTruth, no back-fill)', () => {
+    const legacyPayload = JSON.stringify({ finding: 'PROVIDER_CONFIRMED_COMPLETED', resultingStatus: 'INCOMPLETE', fromStatus: 'INCOMPLETE', submissionHash: 'x', correctsEventId: 'act-orig', evidence: { note: 'n' }, providerTruth: 'PROVIDER_CONFIRMED_COMPLETED', executionTruth: 'RESPONSE_NOT_RECEIVED', reasonCode: 'RESPONSE_NOT_RECEIVED', transition: ['DISPATCHED/UNKNOWN', 'PROVIDER_CONFIRMED_COMPLETED', 'RESPONSE_NOT_RECEIVED', 'INCOMPLETE'] });
+    getDatabase().prepare("INSERT INTO activity_events (event_id, task_id, event_type, agent_id, payload_json, created_at) VALUES ('act-legacy-7a00e33', 'd-legacy', 'EXECUTION_RECONCILIATION_CORRECTED', 'op', ?, '2026-09-18T20:45:01.718Z')").run(legacyPayload);
+    const before = getDatabase().prepare("SELECT * FROM activity_events WHERE event_id = 'act-legacy-7a00e33'").get();
+    reconcileAmbiguousExecution(base('d-legacy', { finding: 'EVIDENCE_INCONCLUSIVE' }));
+    expect(getDatabase().prepare("SELECT * FROM activity_events WHERE event_id = 'act-legacy-7a00e33'").get()).toEqual(before);
+    const legacy = reconciliationTrail('d-legacy').find((t) => t.eventId === 'act-legacy-7a00e33')!;
+    expect(legacy).toMatchObject({ legacyExecutionTruth: 'RESPONSE_NOT_RECEIVED', synthosReceiptTruth: null, persistenceTruth: null, completionTruth: null });
   });
 });
 

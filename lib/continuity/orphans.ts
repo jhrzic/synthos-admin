@@ -24,7 +24,7 @@
 // may still be executing here — it is refused.
 // ---------------------------------------------------------------------------
 
-import { getDatabase, updateTaskStatus, recordActivityEvent } from '../persistence';
+import { getDatabase, updateTaskStatus, recordActivityEvent, verifyReceipt } from '../persistence';
 import crypto from 'node:crypto';
 import { recordRegistryEvent } from '../registry/store';
 import { recordAdminAuditEvent } from '../audit';
@@ -234,30 +234,126 @@ export const RECONCILIATION_FINDINGS = [
 ] as const;
 export type ReconciliationFinding = (typeof RECONCILIATION_FINDINGS)[number];
 
-const FINDING_STATUS: Record<ReconciliationFinding, string> = {
-  PROVIDER_CONFIRMED_COMPLETED: 'INCOMPLETE',
-  PROVIDER_USAGE_FOUND_RESPONSE_UNAVAILABLE: 'INCOMPLETE',
-  PROVIDER_CONFIRMED_FAILED: 'FAILED',
-  PROVIDER_CONFIRMED_NO_REQUEST: 'CANCELLED',
-  EVIDENCE_INCONCLUSIVE: 'RECONCILING_UNKNOWN_EXECUTION',
-};
 const RECONCILED_STATUSES = new Set(['INCOMPLETE', 'FAILED', 'CANCELLED']);
-
-/**
- * Provider truth and SynthOS execution truth are recorded SEPARATELY. A
- * provider that completed a response does not mean SynthOS completed the
- * task: the response never reached the runtime, was never persisted, and
- * never passed the completion and durable-evidence stages (Aegis, receipt).
- * So PROVIDER_CONFIRMED_COMPLETED leads to INCOMPLETE — never to DONE.
- */
-export const RECONCILIATION_SEMANTICS: Record<ReconciliationFinding, { executionTruth: string; reasonCode: string; transition: string[] }> = {
-  PROVIDER_CONFIRMED_COMPLETED: { executionTruth: 'RESPONSE_NOT_RECEIVED', reasonCode: 'RESPONSE_NOT_RECEIVED', transition: ['DISPATCHED/UNKNOWN', 'PROVIDER_CONFIRMED_COMPLETED', 'RESPONSE_NOT_RECEIVED', 'INCOMPLETE'] },
-  PROVIDER_USAGE_FOUND_RESPONSE_UNAVAILABLE: { executionTruth: 'RESPONSE_NOT_RECEIVED', reasonCode: 'RESPONSE_NOT_RECEIVED', transition: ['DISPATCHED/UNKNOWN', 'PROVIDER_USAGE_FOUND_RESPONSE_UNAVAILABLE', 'RESPONSE_NOT_RECEIVED', 'INCOMPLETE'] },
-  PROVIDER_CONFIRMED_FAILED: { executionTruth: 'PROVIDER_FAILED', reasonCode: 'PROVIDER_FAILED', transition: ['DISPATCHED/UNKNOWN', 'PROVIDER_CONFIRMED_FAILED', 'FAILED'] },
-  PROVIDER_CONFIRMED_NO_REQUEST: { executionTruth: 'NOT_DISPATCHED', reasonCode: 'NOT_DISPATCHED', transition: ['DISPATCHED/UNKNOWN', 'PROVIDER_CONFIRMED_NO_REQUEST', 'CANCELLED'] },
-  EVIDENCE_INCONCLUSIVE: { executionTruth: 'OUTCOME_UNKNOWN', reasonCode: 'EVIDENCE_INCONCLUSIVE', transition: ['DISPATCHED/UNKNOWN', 'EVIDENCE_INCONCLUSIVE', 'RECONCILING_UNKNOWN_EXECUTION'] },
-};
 const RECONCILIATION_EVENTS = ['EXECUTION_RECONCILED', 'EXECUTION_RECONCILIATION_EVIDENCE', 'EXECUTION_RECONCILIATION_CORRECTED'];
+
+// ---------------------------------------------------------------------------
+// INDEPENDENT EVIDENCE DIMENSIONS.
+//
+// providerTruth is what the OPERATOR found in the provider's own records.
+// The three SynthOS truths are what SynthOS's OWN records for THIS task show,
+// assessed at submission time — never inferred from the provider finding:
+//
+//   synthosReceiptTruth  RESPONSE_RECEIVED      a response is on record for the task
+//                                               (PROVIDER_COMPLETED event, a ledger row
+//                                               with a provider request id / SUCCESS,
+//                                               a completed segment)
+//                        RESPONSE_NOT_RECEIVED  no response is on record AND the process
+//                                               that owned the dispatch is recorded as
+//                                               stopped (RECONCILIATION_REQUIRED /
+//                                               SHUTDOWN_INTERRUPTED) — nothing left
+//                                               that could still hold it
+//                        UNKNOWN                neither can be established
+//   persistenceTruth     PERSISTED | NOT_PERSISTED | UNKNOWN   (a task artifact or a
+//                                               segment output hash is on record)
+//   completionTruth      VALIDATED_COMPLETE     an Aegis VERIFIED review AND a receipt
+//                                               that verifies are on record
+//                        NOT_VALIDATED | UNKNOWN
+//
+// resultingStatus and reasonCode follow from the combination. None is DONE:
+// reconciliation records outcomes of an ambiguous dispatch; only execution,
+// verification and a signed receipt complete a task.
+// ---------------------------------------------------------------------------
+
+export const PROVIDER_TRUTHS = RECONCILIATION_FINDINGS;
+export const SYNTHOS_RECEIPT_TRUTHS = ['RESPONSE_RECEIVED', 'RESPONSE_NOT_RECEIVED', 'UNKNOWN'] as const;
+export const PERSISTENCE_TRUTHS = ['PERSISTED', 'NOT_PERSISTED', 'UNKNOWN'] as const;
+export const COMPLETION_TRUTHS = ['VALIDATED_COMPLETE', 'NOT_VALIDATED', 'UNKNOWN'] as const;
+export const RECONCILIATION_REASON_CODES = [
+  'RESPONSE_NOT_RECEIVED', 'RESPONSE_RECEIPT_UNKNOWN', 'RESPONSE_NOT_PERSISTED', 'COMPLETION_NOT_VALIDATED',
+  'PROVIDER_FAILED', 'NOT_DISPATCHED', 'EVIDENCE_INCONCLUSIVE',
+] as const;
+export const RECONCILIATION_RESULTING_STATUSES = ['INCOMPLETE', 'FAILED', 'CANCELLED', 'RECONCILING_UNKNOWN_EXECUTION'] as const;
+
+export type SynthosReceiptTruth = (typeof SYNTHOS_RECEIPT_TRUTHS)[number];
+export type PersistenceTruth = (typeof PERSISTENCE_TRUTHS)[number];
+export type CompletionTruth = (typeof COMPLETION_TRUTHS)[number];
+export type ReconciliationReasonCode = (typeof RECONCILIATION_REASON_CODES)[number];
+export type ReconciliationResultingStatus = (typeof RECONCILIATION_RESULTING_STATUSES)[number];
+
+export interface SynthosExecutionEvidence {
+  synthosReceiptTruth: SynthosReceiptTruth;
+  persistenceTruth: PersistenceTruth;
+  completionTruth: CompletionTruth;
+  /** The task-specific records each truth rests on. */
+  basis: string[];
+}
+
+/** Assess what SynthOS's own records show for this task (read-only). */
+export function assessSynthosExecutionEvidence(taskId: string): SynthosExecutionEvidence {
+  const db = getDatabase();
+  const q = <T>(sql: string, ...args: unknown[]): T[] => { try { return db.prepare(sql).all(...args) as T[]; } catch { return []; } };
+  const basis: string[] = [];
+  const completedEvents = q<{ event_id: string; created_at: string }>("SELECT event_id, created_at FROM activity_events WHERE task_id = ? AND event_type = 'PROVIDER_COMPLETED' ORDER BY rowid", taskId);
+  const ledgerReceived = q<{ usage_id: string; status: string }>("SELECT usage_id, status FROM provider_usage WHERE task_id = ? AND (provider_request_id IS NOT NULL OR status = 'SUCCESS')", taskId);
+  const segmentsReceived = q<{ segment_id: string }>("SELECT segment_id FROM task_segments WHERE task_id = ? AND (status = 'COMPLETED' OR output_hash IS NOT NULL)", taskId);
+  const ownerStopped = q<{ event_id: string; event_type: string; created_at: string }>("SELECT event_id, event_type, created_at FROM activity_events WHERE task_id = ? AND event_type IN ('RECONCILIATION_REQUIRED', 'SHUTDOWN_INTERRUPTED') ORDER BY rowid", taskId);
+  let synthosReceiptTruth: SynthosReceiptTruth;
+  if (completedEvents.length || ledgerReceived.length || segmentsReceived.length) {
+    synthosReceiptTruth = 'RESPONSE_RECEIVED';
+    for (const e of completedEvents) basis.push(`response on record: PROVIDER_COMPLETED ${e.event_id} (${e.created_at})`);
+    for (const l of ledgerReceived) basis.push(`response on record: ledger ${l.usage_id} (${l.status})`);
+    for (const g of segmentsReceived) basis.push(`response on record: segment ${g.segment_id}`);
+  } else if (ownerStopped.length) {
+    synthosReceiptTruth = 'RESPONSE_NOT_RECEIVED';
+    basis.push('no response on record for the task (no PROVIDER_COMPLETED event, no ledger row with a provider request id, no completed segment)');
+    for (const e of ownerStopped) basis.push(`owning process recorded as stopped: ${e.event_type} ${e.event_id} (${e.created_at})`);
+  } else {
+    synthosReceiptTruth = 'UNKNOWN';
+    basis.push('no response on record, and nothing records that the owning process stopped: receipt cannot be established');
+  }
+  const artifacts = q<{ artifact_id: string }>('SELECT artifact_id FROM artifacts WHERE task_id = ?', taskId);
+  const outputs = q<{ segment_id: string }>('SELECT segment_id FROM task_segments WHERE task_id = ? AND output_hash IS NOT NULL', taskId);
+  const persistenceTruth: PersistenceTruth = artifacts.length || outputs.length ? 'PERSISTED' : 'NOT_PERSISTED';
+  basis.push(persistenceTruth === 'PERSISTED' ? `persisted: ${[...artifacts.map((a) => `artifact ${a.artifact_id}`), ...outputs.map((o) => `segment output ${o.segment_id}`)].join(', ')}` : 'not persisted: no task artifact and no segment output on record');
+  const verifiedReviews = q<{ review_id: string }>("SELECT review_id FROM quality_reviews WHERE task_id = ? AND decision = 'VERIFIED'", taskId);
+  const receipts = q<any>('SELECT * FROM receipts WHERE task_id = ?', taskId).filter((r) => { try { return verifyReceipt(r); } catch { return false; } });
+  const completionTruth: CompletionTruth = verifiedReviews.length && receipts.length ? 'VALIDATED_COMPLETE' : 'NOT_VALIDATED';
+  basis.push(completionTruth === 'VALIDATED_COMPLETE' ? `validated: review ${verifiedReviews[0].review_id}, receipt ${receipts[0].receipt_id}` : `not validated: ${verifiedReviews.length} VERIFIED review(s), ${receipts.length} verifying receipt(s)`);
+  return { synthosReceiptTruth, persistenceTruth, completionTruth, basis };
+}
+
+/** resultingStatus + reasonCode + transition from the independent dimensions. Never DONE. */
+export function deriveReconciliationOutcome(providerTruth: ReconciliationFinding, e: SynthosExecutionEvidence):
+  { ok: true; resultingStatus: ReconciliationResultingStatus; reasonCode: ReconciliationReasonCode; transition: string[] } | { ok: false; error: string } {
+  if (e.completionTruth === 'VALIDATED_COMPLETE') return { ok: false, error: 'SynthOS already holds validated completion evidence (Aegis VERIFIED review and a verifying receipt) for this task; its outcome is not ambiguous' };
+  const start = 'DISPATCHED/UNKNOWN';
+  let out: { resultingStatus: ReconciliationResultingStatus; reasonCode: ReconciliationReasonCode; transition: string[] };
+  switch (providerTruth) {
+    case 'PROVIDER_CONFIRMED_COMPLETED':
+    case 'PROVIDER_USAGE_FOUND_RESPONSE_UNAVAILABLE': {
+      const reasonCode: ReconciliationReasonCode =
+        e.synthosReceiptTruth === 'RESPONSE_NOT_RECEIVED' ? 'RESPONSE_NOT_RECEIVED'
+        : e.synthosReceiptTruth === 'UNKNOWN' ? 'RESPONSE_RECEIPT_UNKNOWN'
+        : e.persistenceTruth !== 'PERSISTED' ? 'RESPONSE_NOT_PERSISTED'
+        : 'COMPLETION_NOT_VALIDATED';
+      const stage = reasonCode === 'RESPONSE_RECEIPT_UNKNOWN' ? 'RESPONSE_RECEIPT_UNKNOWN' : reasonCode;
+      out = { resultingStatus: 'INCOMPLETE', reasonCode, transition: [start, providerTruth, stage, 'INCOMPLETE'] };
+      break;
+    }
+    case 'PROVIDER_CONFIRMED_FAILED':
+      out = { resultingStatus: 'FAILED', reasonCode: 'PROVIDER_FAILED', transition: [start, providerTruth, 'FAILED'] };
+      break;
+    case 'PROVIDER_CONFIRMED_NO_REQUEST':
+      if (e.synthosReceiptTruth === 'RESPONSE_RECEIVED') return { ok: false, error: 'contradiction: SynthOS has a response on record for this task, so "no request" cannot be recorded' };
+      out = { resultingStatus: 'CANCELLED', reasonCode: 'NOT_DISPATCHED', transition: [start, providerTruth, 'CANCELLED'] };
+      break;
+    default:
+      out = { resultingStatus: 'RECONCILING_UNKNOWN_EXECUTION', reasonCode: 'EVIDENCE_INCONCLUSIVE', transition: [start, providerTruth, 'RECONCILING_UNKNOWN_EXECUTION'] };
+  }
+  if ((out.resultingStatus as string) === 'DONE' || out.transition.includes('DONE')) throw new Error('reconciliation can never produce DONE');
+  return { ok: true, ...out };
+}
 
 export interface ReconciliationSubmission {
   workspaceId: string;
@@ -287,10 +383,16 @@ export interface ReconciliationTrailEntry {
   submissionHash: string;
   evidence: Record<string, unknown>;
   correctsEventId: string | null;
-  /** SynthOS execution truth, separate from the provider finding (null on events recorded before it existed). */
-  executionTruth: string | null;
+  /** Independent dimensions (null on events recorded before they existed — never back-filled). */
+  providerTruth: string | null;
+  synthosReceiptTruth: string | null;
+  persistenceTruth: string | null;
+  completionTruth: string | null;
+  synthosEvidenceBasis: string[] | null;
   reasonCode: string | null;
   transition: string[] | null;
+  /** An `executionTruth` stored by commit 7a00e33's finding-level mapping, shown as stored. */
+  legacyExecutionTruth: string | null;
 }
 
 const UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
@@ -302,7 +404,12 @@ export function reconciliationTrail(taskId: string): ReconciliationTrailEntry[] 
     let p: any = {};
     try { p = JSON.parse(r.payload_json || '{}'); } catch { /* unreadable payload stays empty */ }
     return { eventId: r.event_id, eventType: r.event_type, actor: r.agent_id, at: r.created_at, finding: p.finding, resultingStatus: p.resultingStatus, submissionHash: p.submissionHash, evidence: p.evidence ?? {}, correctsEventId: p.correctsEventId ?? null,
-      executionTruth: p.executionTruth ?? null, reasonCode: p.reasonCode ?? null, transition: Array.isArray(p.transition) ? p.transition : null };
+      providerTruth: p.providerTruth ?? p.finding ?? null,
+      synthosReceiptTruth: p.synthosReceiptTruth ?? null, persistenceTruth: p.persistenceTruth ?? null, completionTruth: p.completionTruth ?? null,
+      synthosEvidenceBasis: Array.isArray(p.synthosEvidenceBasis) ? p.synthosEvidenceBasis : null,
+      reasonCode: p.reasonCode ?? null, transition: Array.isArray(p.transition) ? p.transition : null,
+      // Recorded under commit 7a00e33's finding-level mapping, kept exactly as stored.
+      legacyExecutionTruth: p.synthosReceiptTruth ? null : (p.executionTruth ?? null) };
   });
 }
 
@@ -318,6 +425,7 @@ export function reconciliationGuide(taskId: string): {
   model: string | null; provider: string | null; endpoint: string | null; instruction: string | null;
   knownIdentifiers: { providerRequestIds: string[]; responseIds: string[] }; exclude: Array<{ taskId: string; startedAt: string; model: string | null }>;
   evidence: OrphanEvidence | null;
+  synthosEvidence: SynthosExecutionEvidence;
 } | null {
   const db = getDatabase();
   const t = db.prepare('SELECT task_id, status, assigned_model, description FROM tasks WHERE task_id = ?').get(taskId) as any;
@@ -358,6 +466,7 @@ export function reconciliationGuide(taskId: string): {
     endpoint: provider ? DISPATCH_ENDPOINT[provider] ?? null : null,
     instruction: t.description ? String(t.description).slice(0, 1000) : null,
     knownIdentifiers: { providerRequestIds: ids, responseIds: [] }, exclude, evidence: e,
+    synthosEvidence: assessSynthosExecutionEvidence(taskId),
   };
 }
 
@@ -426,15 +535,22 @@ export function reconcileAmbiguousExecution(s: ReconciliationSubmission): { ok: 
     } catch { /* no continuity tables */ }
   }
 
-  const resultingStatus = FINDING_STATUS[finding];
+  // The SynthOS dimensions come from THIS task's records, not from the finding.
+  const synthos = assessSynthosExecutionEvidence(s.taskId);
+  const outcome = deriveReconciliationOutcome(finding, synthos);
+  if (!outcome.ok) return { ok: false, error: outcome.error };
+  const resultingStatus = outcome.resultingStatus;
   const eventId = recordActivityEvent({
     taskId: s.taskId, expectedWorkspaceId: s.workspaceId, eventType, agentId: s.actor,
     payload: {
       finding, resultingStatus, fromStatus: t.status, submissionHash, correctsEventId, evidence,
       providerTruth: finding,
-      executionTruth: RECONCILIATION_SEMANTICS[finding].executionTruth,
-      reasonCode: RECONCILIATION_SEMANTICS[finding].reasonCode,
-      transition: RECONCILIATION_SEMANTICS[finding].transition,
+      synthosReceiptTruth: synthos.synthosReceiptTruth,
+      persistenceTruth: synthos.persistenceTruth,
+      completionTruth: synthos.completionTruth,
+      synthosEvidenceBasis: synthos.basis,
+      reasonCode: outcome.reasonCode,
+      transition: outcome.transition,
       provenance: 'OPERATOR_REPORTED — recorded as submitted; not verified against the provider by SynthOS',
       fabricated: { output: false, tokens: false, responseId: false, artifact: false, review: false, receipt: false, ledgerRow: false },
       retried: false,
@@ -454,6 +570,6 @@ export function reconcileAmbiguousExecution(s: ReconciliationSubmission): { ok: 
   } else if (resultingStatus !== t.status) {
     updateTaskStatus(s.taskId, resultingStatus, undefined, s.workspaceId);
   }
-  recordAdminAuditEvent({ actorUserId: s.actor, eventType: 'EXECUTION_RECONCILED', targetType: 'task', targetId: s.taskId, detail: { workspaceId: s.workspaceId, activityEventId: recordedId, eventType, finding, executionTruth: RECONCILIATION_SEMANTICS[finding].executionTruth, reasonCode: RECONCILIATION_SEMANTICS[finding].reasonCode, fromStatus: t.status, resultingStatus, submissionHash, correctsEventId } });
+  recordAdminAuditEvent({ actorUserId: s.actor, eventType: 'EXECUTION_RECONCILED', targetType: 'task', targetId: s.taskId, detail: { workspaceId: s.workspaceId, activityEventId: recordedId, eventType, finding, synthosReceiptTruth: synthos.synthosReceiptTruth, persistenceTruth: synthos.persistenceTruth, completionTruth: synthos.completionTruth, reasonCode: outcome.reasonCode, fromStatus: t.status, resultingStatus, submissionHash, correctsEventId } });
   return { ok: true, changed: true, status: resultingStatus, eventId: recordedId, finding };
 }
