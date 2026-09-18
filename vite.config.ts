@@ -69,7 +69,9 @@ export default defineConfig(() => {
       // test can reach the production database through the development
       // fallback. See test/setup/isolate-database.ts for why this is central
       // rather than repeated in each file.
-      setupFiles: ['./test/setup/isolate-database.ts'],
+      // deterministic-http-doubles: in-process doubles answer `Connection: close`
+      // so an idle keep-alive close can never race a request (see the file).
+      setupFiles: ['./test/setup/isolate-database.ts', './test/setup/deterministic-http-doubles.ts'],
     },
     preview: {
       port: 3000,
