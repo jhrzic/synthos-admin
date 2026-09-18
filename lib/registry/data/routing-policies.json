@@ -1,0 +1,108 @@
+{
+  "schemaVersion": "synthos.routing-policies/v1",
+  "policies": [
+    {
+      "policyId": "router.default",
+      "version": "1.0.0",
+      "description": "Bundled routing weights. Replaced only by an approved policy version.",
+      "weights": {
+        "quality": 0.3,
+        "reliability": 0.2,
+        "instructionCompliance": 0.1,
+        "completion": 0.05,
+        "latency": 0.05,
+        "contextHeadroom": 0.05,
+        "toolSuccess": 0.05,
+        "cost": 0.1,
+        "freeTier": 0.0,
+        "health": 0.03,
+        "capacityHeadroom": 0.04,
+        "privacyPreference": 0.02,
+        "workspacePreference": 0.01
+      },
+      "modes": {
+        "BEST_QUALIFIED": {
+          "weightOverrides": {
+            "cost": 0.02
+          }
+        },
+        "LOWEST_COST_QUALIFIED": {
+          "weightOverrides": {
+            "cost": 0.55,
+            "quality": 0.15,
+            "reliability": 0.15
+          }
+        },
+        "FASTEST_QUALIFIED": {
+          "weightOverrides": {
+            "latency": 0.5,
+            "quality": 0.15,
+            "reliability": 0.15
+          }
+        },
+        "PRIVACY_FIRST": {
+          "weightOverrides": {
+            "privacyPreference": 0.4
+          },
+          "minPrivacyClass": "NO_TRAINING"
+        },
+        "LOCAL_ONLY": {
+          "weightOverrides": {},
+          "routeKinds": [
+            "LOCAL"
+          ]
+        },
+        "DIRECT_PROVIDER_ONLY": {
+          "weightOverrides": {},
+          "routeKinds": [
+            "DIRECT"
+          ]
+        },
+        "AGGREGATORS_ALLOWED": {
+          "weightOverrides": {},
+          "routeKinds": [
+            "DIRECT",
+            "AGGREGATOR",
+            "LOCAL",
+            "ENTERPRISE"
+          ]
+        },
+        "FREE_WHEN_QUALIFIED": {
+          "weightOverrides": {
+            "freeTier": 0.35
+          }
+        },
+        "PINNED_MODEL_VERSION": {
+          "weightOverrides": {},
+          "requiresPin": "version"
+        },
+        "PINNED_ROUTE": {
+          "weightOverrides": {},
+          "requiresPin": "route"
+        }
+      },
+      "defaultMode": "BEST_QUALIFIED",
+      "defaultRouteKinds": [
+        "DIRECT",
+        "ENTERPRISE",
+        "LOCAL"
+      ],
+      "scaling": {
+        "latencyMsCeiling": 60000,
+        "costUsdCeiling": 1.0,
+        "costScoring": "RELATIVE_TO_ELIGIBLE"
+      },
+      "evidence": {
+        "minSamples": 20,
+        "trimFraction": 0.1
+      },
+      "capacity": {
+        "warnAt": 0.8,
+        "actAt": 0.9
+      },
+      "health": {
+        "cooldownMinutes": 5
+      }
+    }
+  ]
+}

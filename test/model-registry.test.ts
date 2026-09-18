@@ -42,6 +42,8 @@ import { saveSpendPolicy, DEFAULT_SPEND_POLICY } from '../lib/spend/policy';
 import { ensureUsageTable, listUsageForKey } from '../lib/spend/ledger';
 import { guardedPaidCall } from '../lib/spend/guard';
 import { invalidateProviderEndpointCache, PaidEndpointBlockedError } from '../lib/spend/network-guard';
+import { insertQualificationForTest, listTaskClasses } from '../lib/registry/qualification';
+import { getDecision } from '../lib/registry/router';
 import { executeAgentTask } from '../lib/fabric/kernel';
 import { createExecutionContext } from '../lib/fabric/context';
 import { previewEvaluation, runEvaluation } from '../lib/fabric/evaluation';
@@ -110,6 +112,9 @@ function policy(paid: boolean) {
   if (!r.ok) throw new Error(r.errors.join('; '));
 }
 
+// Task-class qualification: these tests exercise the registry rails, so a
+// model an operator admitted here is also qualified for every task class.
+const qualifyForTasks = (modelId: string) => { for (const tc of listTaskClasses()) insertQualificationForTest({ providerId: PROVIDER, modelId, taskClass: tc.taskClassId }); };
 const ledger = () => (getDatabase().prepare('SELECT COUNT(*) AS n FROM provider_usage').get() as any).n as number;
 let seq = 0;
 async function runTask(model: string, extra: Record<string, unknown> = {}) {
@@ -256,9 +261,19 @@ describe('installation is not permission', () => {
     expect(v.adminState).toBe('INSTALLED');
     expect(v.availability).toBe('UNQUALIFIED');
     expect(v.executable).toBe(false);
+    // The router refuses it first (recorded decision; the task waits for a
+    // qualified route — nothing is substituted)…
     const { key, result } = await runTask('synthetic-chat/syn-chat-1');
     expect(result.body.success).toBe(false);
-    expect(listUsageForKey(key)[0]).toMatchObject({ status: 'BLOCKED', reason_code: 'MODEL_UNQUALIFIED' });
+    expect(result.body.status).toBe('PAUSED_AWAITING_QUALIFIED_CAPACITY');
+    const decision = getDecision((result.body as any).routingDecision.decisionId)!;
+    expect(decision.selected).toBeNull();
+    expect(decision.candidates.find((c) => c.modelId === 'syn-chat-1')!.disqualified.map((d) => d.code)).toEqual(expect.arrayContaining(['NOT_QUALIFIED', 'MODEL_NOT_ADMITTED']));
+    expect(listUsageForKey(key)).toHaveLength(0);
+    // …and the spend guard still refuses it on its own, with a ledger row.
+    const direct = await guardedPaidCall({ provider: PROVIDER, model: 'syn-chat-1', callSite: 'kernel.model_task', idempotencyKey: `${key}:direct`, inputChars: 10, maxOutputTokens: 10 }, async () => ({ ok: true }));
+    expect(direct.permitted).toBe(false);
+    expect(listUsageForKey(`${key}:direct`)[0]).toMatchObject({ status: 'BLOCKED', reason_code: 'MODEL_UNQUALIFIED' });
     expect(requests).toHaveLength(0);
   });
 
@@ -268,6 +283,7 @@ describe('installation is not permission', () => {
     expect(evaluateModel(PROVIDER, 'syn-chat-1', { workspaceId: WS })!.availability).toBe('QUALIFIED');
     expect(enableModel(PROVIDER, 'syn-chat-1', 'test').ok).toBe(true);
     expect(evaluateModel(PROVIDER, 'syn-chat-1', { workspaceId: WS })!).toMatchObject({ adminState: 'ENABLED', availability: 'AVAILABLE', executable: true });
+    qualifyForTasks('syn-chat-1');
   });
 
   it('paid execution OFF makes an enabled model POLICY_BLOCKED; a missing credential makes it NOT_CONFIGURED', () => {
@@ -304,7 +320,7 @@ describe('installation is not permission', () => {
 
   it('a manifest change to a qualified model un-qualifies it until an operator qualifies the new record', () => {
     registerModelViaAdmin(PROVIDER, synModel('syn-rq'), 'test');
-    qualifyModel(PROVIDER, 'syn-rq', 'test'); enableModel(PROVIDER, 'syn-rq', 'test');
+    qualifyModel(PROVIDER, 'syn-rq', 'test'); enableModel(PROVIDER, 'syn-rq', 'test'); qualifyForTasks('syn-rq');
     expect(evaluateModel(PROVIDER, 'syn-rq', { workspaceId: WS })!.executable).toBe(true);
     registerModelViaAdmin(PROVIDER, synModel('syn-rq', { pricing: [price({ rates: { input: 9, output: 9, cachedInput: null } })] }), 'test');
     const v = evaluateModel(PROVIDER, 'syn-rq', { workspaceId: WS })!;
@@ -316,8 +332,12 @@ describe('installation is not permission', () => {
   it('workspace policy applies: an ALLOWLIST without the model, or a deny, blocks it in the guard', async () => {
     setWorkspacePolicy({ workspaceId: WS, mode: 'ALLOWLIST', allowed: ['synthetic-chat/syn-chat-2'], denied: [] }, 'test');
     expect(evaluateModel(PROVIDER, 'syn-chat-1', { workspaceId: WS })!.availability).toBe('POLICY_BLOCKED');
-    const { key } = await runTask('synthetic-chat/syn-chat-1');
-    expect(listUsageForKey(key)[0]).toMatchObject({ status: 'BLOCKED', reason_code: 'MODEL_POLICY_BLOCKED' });
+    const { key, result } = await runTask('synthetic-chat/syn-chat-1');
+    expect(result.body.status).toBe('PAUSED_AWAITING_QUALIFIED_CAPACITY');
+    expect(getDecision((result.body as any).routingDecision.decisionId)!.candidates.find((c) => c.modelId === 'syn-chat-1')!.disqualified.map((d) => d.code)).toContain('WORKSPACE_PROHIBITED');
+    const direct = await guardedPaidCall({ provider: PROVIDER, model: 'syn-chat-1', callSite: 'kernel.model_task', workspaceId: WS, idempotencyKey: `${key}:direct`, inputChars: 10, maxOutputTokens: 10 }, async () => ({ ok: true }));
+    expect(direct.permitted).toBe(false);
+    expect(listUsageForKey(`${key}:direct`)[0]).toMatchObject({ status: 'BLOCKED', reason_code: 'MODEL_POLICY_BLOCKED' });
     setWorkspacePolicy({ workspaceId: WS, mode: 'INHERIT', allowed: [], denied: ['synthetic-chat/syn-chat-1'] }, 'test');
     expect(evaluateModel(PROVIDER, 'syn-chat-1', { workspaceId: WS })!.availability).toBe('POLICY_BLOCKED');
     setWorkspacePolicy({ workspaceId: WS, mode: 'INHERIT', allowed: [], denied: [] }, 'test');
@@ -326,7 +346,7 @@ describe('installation is not permission', () => {
 
   it('task restrictions apply: a task contract the model does not declare is refused before any credential or request', async () => {
     registerModelViaAdmin(PROVIDER, synModel('syn-narrative-only', { outputContracts: ['NARRATIVE'] }), 'test');
-    qualifyModel(PROVIDER, 'syn-narrative-only', 'test'); enableModel(PROVIDER, 'syn-narrative-only', 'test');
+    qualifyModel(PROVIDER, 'syn-narrative-only', 'test'); enableModel(PROVIDER, 'syn-narrative-only', 'test'); qualifyForTasks('syn-narrative-only');
     const { result } = await runTask('synthetic-chat/syn-narrative-only', { outputContract: { mode: 'JSON_OBJECT' } });
     expect(result.body.reason).toBe('MODEL_TASK_INCOMPATIBLE');
     expect(requests).toHaveLength(0);
@@ -376,7 +396,7 @@ describe('a provider added by plugin manifest only: identity propagates unchange
   it('reaching DONE causes no second call; the same execution cannot be paid for twice', async () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(requests).toHaveLength(0); // beforeEach reset: nothing arrived after DONE
-    const again = await guardedPaidCall({ provider: PROVIDER, model: 'syn-chat-1', callSite: 't', idempotencyKey: first.key, inputChars: 10, maxOutputTokens: 10 }, async () => ({ ok: true }));
+    const again = await guardedPaidCall({ provider: PROVIDER, model: 'syn-chat-1', callSite: 'research.synthesis', idempotencyKey: first.key, inputChars: 10, maxOutputTokens: 10 }, async () => ({ ok: true }));
     expect(again).toMatchObject({ permitted: false, code: 'DUPLICATE_ALREADY_EXECUTED' });
     const fallback = await guardedPaidCall({ provider: PROVIDER, model: 'syn-chat-2', callSite: 't', idempotencyKey: first.key, inputChars: 10, maxOutputTokens: 10 }, async () => ({ ok: true }));
     expect(fallback.permitted).toBe(false);
@@ -460,7 +480,10 @@ describe('provider endpoint security', () => {
       if (!m.ok) throw new Error('invalid');
       const r = resolveProviderEndpoint(m.manifest.provider, { NODE_ENV: 'production' } as any);
       expect(r.ok, p.providerId).toBe(true);
-      expect(r.ok && m.manifest.provider.approvedHosts.includes(r.host)).toBe(true);
+      expect(r.ok && m.manifest.provider.approvedHosts.includes(new URL(r.baseUrl).hostname)).toBe(true);
+      // https everywhere, except a credential-free LOCAL route on loopback.
+      const local = m.manifest.provider.routeKind === 'LOCAL' && m.manifest.provider.auth.type === 'NONE';
+      expect(r.ok && (r.baseUrl.startsWith('https://') || (local && new URL(r.baseUrl).hostname === 'localhost')), p.providerId).toBe(true);
     }
   });
 
@@ -488,7 +511,7 @@ describe('provider endpoint security', () => {
 
   it('redirect escape: a provider endpoint that redirects cannot carry the request (or credential) to another host', async () => {
     registerModelViaAdmin(PROVIDER, synModel('syn-redirect'), 'test');
-    qualifyModel(PROVIDER, 'syn-redirect', 'test'); enableModel(PROVIDER, 'syn-redirect', 'test');
+    qualifyModel(PROVIDER, 'syn-redirect', 'test'); enableModel(PROVIDER, 'syn-redirect', 'test'); qualifyForTasks('syn-redirect');
     policy(true);
     redirectHits = 0;
     process.env.SYNTHETIC_CHAT_BASE_URL = `http://127.0.0.1:${providerPort}/redirect`;
@@ -511,7 +534,7 @@ describe('explicit model evaluation — never automatic, never able to bypass th
 
   beforeAll(async () => {
     registerModelViaAdmin(PROVIDER, synModel('syn-judge'), 'test');
-    qualifyModel(PROVIDER, 'syn-judge', 'test'); enableModel(PROVIDER, 'syn-judge', 'test');
+    qualifyModel(PROVIDER, 'syn-judge', 'test'); enableModel(PROVIDER, 'syn-judge', 'test'); qualifyForTasks('syn-judge');
     policy(true);
     const r = await runTask('synthetic-chat/syn-judge');
     expect(r.result.body.status).toBe('DONE');
@@ -532,7 +555,7 @@ describe('explicit model evaluation — never automatic, never able to bypass th
     expect(requests).toHaveLength(0);
   });
 
-  it('with paid execution OFF the explicit run is refused by the spend guard — ledger row, no request, parent untouched', async () => {
+  it('with paid execution OFF the explicit run waits (PAUSED_AWAITING_BUDGET) before dispatch — no request, parent untouched', async () => {
     policy(false);
     const parentBefore = getTaskWithHistory(parent.taskId).task!;
     const receiptsBefore = getTaskReceipts(parent.taskId).length;
@@ -540,7 +563,11 @@ describe('explicit model evaluation — never automatic, never able to bypass th
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.body.success).toBe(false);
-    expect(listUsageForKey(`evaluation:${r.evaluationTaskId}`)[0]).toMatchObject({ status: 'BLOCKED', reason_code: 'PAID_EXECUTION_DISABLED' });
+    // The router sees paid execution is off and the task waits; nothing reaches the guard or the provider.
+    expect(r.body.status).toBe('PAUSED_AWAITING_BUDGET');
+    const d = getDecision(r.body.routingDecision.decisionId)!;
+    expect(d.candidates.find((c) => c.modelId === 'syn-judge')!.disqualified.map((x) => x.code)).toContain('PAID_EXECUTION_DISABLED');
+    expect(listUsageForKey(`evaluation:${r.evaluationTaskId}`)).toHaveLength(0);
     expect(requests).toHaveLength(0);
     expect(getTaskWithHistory(parent.taskId).task!.status).toBe(parentBefore.status);
     expect(getTaskReceipts(parent.taskId)).toHaveLength(receiptsBefore);

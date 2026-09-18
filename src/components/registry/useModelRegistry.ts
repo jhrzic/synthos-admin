@@ -29,6 +29,8 @@ export interface RegistryModel {
   blockers: RegistryBlocker[];
   pricing: { state: string; current: { rates: { input: number; output: number; cachedInput: number | null }; unit: string; currency: string; staleAfter: string; source: string } | null; versionKey: string | null };
   paid: boolean;
+  routeKind?: 'DIRECT' | 'AGGREGATOR' | 'LOCAL' | 'ENTERPRISE';
+  freeTier?: { free: boolean; guaranteed: boolean } | null;
 }
 
 export interface RegistryProvider {

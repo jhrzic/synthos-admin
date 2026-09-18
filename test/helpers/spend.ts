@@ -12,6 +12,18 @@ import { saveSpendPolicy, DEFAULT_SPEND_POLICY, PAID_PROVIDERS } from '../../lib
 import { applyPriceRecords, type PricingSourceId } from '../../lib/pricing/catalog';
 import type { PriceRecord } from '../../lib/pricing/parse';
 import { ensureRegistry, isRegistryGoverned, registerModelViaAdmin, qualifyModel, enableModel } from '../../lib/registry';
+import { listTaskClasses, insertQualificationForTest, upsertTaskClass, getTaskClass } from '../../lib/registry/qualification';
+
+/** Tests call the guard from their own call sites ("test.*"); give them a task class, as data, in the test database. */
+function ensureTestTaskClass(): void {
+  if (getTaskClass('test_fixture')) return;
+  const r = upsertTaskClass({
+    taskClassId: 'test_fixture', displayName: 'Test fixture', description: 'Call sites used only by tests.', outputContract: 'NARRATIVE',
+    requiredCapabilities: [], modality: { input: ['text'], output: ['text'] }, segmentable: true, evalSuiteId: 'suite.content',
+    minQuality: 0, minReliability: 0, qualificationValidityDays: 30, minContextTokens: null, requiredTools: [], callSites: ['test.*'], defaultForContracts: [],
+  }, 'test-fixture');
+  if (!r.ok) throw new Error(r.error);
+}
 import { getProviderBody } from '../../lib/registry/store';
 
 /**
@@ -68,6 +80,10 @@ export function registerFixtureModel(provider: string, modelId: string, rates: {
   if (!q.ok) throw new Error(`fixture qualification failed: ${q.error}`);
   const en = enableModel(provider, modelId, 'test-fixture');
   if (!en.ok) throw new Error(`fixture enable failed: ${en.error}`);
+  // Task-class qualification: a fixture stands in for a route an operator has
+  // qualified for every class. Tests of qualification itself do not use this.
+  ensureTestTaskClass();
+  for (const tc of listTaskClasses()) insertQualificationForTest({ providerId: provider, modelId, taskClass: tc.taskClassId });
 }
 
 export function allowPaidExecutionForTest(models: Array<[string, string]>, overrides: Record<string, unknown> = {}) {

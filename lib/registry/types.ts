@@ -14,7 +14,33 @@ export type ProtocolId = 'openai.responses' | 'openai.chat_completions' | 'gemin
 
 export type AuthType = 'BEARER' | 'API_KEY_HEADER' | 'NONE';
 
-export type ManifestSource = 'PLUGIN' | 'SIGNED_IMPORT' | 'ADMIN' | 'DISCOVERY';
+export type ManifestSource = 'PLUGIN' | 'SIGNED_IMPORT' | 'ADMIN' | 'DISCOVERY' | 'ROUTE_IMPORT';
+
+/**
+ * How a provider route reaches a model. The same canonical model version may
+ * be offered by several routes (the publisher directly, an aggregator, a
+ * local runtime, a private endpoint) — they are never different models.
+ */
+export type RouteKind = 'DIRECT' | 'AGGREGATOR' | 'LOCAL' | 'ENTERPRISE';
+
+/** Privacy classes, weakest to strongest. A route never downgrades below what a task requires. */
+export const PRIVACY_CLASSES = ['STANDARD', 'NO_TRAINING', 'ZERO_RETENTION', 'LOCAL_ONLY'] as const;
+export type PrivacyClass = (typeof PRIVACY_CLASSES)[number];
+
+/** One concrete place a route executes: endpoint, region, account binding, limits, policy boundary. */
+export interface DeploymentSpec {
+  deploymentId: string;
+  region: string | null;
+  /** Env var overriding this deployment's base URL (validated by ./endpoints.ts). Null → the provider's. */
+  baseUrlEnvVar: string | null;
+  /** Credential binding. Null → the provider's auth. */
+  credentialSlot: string | null;
+  envVars: string[];
+  rateLimits: { requestsPerMinute: number | null; tokensPerMinute: number | null; tokensPerDay: number | null };
+  privacyClass: PrivacyClass;
+  dataRetention: string | null;
+  status: 'ACTIVE' | 'DISABLED';
+}
 
 /** Where a capability claim came from and how far it has been checked. */
 export type CapabilityVerification = 'DOCUMENTED' | 'PUBLISHER_ASSERTED' | 'ADMIN_ASSERTED' | 'VERIFIED' | 'UNVERIFIED';
@@ -82,6 +108,16 @@ export interface ModelManifest {
   restrictions: { regions: string[]; compliance: string[] };
   /** Unknown top-level provider metadata, retained rather than discarded. */
   extensions?: Record<string, unknown>;
+  /**
+   * IDENTITY — the model family and the immutable canonical version this route
+   * offering serves. A DIRECT route whose provider is the family's publisher is
+   * authoritative; any other route only PROPOSES a mapping, which needs an
+   * audited approval before it is trusted. Absent → the publisher-issued id.
+   */
+  family?: { familyId: string; displayName: string; publisher: string } | null;
+  canonicalVersionId?: string | null;
+  /** Free access, and whether it is contractually guaranteed. Free is volatile unless guaranteed. */
+  freeTier?: { free: boolean; guaranteed: boolean } | null;
 }
 
 export interface ProviderManifestBody {
@@ -97,6 +133,16 @@ export interface ProviderManifestBody {
   /** Whether a paid call to this provider is priced per token/char. */
   billing: 'METERED' | 'MANAGED_AGENT' | 'FREE_LOCAL';
   restrictions: { regions: string[]; compliance: string[] };
+  /** Defaults to DIRECT. */
+  routeKind?: RouteKind;
+  /** Concrete deployments. Absent → one 'default' deployment from the provider fields. */
+  deployments?: DeploymentSpec[];
+  /** Provider-supported request idempotency (a header carrying SynthOS's key). */
+  idempotency?: { header: string } | null;
+  /** Provider-supported lookup of a request's outcome by that key: path template with {key}. */
+  reconciliation?: { lookupPath: string } | null;
+  /** Default privacy class for deployments that do not state one. */
+  privacyClass?: PrivacyClass;
 }
 
 export interface ManifestSignature {
@@ -189,4 +235,7 @@ export interface ModelView {
     versionKey: string | null;
   };
   paid: boolean;
+  /** How this offering is reached, and whether it is free (volatile unless guaranteed). */
+  routeKind: RouteKind;
+  freeTier: { free: boolean; guaranteed: boolean } | null;
 }

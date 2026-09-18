@@ -32,6 +32,11 @@ export interface ExecuteAgentTaskInput {
    * in code (Aegis INSTRUCTION_COMPLIANCE scope) before the task can be DONE.
    */
   outputContract?: unknown;
+  /** Registry task class (data). Absent → the class registered for the output contract. */
+  taskClass?: string;
+  /** Routing constraints/mode for the canonical router (narrow the workspace's; never widen). */
+  routing?: import('../registry/router').RoutingConstraints;
+  privacyClass?: import('../registry/types').PrivacyClass;
   taskTitle?: string;
   description?: string;
   assignedAgent?: string;

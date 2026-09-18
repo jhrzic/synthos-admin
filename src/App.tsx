@@ -1002,6 +1002,28 @@ provenance: "${finalMeta.provenance}"
         // note. Before this, a 200 with success:false silently re-ran the task
         // through /api/generate and wrote the result into memory — a duplicate
         // paid call that bypassed scoped verification and quarantine.
+        // CONTINUITY — a 202 means the task is PAUSED (awaiting budget,
+        // capacity, a qualified route or approval) or RECONCILING an unknown
+        // outcome. Not failed; nothing else is run in its place. The server's
+        // continuity sweep resumes it; the Routing & Continuity tab says why.
+        if (execRes.status === 202 && verificationOutcome) {
+          handleUpdateKanbanTask(taskId, {
+            column: 'blocked',
+            verificationOutcome,
+            outputLog: `[Router]: ${verificationOutcome.taskStatus} — not failed. ${execData.error ?? ''}`,
+            updatedAt: `Just now (${verificationOutcome.taskStatus})`,
+          });
+          synthosControl.logEvent({
+            taskId: task.id,
+            eventType: execData.status === 'RECONCILING_UNKNOWN_EXECUTION' ? 'RECONCILIATION_REQUIRED' : 'TASK_PAUSED',
+            actorRole: 'orchestrator',
+            actorModel: task.assignedModel,
+            summary: `"${task.title}" is ${execData.status} (not failed): ${execData.error ?? 'see Routing & Continuity'}. No other model was substituted.`,
+            payload: { taskId: execData.taskId, status: execData.status, routingDecisionId: execData.routingDecision?.decisionId ?? null },
+            isSimulated: false,
+          });
+          return;
+        }
         if (verificationOutcome && !execData.success) {
           handleUpdateKanbanTask(taskId, {
             column: 'blocked',
@@ -2163,6 +2185,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           {/* Model Router & OpenRouter Hub View */}
           {activeTab === 'model-router' && (
             <ModelRouterView
+              workspaceId={activeWorkspaceId}
               models={models}
               rules={routerRules}
               onUpdateRule={handleUpdateRouterRule}

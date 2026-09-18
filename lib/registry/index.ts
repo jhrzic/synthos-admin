@@ -34,8 +34,11 @@ import { getProtocolAdapter, type ProtocolAdapter } from './protocols';
 import { currentPricing, priceVersionKey } from './pricing';
 import { resolveProviderEndpoint } from './endpoints';
 import { credentialReadiness, resolveProviderCredential } from './credentials';
-import { semverGte, validateManifest } from './schema';
+import { semverGte, validateManifest, modelSubstanceHash } from './schema';
 import { getSpendPolicy } from '../spend/policy';
+import { routeIdentity, deploymentsOf } from './identity';
+import { resolveTaskClass, findQualification, getRun as getQualificationRun } from './qualification';
+import type { RouteContext } from './route-context';
 import { resolveProviderState } from '../provider-state';
 import type {
   AvailabilityState, Blocker, ExecutionContextConstraints, ModelView, AdminState, ModelManifest, ProviderManifestBody, PricingRecord,
@@ -46,8 +49,9 @@ export { ensureRegistry } from './install';
 function adminStateOf(model: StoredModel): AdminState {
   const a = getAdminRow(model.providerId, model.modelId);
   if (a.disabledReason && !a.enabled) return 'DISABLED';
-  if (a.enabled && a.qualifiedHash === model.recordHash) return 'ENABLED';
-  if (a.qualifiedHash === model.recordHash) return 'QUALIFIED';
+  const h = modelSubstanceHash(model.providerId, model.record);
+  if (a.enabled && a.qualifiedHash === h) return 'ENABLED';
+  if (a.qualifiedHash === h) return 'QUALIFIED';
   return 'INSTALLED';
 }
 
@@ -101,7 +105,7 @@ export function viewOf(model: StoredModel, provider: StoredProvider, ctx: Execut
   // 6-7. Operator decisions
   const admin = getAdminRow(model.providerId, model.modelId);
   const adminState = adminStateOf(model);
-  if (admin.qualifiedHash !== model.recordHash) {
+  if (admin.qualifiedHash !== modelSubstanceHash(model.providerId, rec)) {
     blockers.push({ state: 'UNQUALIFIED', reason: admin.qualifiedHash ? 'the model record changed since it was qualified; it must be re-qualified' : 'not yet qualified by an operator' });
   } else if (adminState === 'DISABLED') {
     blockers.push({ state: 'DISABLED', reason: admin.disabledReason || 'disabled by an operator' });
@@ -155,6 +159,8 @@ export function viewOf(model: StoredModel, provider: StoredProvider, ctx: Execut
       versionKey: pricing.record ? priceVersionKey(model.providerId, model.modelId, model.manifestVersion, pricing.record) : null,
     },
     paid,
+    routeKind: body.routeKind ?? 'DIRECT',
+    freeTier: rec.freeTier ?? (body.billing === 'FREE_LOCAL' ? { free: true, guaranteed: true } : null),
   };
 }
 
@@ -272,7 +278,7 @@ export function isRegistryGoverned(providerId: string): boolean {
  * executable in this workspace. Aliases are refused here on purpose: identity
  * must be resolved once, before the guard, and propagate unchanged.
  */
-export function registryGate(providerId: string, modelId: string, ctx: ExecutionContextConstraints): { ok: true } | { ok: false; code: string; reason: string } {
+export function registryGate(providerId: string, modelId: string, ctx: ExecutionContextConstraints & { callSite?: string | null; route?: RouteContext | null }): { ok: true; taskClass: string | null } | { ok: false; code: string; reason: string } {
   ensureRegistry();
   if (!getStoredModel(providerId, modelId)) {
     return { ok: false, code: 'MODEL_NOT_REGISTERED', reason: `${providerId}/${modelId} is not a canonical model in the registry; nothing was sent.` };
@@ -282,7 +288,38 @@ export function registryGate(providerId: string, modelId: string, ctx: Execution
     const real = v.blockers.filter((b) => b.state !== 'DEPRECATED' && b.state !== 'DEGRADED');
     return { ok: false, code: `MODEL_${real[0].state}`, reason: `${providerId}/${modelId} is ${real[0].state}: ${real.map((b) => b.reason).join('; ')}` };
   }
-  return { ok: true };
+  // IDENTITY — a route offering whose canonical version is unresolved
+  // (pending review, conflicting, unmapped) never executes.
+  const identity = routeIdentity(providerId, modelId);
+  if (!identity.resolved) {
+    return { ok: false, code: 'ROUTE_MAPPING_UNRESOLVED', reason: `${providerId}/${modelId}'s canonical version is ${identity.status}${identity.reason ? ` (${identity.reason})` : ''}; nothing was sent.` };
+  }
+  const route = ctx.route ?? null;
+  const deploymentId = route?.deploymentId ?? null;
+  if (deploymentId) {
+    const dep = deploymentsOf(getStoredProvider(providerId)!.manifest.provider).find((d) => d.deploymentId === deploymentId);
+    if (!dep) return { ok: false, code: 'DEPLOYMENT_UNKNOWN', reason: `deployment ${deploymentId} does not exist on ${providerId}; nothing was sent.` };
+    if (dep.status !== 'ACTIVE') return { ok: false, code: 'DEPLOYMENT_DISABLED', reason: `deployment ${deploymentId} on ${providerId} is ${dep.status}; nothing was sent.` };
+  }
+  // A qualification run's own cases: the model is admitted but, by
+  // definition, not yet qualified for the class being evaluated.
+  if (route?.qualificationRunId) {
+    const run = getQualificationRun(route.qualificationRunId);
+    if (!run || run.status !== 'OPEN' || run.provider_id !== providerId || run.model_id !== modelId) {
+      return { ok: false, code: 'QUALIFICATION_RUN_INVALID', reason: 'the qualification run is not open for this route; nothing was sent.' };
+    }
+    return { ok: true, taskClass: run.task_class };
+  }
+  // TASK CLASS — nothing executes unqualified for the kind of work it is doing.
+  const tc = resolveTaskClass({ taskClass: route?.taskClass ?? null, callSite: ctx.callSite ?? null, outputContract: route?.outputContract ?? ctx.outputContract ?? null });
+  if (!tc) {
+    return { ok: false, code: 'TASK_CLASS_UNKNOWN', reason: `no task class is registered for this call (${route?.taskClass || ctx.callSite || 'unspecified'}); nothing was sent.` };
+  }
+  const q = findQualification(providerId, modelId, { taskClass: tc.taskClassId, deploymentId });
+  if (!q.ok) {
+    return { ok: false, code: 'MODEL_NOT_QUALIFIED_FOR_TASK', reason: `${providerId}/${modelId} is not qualified for ${tc.taskClassId}: ${q.reasons.join('; ')}. Nothing was sent.` };
+  }
+  return { ok: true, taskClass: tc.taskClassId };
 }
 
 /** The price record in force for a registry model, with its version key. */
@@ -310,7 +347,7 @@ export function qualifyModel(providerId: string, modelId: string, actor: string)
   if (!m || !view) return { ok: false, error: `${providerId}/${modelId} is not registered` };
   const hard = view.blockers.filter((b) => QUALIFY_BLOCKING.includes(b.state));
   if (hard.length) return { ok: false, error: `cannot qualify: ${hard.map((b) => `${b.state} (${b.reason})`).join('; ')}`, view };
-  writeAdminRow(providerId, modelId, { qualifiedHash: m.recordHash, qualifiedBy: actor, qualifiedAt: new Date().toISOString() });
+  writeAdminRow(providerId, modelId, { qualifiedHash: modelSubstanceHash(providerId, m.record), qualifiedBy: actor, qualifiedAt: new Date().toISOString() });
   recordRegistryEvent('MODEL_QUALIFIED', { providerId, modelId, actor, recordHash: m.recordHash, priceVersion: view.pricing.versionKey });
   return { ok: true, view: evaluateModel(providerId, modelId)! };
 }
@@ -319,7 +356,7 @@ export function enableModel(providerId: string, modelId: string, actor: string):
   const m = getStoredModel(providerId, modelId);
   if (!m) return { ok: false, error: `${providerId}/${modelId} is not registered` };
   const a = getAdminRow(providerId, modelId);
-  if (a.qualifiedHash !== m.recordHash) return { ok: false, error: 'only a model qualified on its current record can be enabled', view: evaluateModel(providerId, modelId)! };
+  if (a.qualifiedHash !== modelSubstanceHash(providerId, m.record)) return { ok: false, error: 'only a model qualified on its current record can be enabled', view: evaluateModel(providerId, modelId)! };
   writeAdminRow(providerId, modelId, { enabled: true, enabledBy: actor, enabledAt: new Date().toISOString(), disabledReason: null });
   recordRegistryEvent('MODEL_ENABLED', { providerId, modelId, actor });
   return { ok: true, view: evaluateModel(providerId, modelId)! };

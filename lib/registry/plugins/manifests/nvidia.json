@@ -1,26 +1,26 @@
 {
   "schemaVersion": "synthos.registry/v1",
-  "manifestVersion": "2026.09.18-openrouter-2",
+  "manifestVersion": "2026.09.18-nvidia-1",
   "provenance": {
     "publisher": "synthos-core",
     "generatedAt": "2026-09-18T00:00:00.000Z",
-    "notes": "An aggregator of other vendors; not mirrored from static metadata. Empty until a manifest is imported."
+    "notes": "NVIDIA hosted inference (NIM) \u2014 an aggregator route to other publishers' models. Empty until a route manifest is imported; imported offerings only propose a canonical version and need operator approval."
   },
   "provider": {
-    "providerId": "openrouter",
-    "displayName": "OpenRouter",
+    "providerId": "nvidia",
+    "displayName": "NVIDIA NIM",
     "protocol": "openai.chat_completions",
     "adapterVersion": "1.0.0",
     "approvedHosts": [
-      "openrouter.ai"
+      "integrate.api.nvidia.com"
     ],
-    "defaultBaseUrl": "https://openrouter.ai/api/v1",
+    "defaultBaseUrl": "https://integrate.api.nvidia.com/v1",
     "baseUrlEnvVar": null,
     "auth": {
       "type": "BEARER",
       "credentialSlot": null,
       "envVars": [
-        "OPENROUTER_API_KEY"
+        "NVIDIA_API_KEY"
       ]
     },
     "billing": "METERED",

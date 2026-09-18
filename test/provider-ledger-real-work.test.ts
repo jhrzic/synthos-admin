@@ -147,8 +147,12 @@ describe('real work advances provider truth', () => {
   it('a provider failure records the failure CATEGORY, not just a failure', async () => {
     BEHAVIOUR = 'error';
     const res = await runKernelTask(`task-pl-quota-${Date.now()}`);
-    // The run fails honestly; no artifact, no fabricated success.
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    // A quota/rate refusal is a CAPACITY condition: the task is not failed and
+    // not faked — with no other qualified route it waits (202, paused), with
+    // no artifact and no fabricated success.
+    expect(res.status).toBe(202);
+    expect((res.body as any).status).toMatch(/^PAUSED_AWAITING_/);
+    expect((res.body as any).artifact).toBeUndefined();
 
     const rows = providerCallRows('openai');
     expect(rows[0].status).toBe('FAILED');
@@ -208,15 +212,17 @@ describe('real work advances provider truth', () => {
 
 describe('both providers use the same mechanism', () => {
   it('the kernel has exactly one recordProviderAttempt site, shared by both providers', () => {
-    const src = fs.readFileSync(path.join(process.cwd(), 'lib/fabric/kernel.ts'), 'utf8');
+    // The kernel's provider step lives in the segment runner; the kernel itself records none.
+    const kernel = fs.readFileSync(path.join(process.cwd(), 'lib/fabric/kernel.ts'), 'utf8');
+    expect(kernel.match(/recordProviderAttempt\(\{/g) || []).toHaveLength(0);
+    const src = fs.readFileSync(path.join(process.cwd(), 'lib/continuity/segment-runner.ts'), 'utf8');
     const sites = src.match(/recordProviderAttempt\(\{/g) || [];
     // One site. Two would mean two spellings of the same truth, which is the
     // shape of the original bug.
     expect(sites.length).toBe(1);
-    // And it derives the provider id rather than hardcoding one.
-    // The registry provider id is the ledger key — the same lowercase id the credential probe uses.
-    expect(src).toMatch(/recordProviderAttempt\(\{[\s\S]{0,400}?\n\s+provider,\n/);
-    expect(src).toContain('const provider = route.providerId;');
+    // And it derives the provider id from the router-selected route rather than hardcoding one.
+    expect(src).toMatch(/recordProviderAttempt\(\{ provider: sel\.providerId,/);
+    expect(src).toContain('const sel = decision.selected;');
   });
 
   it('the provider id matches what the credential probe writes, so one ledger serves both', () => {

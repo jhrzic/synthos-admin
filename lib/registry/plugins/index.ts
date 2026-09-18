@@ -18,6 +18,8 @@ import anthropic from './manifests/anthropic.json';
 import deepseek from './manifests/deepseek.json';
 import perplexity from './manifests/perplexity.json';
 import openrouter from './manifests/openrouter.json';
+import nvidia from './manifests/nvidia.json';
+import localRuntime from './manifests/local-runtime.json';
 
 export interface BundledPlugin {
   providerId: string;
@@ -32,4 +34,6 @@ export const BUNDLED_PLUGINS: readonly BundledPlugin[] = Object.freeze([
   { providerId: 'deepseek', manifest: deepseek },
   { providerId: 'perplexity', manifest: perplexity },
   { providerId: 'openrouter', manifest: openrouter },
+  { providerId: 'nvidia', manifest: nvidia },
+  { providerId: 'local-runtime', manifest: localRuntime },
 ]);

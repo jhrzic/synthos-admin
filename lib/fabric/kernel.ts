@@ -71,9 +71,10 @@ import {
   read_package_metadata,
   projectKnowledgeCandidate,
 } from '../persistence';
-import { resolveRoute, credentialForTarget, credentialHint, primaryCredentialEnvVar, evaluateModel } from '../registry';
 import { listUsageForKey } from '../spend/ledger';
-import { recordProviderAttempt } from '../provider-state';
+import { runModelSegments } from '../continuity/segment-runner';
+import { continuityView, finish as finishContinuity, closeSegment } from '../continuity/controller';
+import { recordPerformanceSample } from '../registry/performance';
 import { verifyTaskAtGate } from '../kil-gate';
 import { indexVaultArtifact, getArtifactRetrievalStatus } from '../memory-index';
 // STEP 2 — the canonical Vault writer (lib/vault.ts). Replaces this file's
@@ -323,217 +324,86 @@ export async function executeAgentTask(
       payload: { agent: assignedAgent, model: assignedModel, status: "READY" },
     });
 
-    // 2a. Provider identity gate — a model request must be attributed to a
-    // real provider before anything else, and must fail explicitly here,
-    // before the task ever claims RUNNING, rather than being silently
-    // substituted with another provider's model.
-    //
-    // PUSH 1 ORDERING CHANGE, stated plainly because it is a real behavior
-    // change: this gate used to run AFTER the credential check, which meant
-    // an unsupported model in a deployment with no key reported
-    // BLOCKED_MISSING_CREDENTIAL rather than the true reason
-    // (test/fabric-characterization.test.ts LIVE 4 characterized exactly
-    // that, and called it deferred). It had to move, because with two
-    // executable providers there is no single "the" credential to check
-    // until the provider is known — you cannot ask whether the key exists
-    // before you know whose key it is. LIVE 3's Gemini responses are
-    // byte-identical (see the credential message built below), and LIVE 4's
-    // "gpt-4" assertion still holds, now because OpenAI genuinely has no
-    // credential in that environment rather than because Gemini's check
-    // shadowed it.
-    // ROUTING — the model registry decides where this goes, by canonical
-    // identity and protocol. Never by name prefix, never with a substitute.
-    // Whether it may run (qualified, enabled, priced, permitted) is decided by
-    // the spend guard's registry gate, which records a ledger row either way.
-    const route = assignedModel.trim()
-      ? resolveRoute(assignedModel)
-      : { ok: false as const, code: 'MODEL_NOT_SELECTED' as const, requested: '', reason: 'No model was selected for this task. Choose one from the model registry; nothing was run.' };
-    if (!route.ok) {
-      updateTaskStatus(taskId, "FAILED", undefined, resolvedWorkspaceId);
+    // ROUTING + CONTINUITY — the canonical router selects a QUALIFIED route
+    // for this task class (a named model is a pinned route: validated, never
+    // substituted), the decision is persisted before anything is sent, and
+    // the continuity controller runs the work as segments. Capacity, budget
+    // and ambiguous outcomes pause or reconcile the task — they never become
+    // a generic FAILED, and nothing switches to an unqualified or weaker
+    // route. See lib/continuity/segment-runner.ts.
+    const rolePrompt = outputContract.mode === 'NARRATIVE'
+      ? buildAgentRolePrompt({ assignedAgent, taskTitle, description, sourceUrl, inputs })
+      : buildContractPrompt(outputContract, taskTitle, description);
+    const run = await runModelSegments({
+      taskId, workspaceId: resolvedWorkspaceId, assignedAgent, assignedModel, taskTitle, description,
+      firstPrompt: rolePrompt, outputContract, taskClass: (rawBody as any)?.taskClass ?? null,
+      routing: (rawBody as any)?.routing ?? null, privacyClass: (rawBody as any)?.privacyClass ?? null,
+      spendIdempotencyKey, invoke: (name, fn) => ctx.invoke(name, fn),
+      // The task claims RUNNING only after identity, contract and credential
+      // checks pass — a refusal goes READY → FAILED, never through RUNNING.
+      onRunning: () => {
+        updateTaskStatus(taskId, "RUNNING", undefined, resolvedWorkspaceId);
+        recordActivityEvent({
+          taskId,
+          expectedWorkspaceId: resolvedWorkspaceId,
+          eventType: "EXECUTION_STARTED",
+          agentId: assignedAgent,
+          payload: { model: assignedModel || '(router-selected)', status: "RUNNING" },
+        });
+      },
+    });
+
+    if (run.kind === 'REFUSED') {
+      updateTaskStatus(taskId, run.code === 'GUARDIAN_REFUSED' ? "BLOCKED" : "FAILED", undefined, resolvedWorkspaceId);
       recordActivityEvent({
         taskId,
         expectedWorkspaceId: resolvedWorkspaceId,
-        eventType: "PROVIDER_UNSUPPORTED",
+        eventType: run.eventType,
         agentId: assignedAgent,
-        payload: { reason: route.code, error: route.reason, requestedModel: route.requested },
+        payload: { reason: run.code, error: run.error, ...(run.requestedModel !== undefined ? { requestedModel: run.requestedModel } : {}) },
       });
       return {
-        status: 400,
-        body: { success: false, status: "FAILED", reason: route.code, error: route.reason, requestedModel: route.requested, taskId },
+        status: run.httpStatus,
+        body: { success: false, status: run.blocked ? "BLOCKED" : "FAILED", reason: run.code, error: run.error, ...(run.requestedModel !== undefined ? { requestedModel: run.requestedModel } : {}), taskId },
       };
     }
-
-    const provider = route.providerId;
-    // TASK RESTRICTIONS — the task's output contract must be one the model
-    // declares. Refused before any credential is read or request is built.
-    const taskView = evaluateModel(provider, route.modelId, { workspaceId: resolvedWorkspaceId, outputContract: outputContract.mode, credentialHeld: true });
-    if (taskView && !taskView.outputContracts.includes(outputContract.mode)) {
-      updateTaskStatus(taskId, "FAILED", undefined, resolvedWorkspaceId);
-      const error = `${provider}/${route.modelId} does not declare the ${outputContract.mode} output contract this task requires. It was not run.`;
-      recordActivityEvent({ taskId, expectedWorkspaceId: resolvedWorkspaceId, eventType: "PROVIDER_UNSUPPORTED", agentId: assignedAgent, payload: { reason: "MODEL_TASK_INCOMPATIBLE", error } });
-      return { status: 400, body: { success: false, status: "FAILED", reason: "MODEL_TASK_INCOMPATIBLE", error, taskId } };
+    if (run.kind === 'PAUSED' || run.kind === 'RECONCILING') {
+      // Non-terminal: the scheduler's continuity sweep (or an operator)
+      // resumes it. Nothing is lost; the checkpoint says where it stopped.
+      const state = run.kind === 'PAUSED' ? run.state : 'RECONCILING_UNKNOWN_EXECUTION';
+      return {
+        status: 202,
+        body: {
+          success: false, status: state, reason: state, error: run.reason, taskId,
+          routingDecision: run.kind === 'PAUSED' && run.decision ? { decisionId: run.decision.decisionId, outcome: run.decision.outcome, waitState: run.decision.waitState, explanation: run.decision.explanation } : null,
+          continuity: continuityView(taskId),
+        },
+      };
     }
-    const apiKey = credentialForTarget(provider);
-    if (!apiKey) {
-      const hint = credentialHint(provider);
+    if (run.kind === 'PROVIDER_FAILED') {
+      // Provider fails: PROVIDER_FAILED, task FAILED, no artifact, no fake
+      // verification, no DONE. (Capacity and ambiguous failures never reach
+      // here — they pause or reconcile above.)
       updateTaskStatus(taskId, "FAILED", undefined, resolvedWorkspaceId);
+      finishContinuity(taskId, 'FAILED', run.error);
       recordActivityEvent({
         taskId,
         expectedWorkspaceId: resolvedWorkspaceId,
         eventType: "PROVIDER_FAILED",
         agentId: assignedAgent,
-        payload: { reason: "BLOCKED_MISSING_CREDENTIAL", provider, error: `${hint} is not configured` },
+        payload: { error: run.lastProviderError || "Empty response from provider", hadProviderError: run.hadProviderError },
       });
-      return {
-        status: 400,
-        body: {
-          success: false,
-          status: "BLOCKED",
-          reason: "BLOCKED_MISSING_CREDENTIAL",
-          // Same wording as before the registry for the primary env var; the
-          // activity event carries every accepted source.
-          error: `${primaryCredentialEnvVar(provider) ?? hint} environment variable is not configured on the server`,
-          taskId,
-        },
-      };
+      return run.code === 'MODEL_PROVIDER_UNAVAILABLE'
+        ? { status: 502, body: { success: false, status: "FAILED", reason: "MODEL_PROVIDER_UNAVAILABLE", error: run.error, lastProviderError: run.lastProviderError, taskId } }
+        : { status: 502, body: { success: false, status: "FAILED", reason: "EMPTY_PROVIDER_RESPONSE", error: "Model provider returned an empty or unparseable response", taskId } };
     }
 
-    updateTaskStatus(taskId, "RUNNING", undefined, resolvedWorkspaceId);
-    recordActivityEvent({
-      taskId,
-      expectedWorkspaceId: resolvedWorkspaceId,
-      eventType: "EXECUTION_STARTED",
-      agentId: assignedAgent,
-      payload: { model: assignedModel, status: "RUNNING" },
-    });
-
-    let executionOutput = "";
-    let modelUsed = assignedModel;
-    let spendKeyUsed: string | null = null;
-    let lastProviderError: string | null = null;
-    let hadProviderError = false;
-    let providerUsageMetadata: any = null;
-    let providerTermination: ProviderTermination = { status: 'NOT_REPORTED', providerStatus: null, reason: null };
-
-    // Step 1: Execute tool/model logic based on role against the real,
-    // classified provider.
-    // The canonical id propagates unchanged: task → spend guard → provider →
-    // ledger → Aegis → receipt. One model, no candidate list, no fallback.
-    const canonicalModelId = route.modelId;
-    const invocationName = `model.${provider}`;
-
-    await ctx.invoke(invocationName, async () => {
-      const rolePrompt = outputContract.mode === 'NARRATIVE'
-        ? buildAgentRolePrompt({ assignedAgent, taskTitle, description, sourceUrl, inputs })
-        : buildContractPrompt(outputContract, taskTitle, description);
-      const providerStartedAt = Date.now();
-      const spend = {
-        callSite: 'kernel.model_task',
-        workspaceId: resolvedWorkspaceId,
-        taskId,
-        correlationId: spendIdempotencyKey ?? taskId,
-        idempotencyKey: spendIdempotencyKey || `kernel:${taskId}:${crypto.randomUUID()}`,
-      };
-      spendKeyUsed = spend.idempotencyKey;
-      const genResult = await route.adapter.call!({ providerId: provider, modelId: canonicalModelId, apiKey, baseUrl: route.baseUrl, contents: rolePrompt, spend });
-      executionOutput = genResult.output;
-      if (genResult.modelUsed) modelUsed = genResult.modelUsed;
-      if (genResult.providerUsageMetadata) providerUsageMetadata = genResult.providerUsageMetadata;
-      hadProviderError = genResult.hadProviderError;
-      lastProviderError = genResult.lastProviderError;
-      if (genResult.termination) providerTermination = genResult.termination;
-
-      // ---------------------------------------------------------------------
-      // PROVIDER LEDGER TRUTH.
-      //
-      // THE GAP THIS CLOSES, found while proving OpenAI live: this block
-      // recorded PROVIDER_COMPLETED into the TASK's activity evidence but
-      // never wrote a PROVIDER_CALL row, so lib/provider-state.ts — which
-      // derives provider truth from that ledger — only ever learned about
-      // calls made by lib/model-credentials.ts's verification probe.
-      //
-      // The consequence was a quiet, one-directional lie of omission: a
-      // deployment could run real OpenAI work all week and `lastVerifiedAt`
-      // would still point at whenever somebody last clicked "verify". The
-      // state was never FALSE, but it under-reported reality, and it decayed
-      // in the direction of looking less capable than it was — so an operator
-      // would eventually distrust a provider that had been working all along.
-      //
-      // Placement is deliberate: INSIDE the existing ctx.invoke callback,
-      // after the one generate call, so there is exactly one ledger row per
-      // real provider call. Recording it outside would double-count the
-      // retry loop; recording it per candidate model would count one logical
-      // call several times. Both providers go through this single site, so
-      // Gemini gets the same mechanism rather than a parallel one.
-      //
-      // The kernel is not restructured: this adds a record, it changes no
-      // control flow, no retry behaviour, and no error handling. A failure to
-      // record must never fail the run, which is why recordProviderAttempt is
-      // itself non-throwing.
-      // ---------------------------------------------------------------------
-      const providerOk = !!genResult.output.trim() && !genResult.hadProviderError;
-      // A spend-guard refusal sent nothing to the provider, so it is not a
-      // provider attempt and must not move the provider's health state.
-      const spendBlocked = /^BLOCKED_BUDGET \(/.test(String(genResult.lastProviderError || ''));
-      if (!spendBlocked) recordProviderAttempt({
-        // lib/provider-state.ts keys on the lowercase provider id, the same
-        // one lib/model-credentials.ts uses, so probe and real work land in
-        // one ledger rather than two spellings of it.
-        provider,
-        ok: providerOk,
-        modelUsed: genResult.modelUsed,
-        // Only meaningful on failure; scrubbed downstream before storage.
-        errorMessage: providerOk ? null : genResult.lastProviderError,
-        // OpenAI's adapter measures its own latency; Gemini's does not report
-        // one, so it is measured here rather than left null.
-        latencyMs: (genResult as { latencyMs?: number }).latencyMs ?? (Date.now() - providerStartedAt),
-        workspaceId: resolvedWorkspaceId,
-      });
-    });
-
-    // Provider fails:
-    // persist PROVIDER_FAILED
-    // persist task status FAILED
-    // persist FAILED status history
-    // return failure
-    // No artifact, No fake verification, No DONE
-    if (!executionOutput) {
-      updateTaskStatus(taskId, "FAILED", undefined, resolvedWorkspaceId);
-      recordActivityEvent({
-        taskId,
-        expectedWorkspaceId: resolvedWorkspaceId,
-        eventType: "PROVIDER_FAILED",
-        agentId: assignedAgent,
-        payload: {
-          error: lastProviderError || "Empty response from provider",
-          hadProviderError,
-        },
-      });
-
-      if (hadProviderError && lastProviderError) {
-        return {
-          status: 502,
-          body: {
-            success: false,
-            status: "FAILED",
-            reason: "MODEL_PROVIDER_UNAVAILABLE",
-            error: lastProviderError,
-            lastProviderError,
-            taskId,
-          },
-        };
-      }
-      return {
-        status: 502,
-        body: {
-          success: false,
-          status: "FAILED",
-          reason: "EMPTY_PROVIDER_RESPONSE",
-          error: "Model provider returned an empty or unparseable response",
-          taskId,
-        },
-      };
-    }
+    const provider = run.providerId;
+    const canonicalModelId = run.modelId;
+    const executionOutput = run.output;
+    const modelUsed = run.modelUsed || canonicalModelId;
+    const providerUsageMetadata = run.usageMetadata;
+    const providerTermination: ProviderTermination = run.termination;
 
     // Provider succeeds:
     // persist PROVIDER_COMPLETED
@@ -562,12 +432,24 @@ export async function executeAgentTask(
 
     // The ledger row this execution reserved and dispatched under — its price
     // snapshot is immutable, so the receipt names it rather than re-pricing.
-    const usageRow = spendKeyUsed ? listUsageForKey(spendKeyUsed).filter((r) => r.status === 'SUCCESS').pop() ?? null : null;
+    const lastKey = run.successUsageKeys[run.successUsageKeys.length - 1];
+    const usageRow = lastKey ? listUsageForKey(lastKey).filter((r) => r.status === 'SUCCESS').pop() ?? null : null;
     const registryEvidence = {
       registryProviderId: provider,
       canonicalModelId,
       priceVersion: usageRow?.price_version ?? null,
       usageId: usageRow?.usage_id ?? null,
+    };
+    // ROUTING EVIDENCE — signed into the receipt beside the registry identity.
+    const routingEvidence = {
+      canonicalVersionId: run.decision.selected?.canonicalVersionId ?? null,
+      routeProviderId: provider,
+      deploymentId: run.decision.selected?.deploymentId ?? null,
+      routingDecisionId: run.decision.decisionId,
+      qualificationId: run.qualificationId,
+      taskClass: run.taskClass,
+      segmentIds: run.segments.map((x) => x.segmentId),
+      segmentCount: run.segments.length,
     };
 
     // STEP 2 — the artifact write and its DB record both now go through
@@ -665,7 +547,7 @@ export async function executeAgentTask(
       // Step 4 Execution Spine: Real Cryptographic Execution Receipt Signing
       // ---------------------------------------------------------------------
       receiptId = `rcpt-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
-      const canonicalPayload: CanonicalReceiptPayload = {
+      const canonicalPayload: CanonicalReceiptPayload & typeof routingEvidence = {
         receiptId,
         taskId,
         reviewId: persistedReview.review_id,
@@ -686,6 +568,7 @@ export async function executeAgentTask(
         provider: receiptProviderIdentity(provider),
         modelUsed,
         ...registryEvidence,
+        ...routingEvidence,
         artifactId: persistedArtifact.artifact_id,
         artifactHash: persistedArtifact.content_hash,
         aegisDecision: aegisResult.decision,
@@ -853,6 +736,25 @@ export async function executeAgentTask(
       });
     }
 
+    // CONTINUITY CHAIN — every segment names the Aegis review and receipt
+    // that judged the assembled output; the routing evidence is recorded for
+    // later (approved) routing statistics.
+    for (const sg of run.segments) closeSegment(sg.segmentId, { aegisReviewId: persistedReview.review_id, aegisDecision: aegisResult.decision, receiptId: receiptId ?? null });
+    {
+      const finalStatus = getTaskWithHistory(taskId).task?.status;
+      finishContinuity(taskId, finalStatus === 'DONE' ? 'DONE' : finalStatus === 'INCOMPLETE' ? 'INCOMPLETE' : 'FAILED', `Aegis ${aegisResult.decision}`);
+      if (content.scopes.integrity === 'PASS' || content.scopes.integrity === 'FAIL') {
+        recordPerformanceSample({
+          taskId, workspaceId: resolvedWorkspaceId, taskClass: run.taskClass, canonicalVersionId: routingEvidence.canonicalVersionId,
+          providerId: provider, modelId: canonicalModelId, deploymentId: routingEvidence.deploymentId, routingDecisionId: run.decision.decisionId,
+          completed: content.scopes.completion === 'PASS', instructionCompliance: content.scopes.instructionCompliance === 'PASS' ? true : content.scopes.instructionCompliance === 'FAIL' ? false : null,
+          integrity: content.scopes.integrity === 'PASS', verified: aegisResult.decision === 'VERIFIED', latencyMs: run.latencyMs,
+          costUsd: usageRow?.actual_cost_usd ?? null, continuations: Math.max(0, run.segments.filter((x) => x.status !== 'BLOCKED').length - 1),
+          retries: run.segments.filter((x) => x.status === 'FAILED').length,
+        });
+      }
+    }
+
     const { task: savedTask, statusHistory } = getTaskWithHistory(taskId);
     const activityEvents = getTaskActivityEvents(taskId);
     const artifactsList = getTaskArtifacts(taskId);
@@ -951,6 +853,8 @@ export async function executeAgentTask(
           verified: verifyReceipt(r),
         })),
         executionMetrics,
+        routing: { ...routingEvidence, explanation: run.decision.explanation, mode: run.decision.mode, policy: run.decision.policy },
+        continuity: continuityView(taskId),
       },
     };
   } catch (err: any) {

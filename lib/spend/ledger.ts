@@ -43,6 +43,11 @@ export const AMBIGUOUS_STATUSES: UsageStatus[] = ['TIMEOUT_AFTER_DISPATCH', 'UNK
 
 export interface UsageRow {
   usage_id: string;
+  task_class?: string | null;
+  canonical_version_id?: string | null;
+  deployment_id?: string | null;
+  routing_decision_id?: string | null;
+  segment_id?: string | null;
   provider: string;
   model: string;
   call_site: string;
@@ -139,6 +144,11 @@ export function ensureUsageTable(): void {
   if (!cols.includes('price_version')) db.exec('ALTER TABLE provider_usage ADD COLUMN price_version TEXT');
   if (!cols.includes('price_snapshot_json')) db.exec('ALTER TABLE provider_usage ADD COLUMN price_snapshot_json TEXT');
   if (!cols.includes('provider_termination')) db.exec('ALTER TABLE provider_usage ADD COLUMN provider_termination TEXT');
+  // Routing evidence: which canonical version, route, deployment and decision
+  // this call ran under (null for rows written before the router existed).
+  for (const c of ['task_class', 'canonical_version_id', 'deployment_id', 'routing_decision_id', 'segment_id']) {
+    if (!cols.includes(c)) db.exec(`ALTER TABLE provider_usage ADD COLUMN ${c} TEXT`);
+  }
   ensured = true;
 }
 

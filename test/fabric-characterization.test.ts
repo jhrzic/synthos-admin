@@ -436,7 +436,10 @@ describe('STATIC: provider-error and empty-response failure branches (unreachabl
   it('a thrown provider error -> 502 MODEL_PROVIDER_UNAVAILABLE; an empty-but-non-throwing response -> 502 EMPTY_PROVIDER_RESPONSE; both still write PROVIDER_FAILED + FAILED, still no artifact/review/receipt', () => {
     expect(kernelContent).toContain('reason: "MODEL_PROVIDER_UNAVAILABLE"');
     expect(kernelContent).toContain('reason: "EMPTY_PROVIDER_RESPONSE"');
-    expect(kernelContent).toMatch(/if \(!executionOutput\) \{[\s\S]*?updateTaskStatus\(taskId, "FAILED", undefined, resolvedWorkspaceId\);[\s\S]*?eventType: "PROVIDER_FAILED"/);
+    // The no-output branch now arrives from the segment runner as
+    // PROVIDER_FAILED (capacity and ambiguous outcomes pause or reconcile
+    // instead — see test/continuity-controller.test.ts).
+    expect(kernelContent).toMatch(/if \(run\.kind === 'PROVIDER_FAILED'\) \{[\s\S]*?updateTaskStatus\(taskId, "FAILED", undefined, resolvedWorkspaceId\);[\s\S]*?eventType: "PROVIDER_FAILED"/);
   });
 });
 
@@ -450,8 +453,10 @@ describe('STATIC: the success path (VERIFIED) — ordering that Step 3+ must pre
   // and signing step after it still happens in exactly this sequence, for
   // both providers, from this one shared block.
   it('exact order: provider invocation -> PROVIDER_COMPLETED -> writeWorkspaceArtifact (canonical writer, DB+disk) -> ARTIFACT_SAVED -> AWAITING_VERIFICATION -> Aegis run -> recordQualityReview -> (VERIFIED branch) AWAITING_RECEIPT -> AEGIS_REVIEWED -> sign -> verify -> recordReceipt -> RECEIPT_CREATED -> DONE -> TASK_COMPLETED -> KIL (best-effort) -> memory index (best-effort)', () => {
+    // The provider invocation happens inside the segment runner, which the
+    // kernel awaits before anything below; the ordering after it is unchanged.
     const order = [
-      'await ctx.invoke(invocationName, async () => {',
+      'const run = await runModelSegments({',
       'eventType: "PROVIDER_COMPLETED"',
       'writeWorkspaceArtifact({',
       'eventType: "ARTIFACT_SAVED"',
@@ -517,7 +522,7 @@ describe('STATIC (PHASE 0b FIX, preserved through Step 1b): the signed receipt\'
     expect(kernelContent).not.toContain('req.body.workspaceId');
     // The kernel has no `req` at all — it takes rawBody/resolvedWorkspaceId/ctx.
     expect(kernelContent).not.toContain('req.body');
-    const canonicalPayloadIdx = kernelContent.indexOf('const canonicalPayload: CanonicalReceiptPayload = {');
+    const canonicalPayloadIdx = kernelContent.indexOf('const canonicalPayload: CanonicalReceiptPayload & typeof routingEvidence = {');
     expect(canonicalPayloadIdx).toBeGreaterThan(-1);
     const nextConstructorCall = kernelContent.indexOf('canonicalizePayload(canonicalPayload)', canonicalPayloadIdx);
     const payloadBlock = kernelContent.slice(canonicalPayloadIdx, nextConstructorCall);
@@ -572,12 +577,12 @@ describe('STATIC (STEP 1b — the one permitted evidence correction over Phase 0
   });
 
   it('this changes nothing observable in this environment: BLOCKED_MISSING_CREDENTIAL (the only reachable outcome, per LIVE 3 above) returns before ctx.invoke() is ever called, so ctx.getInvocations() is empty and toolCalls would still be [] if that response included the field at all — and it does not (LIVE 3 already asserts the exact response body, which has no toolCalls key)', () => {
-    const apiKeyCheckIdx = kernelContent.indexOf('if (!apiKey) {');
-    // PUSH 1 — same marker change as the ordering test above. The property
-    // asserted is unchanged: the credential gate still returns before any
-    // provider call can be observed, so a blocked run can never leave an
-    // invocation trace implying a provider ran.
-    const invokeIdx = kernelContent.indexOf('await ctx.invoke(invocationName');
+    // The credential gate lives in the segment runner and still returns
+    // before any provider invocation can be observed, so a blocked run can
+    // never leave an invocation trace implying a provider ran.
+    const runner = fs.readFileSync(path.resolve(REPO_ROOT, 'lib/continuity/segment-runner.ts'), 'utf-8');
+    const apiKeyCheckIdx = runner.indexOf('if (!credentialReadiness(body).ready) {');
+    const invokeIdx = runner.indexOf('await inp.invoke(`model.${sel.providerId}`');
     expect(apiKeyCheckIdx).toBeGreaterThan(-1);
     expect(invokeIdx).toBeGreaterThan(apiKeyCheckIdx); // the only live-reachable return in this environment happens first
   });

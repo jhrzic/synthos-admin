@@ -34,10 +34,24 @@ export function taskStatusLabel(status: string | null | undefined): { label: str
     case 'FAILED': return { label: 'FAILED', tone: 'error', description: 'The task failed.' };
     case 'AWAITING_VERIFICATION': return { label: 'AWAITING VERIFICATION', tone: 'gate', description: 'Held at the verification gate.' };
     case 'AWAITING_RECEIPT': return { label: 'AWAITING RECEIPT', tone: 'gate', description: 'Verified; receipt not yet signed.' };
+    // CONTINUITY — paused is not failed. Each names what it waits for.
+    case 'PAUSED_AWAITING_BUDGET': return { label: 'PAUSED — AWAITING BUDGET', tone: 'warning', description: 'Not failed. Paid execution is off or a budget is spent; it resumes automatically when budget allows.' };
+    case 'PAUSED_AWAITING_CAPACITY': return { label: 'PAUSED — AWAITING CAPACITY', tone: 'warning', description: 'Not failed. The qualified routes are at their rate, quota or concurrency limit; it resumes automatically when one has room.' };
+    case 'PAUSED_AWAITING_QUALIFIED_CAPACITY': return { label: 'PAUSED — NO QUALIFIED ROUTE', tone: 'warning', description: 'Not failed. No route is qualified for this task class (or the pinned one cannot run). Nothing weaker was substituted.' };
+    case 'PAUSED_AWAITING_APPROVAL': return { label: 'PAUSED — AWAITING APPROVAL', tone: 'warning', description: 'Not failed. A human approval is required before it continues.' };
+    case 'RECONCILING_UNKNOWN_EXECUTION': return { label: 'RECONCILING — OUTCOME UNKNOWN', tone: 'warning', description: 'A provider call may have been processed. It is never retried automatically; an operator must reconcile it.' };
+    case 'AWAITING_CONTINUATION': return { label: 'AWAITING CONTINUATION', tone: 'inert', description: 'A segment finished; the next segment continues from a signed checkpoint.' };
+    case 'ROUTE_SWITCHING': return { label: 'SWITCHING ROUTE', tone: 'inert', description: 'Moving to a qualified same-or-stronger route after a checkpoint.' };
+    case 'RESUMING': return { label: 'RESUMING', tone: 'inert', description: 'A qualified route is available again; resuming through the normal path.' };
+    case 'CHECKPOINTING': return { label: 'CHECKPOINTING', tone: 'inert', description: 'Writing a signed checkpoint.' };
     case null: case undefined: case '': return { label: 'UNKNOWN', tone: 'inert', description: 'No status recorded.' };
     default: return { label: status.replace(/_/g, ' '), tone: 'inert', description: status };
   }
 }
+
+/** Non-terminal continuity states: paused or reconciling, never failed. */
+export const CONTINUITY_PAUSE_STATES = ['PAUSED_AWAITING_BUDGET', 'PAUSED_AWAITING_CAPACITY', 'PAUSED_AWAITING_QUALIFIED_CAPACITY', 'PAUSED_AWAITING_APPROVAL', 'RECONCILING_UNKNOWN_EXECUTION'] as const;
+export const isPausedStatus = (s: string | null | undefined): boolean => !!s && (CONTINUITY_PAUSE_STATES as readonly string[]).includes(s);
 
 /** A signed receipt payload's outcome. Absent = a receipt from before outcomes were signed. */
 export function receiptOutcomeLabel(outcome: unknown): { label: string; tone: Tone; description: string } {

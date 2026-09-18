@@ -74,6 +74,8 @@ export interface ActivityLedgerEvent {
     // Scoped-verification outcomes reported by the canonical fabric.
     | 'AEGIS_INCOMPLETE'
     | 'AEGIS_INSTRUCTION_FAILED'
+    | 'TASK_PAUSED'
+    | 'RECONCILIATION_REQUIRED'
     | 'CANONICAL_EXECUTION_FAILED';
   actorRole: AgentRole;
   actorModel?: string;

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { AIModelInfo, ModelRouterRule, ActiveTab } from '../types';
 import { SetupWizardCard } from './SetupWizardCard';
+import { CanonicalRouterPanel } from './registry/CanonicalRouterPanel';
 import { 
   Network, ExternalLink, Zap, DollarSign, Activity, 
   Layers, CheckCircle2, Shield, Play, RefreshCw, 
@@ -11,13 +12,12 @@ import {
 import { 
   OpenRouterModel, 
   AgentRoleModelMapping, 
-  FALLBACK_FREE_MODELS, 
   DEFAULT_AGENT_MODEL_MATRIX,
-  fetchAndSyncFreeOpenRouterModels,
-  resolveZeroCostModelForTask
 } from '../services/openRouterService';
 
 interface ModelRouterViewProps {
+  /** The workspace whose routing constraints and paused tasks are shown. */
+  workspaceId?: string;
   models: Record<string, AIModelInfo>;
   rules: ModelRouterRule[];
   onUpdateRule: (id: string, updates: Partial<ModelRouterRule>) => void;
@@ -28,6 +28,7 @@ interface ModelRouterViewProps {
 }
 
 export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
+  workspaceId = '',
   models,
   rules,
   onUpdateRule,
@@ -37,22 +38,29 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
   onSelectTab,
 }) => {
   // Navigation tab inside Model Router
-  const [activeRouterTab, setActiveRouterTab] = useState<'free-hub' | 'agent-matrix' | 'sandbox' | 'custom-rules'>('free-hub');
+  // 'canonical' is the real router (lib/registry/router.ts). The other tabs
+  // keep their layout (PRESERVE_VISUAL_UX_ONLY) but now read the registry and
+  // the router instead of a browser-side OpenRouter fetch and keyword guesses.
+  const [activeRouterTab, setActiveRouterTab] = useState<'canonical' | 'free-hub' | 'agent-matrix' | 'sandbox' | 'custom-rules'>('canonical');
 
   // OpenRouter Free Models state
-  const [freeModels, setFreeModels] = useState<OpenRouterModel[]>(FALLBACK_FREE_MODELS);
+  // Free offerings come from the model registry (route imports), never from a
+  // hardcoded list or a browser-side provider call. Empty until imported.
+  const [freeModels, setFreeModels] = useState<OpenRouterModel[]>([]);
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isSyncingModels, setIsSyncingModels] = useState<boolean>(false);
   const [lastSyncTime, setLastSyncTime] = useState<string>('Active');
   const [isLiveApi, setIsLiveApi] = useState<boolean>(false);
-  const [openRouterApiKey, setOpenRouterApiKey] = useState<string>(() => localStorage.getItem('hermes_openrouter_key') || '');
+  // Provider credentials live on the server (env / encrypted store), never in browser storage.
+  const openRouterApiKey = '';
   const [zeroCostModeEnabled, setZeroCostModeEnabled] = useState<boolean>(true);
   const [agentMatrix, setAgentMatrix] = useState<AgentRoleModelMapping[]>(DEFAULT_AGENT_MODEL_MATRIX);
 
   // Sandbox testing states
   const [testPrompt, setTestPrompt] = useState('Analyze mathematical convergence in DeepSeek R1 and write a TypeScript refactoring patch');
   const [selectedAgentRole, setSelectedAgentRole] = useState<string>('chief-of-staff');
+  const [sandboxTaskClass, setSandboxTaskClass] = useState<string>('content_generation');
   const [routingStrategy, setRoutingStrategy] = useState<'smart-auto' | 'lowest-cost' | 'lowest-latency' | 'deep-reasoning'>('smart-auto');
   const [isRouting, setIsRouting] = useState(false);
   const [routeResult, setRouteResult] = useState<{
@@ -71,19 +79,29 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
   const [newRuleTarget, setNewRuleTarget] = useState('claudecode');
   const [newRuleFallback, setNewRuleFallback] = useState('gemini');
 
-  // Sync handler
+  // Free offerings, from the local registry. Zero provider calls.
+  const loadRegistryFreeModels = async (): Promise<number> => {
+    const r = await fetch(`/api/registry/models?workspaceId=${encodeURIComponent(workspaceId)}`);
+    const j = await r.json().catch(() => null);
+    const list: OpenRouterModel[] = (j?.models || [])
+      .filter((m: any) => m.freeTier?.free)
+      .map((m: any) => ({
+        id: `${m.providerId}/${m.modelId}`,
+        name: m.displayName,
+        description: `${m.routeKind ?? 'DIRECT'} route · ${m.freeTier?.guaranteed ? 'free (guaranteed)' : 'free (volatile — may change without notice)'} · ${m.availability}`,
+        context_length: m.limits?.contextTokens ?? 0,
+        category: 'General',
+      } as OpenRouterModel));
+    setFreeModels(list);
+    setLastSyncTime(new Date().toLocaleTimeString());
+    setIsLiveApi(false);
+    return list.length;
+  };
+  useEffect(() => { loadRegistryFreeModels().catch(() => {}); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [workspaceId]);
+
   const handleSyncFreeModels = async () => {
     setIsSyncingModels(true);
-    try {
-      const res = await fetchAndSyncFreeOpenRouterModels(openRouterApiKey);
-      setFreeModels(res.models);
-      setLastSyncTime(res.timestamp);
-      setIsLiveApi(res.isLiveApi);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setIsSyncingModels(false);
-    }
+    try { await loadRegistryFreeModels(); } catch (err) { console.error(err); } finally { setIsSyncingModels(false); }
   };
 
   // Filter free models
@@ -96,85 +114,32 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
     return matchesCat && matchesSearch;
   });
 
-  // Handle Route Test Simulation
+  // Router sandbox: a PREVIEW from the canonical router. Nothing is sent to
+  // any provider, and there is no fallback ladder — the router either selects
+  // a qualified route or says why none can run.
   const handleTestRoute = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!testPrompt.trim() || isRouting) return;
-
     setIsRouting(true);
-
-    if (zeroCostModeEnabled) {
-      const zeroCostRoute = resolveZeroCostModelForTask(
-        testPrompt,
-        selectedAgentRole,
-        agentMatrix,
-        freeModels
-      );
-
-      try {
-        const output = await onSendQuery(testPrompt, 'gemini');
-        setRouteResult({
-          selectedModel: zeroCostRoute.primaryModelId,
-          fallbackChain: zeroCostRoute.fallbackChain,
-          estimatedCost: '$0.0000 (Free :free tier)',
-          decisionReason: `Zero-Cost Arbitrage: ${zeroCostRoute.rationale} [Context: ${Math.round(zeroCostRoute.contextWindow / 1000)}k]`,
-          output
-        });
-      } catch (err: any) {
-        // Pass X / Workstream A2 — a real query failure is reported as a
-        // real failure, never disguised as a completed simulation.
-        setRouteResult({
-          selectedModel: zeroCostRoute.primaryModelId,
-          fallbackChain: zeroCostRoute.fallbackChain,
-          estimatedCost: '$0.0000 (Free)',
-          decisionReason: `Zero-Cost Arbitrage: ${zeroCostRoute.rationale}`,
-          output: `Route selection succeeded, but the query itself failed: ${err?.message || 'unknown error'}.`,
-          failed: true,
-        });
-      } finally {
-        setIsRouting(false);
-      }
-      return;
-    }
-
-    // Default fallback rules — routing target/rationale are real, static
-    // config; cost is genuinely UNAVAILABLE (no per-token pricing lookup is
-    // wired to this simulator — see G3's estimatePlan() for the app's one
-    // real cost estimator, not duplicated here) and latency was previously
-    // a hardcoded guess per target, removed rather than fabricated further.
-    let target = 'gemini';
-    let fallbacks = ['hermes', 'chatgpt'];
-    let reason = 'General Conversational Query';
-
-    const lower = testPrompt.toLowerCase();
-    if (lower.includes('code') || lower.includes('typescript') || lower.includes('patch') || lower.includes('refactor')) {
-      target = 'claudecode';
-      fallbacks = ['deepseek', 'codex', 'gemini'];
-      reason = 'Matched Rule: Deep Code Surgery & Multi-File Architecture';
-    } else if (lower.includes('math') || lower.includes('proof') || lower.includes('calculate') || lower.includes('convergence')) {
-      target = 'deepseek';
-      fallbacks = ['chatgpt', 'claudecode', 'gemini'];
-      reason = 'Matched Rule: Mathematical Proofs & Chain-of-Thought Telemetry';
-    }
-
+    const mode = zeroCostModeEnabled ? 'FREE_WHEN_QUALIFIED'
+      : routingStrategy === 'lowest-cost' ? 'LOWEST_COST_QUALIFIED'
+      : routingStrategy === 'lowest-latency' ? 'FASTEST_QUALIFIED'
+      : 'BEST_QUALIFIED';
     try {
-      const output = await onSendQuery(testPrompt, target);
+      const r = await fetch('/api/router/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceId, taskClass: sandboxTaskClass, inputChars: testPrompt.length, constraints: { mode } }) });
+      const j = await r.json().catch(() => null);
+      if (!j?.success) throw new Error(j?.error || `HTTP ${r.status}`);
+      const d = j.decision;
+      const eligible = (d.candidates || []).filter((c: any) => !c.disqualified.length && c.routeKey !== (d.selected ? `${d.selected.providerId}/${d.selected.modelId}@${d.selected.deploymentId}` : ''));
       setRouteResult({
-        selectedModel: target,
-        fallbackChain: fallbacks,
-        estimatedCost: 'UNAVAILABLE',
-        decisionReason: reason,
-        output
+        selectedModel: d.selected ? `${d.selected.canonicalVersionId ?? `${d.selected.providerId}/${d.selected.modelId}`} via ${d.selected.providerId}` : `NO QUALIFIED ROUTE (${d.waitState ?? d.outcome})`,
+        fallbackChain: eligible.slice(0, 4).map((c: any) => `${c.routeKey} (considered, not a fallback)`),
+        estimatedCost: d.selected?.estimatedCostUsd == null ? 'UNKNOWN' : `≤ $${Number(d.selected.estimatedCostUsd).toFixed(6)}`,
+        decisionReason: `${d.mode} · ${d.policy.policyId} v${d.policy.version} — ${d.explanation}`,
+        failed: !d.selected,
       });
     } catch (err: any) {
-      setRouteResult({
-        selectedModel: target,
-        fallbackChain: fallbacks,
-        estimatedCost: 'UNAVAILABLE',
-        decisionReason: reason,
-        output: `Route selection succeeded, but the query itself failed: ${err?.message || 'unknown error'}.`,
-        failed: true,
-      });
+      setRouteResult({ selectedModel: 'UNKNOWN', fallbackChain: [], estimatedCost: 'UNKNOWN', decisionReason: `Router preview failed: ${err?.message || 'unknown error'}`, failed: true });
     } finally {
       setIsRouting(false);
     }
@@ -257,12 +222,12 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
           pendingLabel: "Offline",
         }}
         inputConfig={{
-          label: "OPENROUTER API KEY (OPTIONAL FOR HIGHER RATE LIMITS)",
+          label: "OPENROUTER CREDENTIAL — SERVER-SIDE ONLY",
           value: openRouterApiKey,
-          placeholder: "sk-or-v1-...",
+          placeholder: "Set OPENROUTER_API_KEY on the server",
           type: "password",
-          helperText: "Zero-cost endpoints (:free) work without a balance. Key unlocks 50+ req/min.",
-          onChange: (val) => setOpenRouterApiKey(val),
+          helperText: "Credentials are never entered or stored in the browser. Set OPENROUTER_API_KEY in the server environment; the registry reports whether it resolves.",
+          onChange: () => { /* intentionally inert: see helperText */ },
         }}
         secondaryConfig={{
           label: "ZERO-COST ROUTING MODE",
@@ -273,31 +238,21 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
             { label: "Active (Prioritize 29+ Free :free Endpoints)", value: "enabled" },
             { label: "Disabled (Direct Frontier Model Calling)", value: "disabled" },
           ],
-          helperText: "Automatically falls back from DeepSeek R1 (:free) to Qwen 2.5 (:free) and Gemma 2 (:free).",
+          helperText: "Prefers qualified free routes (FREE_WHEN_QUALIFIED). Never falls back to an unqualified route.",
           onChange: (val) => setZeroCostModeEnabled(val === "enabled"),
         }}
         onTestConnection={async () => {
           setIsSyncingModels(true);
           try {
-            const res = await fetchAndSyncFreeOpenRouterModels(openRouterApiKey);
-            setFreeModels(res.models);
-            setLastSyncTime(res.timestamp);
-            setIsLiveApi(res.isLiveApi);
-            return {
-              success: true,
-              message: `Successfully synchronized ${res.models.length} free models via OpenRouter endpoint. Live fallback ladder active.`,
-            };
+            const n = await loadRegistryFreeModels();
+            return { success: true, message: `${n} free route offering(s) in the local model registry. Nothing was fetched from OpenRouter.` };
           } catch (e) {
-            return {
-              success: false,
-              message: "Failed to connect to OpenRouter API. Using cached fallback models.",
-            };
+            return { success: false, message: 'The model registry could not be read.' };
           } finally {
             setIsSyncingModels(false);
           }
         }}
         onSave={() => {
-          localStorage.setItem('hermes_openrouter_key', openRouterApiKey);
           localStorage.setItem('hermes_zero_cost_mode', zeroCostModeEnabled ? '1' : '0');
         }}
         howToGuide={{
@@ -318,7 +273,8 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
       {/* Sub-Navigation Tabs within Model Router */}
       <div className="flex items-center gap-2 border-b border-[#1A1D2E] pb-3 overflow-x-auto">
         {[
-          { id: 'free-hub', label: `29+ Free Model Catalog (${freeModels.length})`, icon: Sparkles },
+          { id: 'canonical', label: 'Canonical Router', icon: Network },
+          { id: 'free-hub', label: `Free Routes in Registry (${freeModels.length})`, icon: Sparkles },
           { id: 'agent-matrix', label: 'Agent Role Allocation Matrix', icon: Cpu },
           { id: 'sandbox', label: 'Router Testing Sandbox', icon: Play },
           { id: 'custom-rules', label: `Custom Routing Rules (${rules.length})`, icon: Sliders }
@@ -342,9 +298,16 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
         })}
       </div>
 
-      {/* TAB 1: 29+ Free Model Catalog */}
+      {activeRouterTab === 'canonical' && (
+        <CanonicalRouterPanel workspaceId={workspaceId} />
+      )}
+
+      {/* TAB 1: Free routes — from the model registry (route imports) */}
       {activeRouterTab === 'free-hub' && (
         <div className="space-y-6">
+          <div className="text-[11px] text-[#8E94B8] bg-[#090A14] p-3 rounded-xl border border-[#1C1F33]" data-testid="free-routes-source">
+            Free offerings come from the Model Registry (Admin → Providers &amp; Models → Route imports): metadata an operator imports, never fetched from this page. A free route is volatile unless its provider guarantees it, and — like every route — runs only when qualified for the task class.{freeModels.length === 0 ? ' None imported yet.' : ''}
+          </div>
           {/* Controls Bar: Search & Category Filter */}
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-[#090A14] p-4 rounded-2xl border border-[#1C1F33]">
             {/* Search input */}
@@ -565,6 +528,18 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
 
                 <div>
                   <label className="text-[11px] font-mono text-[#8E94B8] block mb-1">
+                    TASK CLASS (REGISTRY DATA)
+                  </label>
+                  <input
+                    value={sandboxTaskClass}
+                    onChange={(e) => setSandboxTaskClass(e.target.value)}
+                    className="w-full bg-[#05060B] border border-[#1E223D] rounded-xl p-2.5 text-xs text-white focus:outline-none focus:border-[#615EFF]"
+                    aria-label="Task class"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-mono text-[#8E94B8] block mb-1">
                     TEST PROMPT DIRECTIVE
                   </label>
                   <textarea
@@ -586,7 +561,7 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
                     className="airbyte-btn-primary px-4 py-2 text-xs font-bold flex items-center gap-1.5 disabled:opacity-50"
                   >
                     <Play className={`w-3 h-3 ${isRouting ? 'animate-spin' : ''}`} />
-                    <span>{isRouting ? 'ARBITRATING...' : 'ROUTE & EXECUTE'}</span>
+                    <span>{isRouting ? 'ROUTING...' : 'PREVIEW ROUTE (NOTHING IS SENT)'}</span>
                   </button>
                 </div>
               </form>
@@ -628,7 +603,7 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
                 {/* Waterfall Visualizer */}
                 <div>
                   <span className="text-[10px] text-[#6A7097] block uppercase font-mono mb-1.5">
-                    Zero-Cost Fallback Ladder
+                    Other eligible routes considered (the router never falls back silently)
                   </span>
                   <div className="flex items-center gap-2 overflow-x-auto pb-1 text-[11px] font-mono">
                     <span className="bg-[#00D26A]/20 text-[#00D26A] border border-[#00D26A]/40 px-2.5 py-1 rounded-lg font-bold flex items-center gap-1">
@@ -669,17 +644,18 @@ export const ModelRouterView: React.FC<ModelRouterViewProps> = ({
               </p>
 
               <div className="space-y-2 text-xs font-mono">
+                {/* Previously hardcoded run-rate / coverage / savings figures; no measurement backs them. */}
                 <div className="p-2.5 bg-[#05060B] rounded-xl border border-[#1A1D30] flex items-center justify-between">
                   <span className="text-[#8E94B8]">Daily Token Run-Rate:</span>
-                  <span className="text-white font-bold">12.5M Tokens</span>
+                  <span className="text-[#7E8BB5] font-bold">UNKNOWN — see Spend Control</span>
                 </div>
                 <div className="p-2.5 bg-[#05060B] rounded-xl border border-[#1A1D30] flex items-center justify-between">
                   <span className="text-[#8E94B8]">Zero-Cost Coverage:</span>
-                  <span className="text-[#00D26A] font-bold">88.4%</span>
+                  <span className="text-[#7E8BB5] font-bold">UNKNOWN</span>
                 </div>
                 <div className="p-2.5 bg-[#05060B] rounded-xl border border-[#1A1D30] flex items-center justify-between">
                   <span className="text-[#8E94B8]">Monthly Savings:</span>
-                  <span className="text-[#FF5E8E] font-bold">$1,240.00</span>
+                  <span className="text-[#7E8BB5] font-bold">UNKNOWN</span>
                 </div>
               </div>
             </div>

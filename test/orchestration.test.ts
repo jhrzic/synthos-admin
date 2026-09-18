@@ -417,13 +417,14 @@ describe('next-task advancement', () => {
     expect(tick.steps.length).toBeLessThanOrEqual(2);
   });
 
-  it('a failed task does not stop the loop', async () => {
+  it('a task that cannot finish (here: the provider rate-limits it) does not stop the loop', async () => {
     PROVIDER = 'error';
     const failing = queueModelTask(WS_A, 'failing');
     PROVIDER = 'error';
     const step = await advanceTask(getOrchestratorTask(failing, WS_A)!);
-    expect(step.outcome).toBe('FAILED');
-    expect(getOrchestratorTask(failing, WS_A)!.status).toBe('FAILED');
+    // A 429 is a capacity condition: the task waits (not FAILED, not retried).
+    expect(step.outcome).toBe('DEFERRED');
+    expect(getOrchestratorTask(failing, WS_A)!.status).toBe('PAUSED_AWAITING_CAPACITY');
 
     PROVIDER = 'ok';
     const next = queueToolTask(WS_A, 'brain.search', { query: 'after-failure' }, 'afterfail');

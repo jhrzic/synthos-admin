@@ -17,6 +17,7 @@ import {
   validateManifest, verifyManifestSignature, canonicalJson, sha256, modelRecordHash,
 } from './schema';
 import { isTestEnvironment } from './endpoints';
+import { applyIdentity, ensureIdentityTables } from './identity';
 import type { RegistryManifest, ModelManifest, ManifestSource, ProviderManifestBody } from './types';
 
 let ensured = false;
@@ -154,6 +155,10 @@ export interface ImportOutcome {
   unchanged: string[];
   removed: string[];
   signatureStatus: 'VERIFIED' | 'NOT_REQUIRED' | 'MISSING' | 'UNTRUSTED_KEY' | 'INVALID';
+  /** Identity claims that disagreed with the registry — failed closed, review required. */
+  identityConflicts?: string[];
+  /** Route→version proposals awaiting an operator's approval. */
+  identityPending?: string[];
 }
 
 function logImport(o: ImportOutcome, source: ManifestSource, actor: string | null, manifestHash: string | null, manifestVersion: string | null): void {
@@ -176,6 +181,7 @@ function logImport(o: ImportOutcome, source: ManifestSource, actor: string | nul
  * UNQUALIFIED and cannot execute until an operator says otherwise.
  */
 export function importManifest(raw: unknown, opts: { source: Exclude<ManifestSource, 'DISCOVERY'>; actor?: string | null }): ImportOutcome {
+  ensureIdentityTables();
   ensureRegistryTables();
   const importId = newId('rim');
   const base: ImportOutcome = { ok: false, importId, providerId: null, errors: [], warnings: [], added: [], changed: [], unchanged: [], removed: [], signatureStatus: 'NOT_REQUIRED' };
@@ -285,6 +291,11 @@ export function importManifest(raw: unknown, opts: { source: Exclude<ManifestSou
     for (const id of base.removed) delAlias.run(providerId, id);
     const ins = db.prepare('INSERT INTO registry_aliases (provider_id, alias, model_id, import_id, updated_at) VALUES (?, ?, ?, ?, ?)');
     for (const model of m.models) for (const alias of model.aliases) ins.run(providerId, alias, model.modelId, importId, now);
+    // Identity (family / canonical version / route mapping / deployments), in
+    // the same transaction: route and identity land together or not at all.
+    const identity = applyIdentity(db, m.provider, m.models, now);
+    base.identityConflicts = identity.conflicts;
+    base.identityPending = identity.pending;
     db.exec('COMMIT');
   } catch (err: any) {
     try { db.exec('ROLLBACK'); } catch { /* nothing to roll back */ }

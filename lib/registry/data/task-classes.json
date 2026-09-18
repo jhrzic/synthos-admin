@@ -1,0 +1,423 @@
+{
+  "schemaVersion": "synthos.task-classes/v1",
+  "dataVersion": "2026.09.18-2",
+  "taskClasses": [
+    {
+      "taskClassId": "literal_transformation",
+      "displayName": "Literal transformation",
+      "description": "Reproduce or transform text exactly as instructed; any deviation fails.",
+      "outputContract": "LITERAL",
+      "requiredCapabilities": [
+        "text.output"
+      ],
+      "modality": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "segmentable": false,
+      "evalSuiteId": "suite.literal",
+      "minQuality": 0.98,
+      "minReliability": 0.95,
+      "qualificationValidityDays": 90,
+      "minContextTokens": null,
+      "requiredTools": [],
+      "callSites": [
+        "credential.verify.gemini",
+        "credential.verify.openai",
+        "admin.preview"
+      ],
+      "defaultForContracts": [
+        "LITERAL"
+      ],
+      "maxContinuations": 0
+    },
+    {
+      "taskClassId": "json_extraction",
+      "displayName": "JSON extraction",
+      "description": "Return one JSON object with required keys; unparseable or incomplete output fails.",
+      "outputContract": "JSON_OBJECT",
+      "requiredCapabilities": [
+        "text.output"
+      ],
+      "modality": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "segmentable": false,
+      "evalSuiteId": "suite.json",
+      "minQuality": 0.95,
+      "minReliability": 0.95,
+      "qualificationValidityDays": 90,
+      "minContextTokens": null,
+      "requiredTools": [],
+      "callSites": [
+        "evaluation.preview"
+      ],
+      "defaultForContracts": [
+        "JSON_OBJECT"
+      ],
+      "maxContinuations": 0
+    },
+    {
+      "taskClassId": "summarization",
+      "displayName": "Summarization",
+      "description": "Condense supplied material without adding facts.",
+      "outputContract": "NARRATIVE",
+      "requiredCapabilities": [
+        "text.output"
+      ],
+      "modality": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "segmentable": true,
+      "evalSuiteId": "suite.summarization",
+      "minQuality": 0.8,
+      "minReliability": 0.9,
+      "qualificationValidityDays": 60,
+      "minContextTokens": null,
+      "requiredTools": [],
+      "callSites": [
+        "youtube.audit",
+        "youtube.ingest"
+      ],
+      "defaultForContracts": [],
+      "maxContinuations": 2
+    },
+    {
+      "taskClassId": "research_synthesis",
+      "displayName": "Research synthesis",
+      "description": "Combine sources into a sourced brief.",
+      "outputContract": "NARRATIVE",
+      "requiredCapabilities": [
+        "text.output"
+      ],
+      "modality": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "segmentable": true,
+      "evalSuiteId": "suite.research",
+      "minQuality": 0.8,
+      "minReliability": 0.9,
+      "qualificationValidityDays": 60,
+      "minContextTokens": null,
+      "requiredTools": [],
+      "callSites": [
+        "research.synthesis",
+        "aeo.geo_probe",
+        "aeo.public_check"
+      ],
+      "defaultForContracts": [],
+      "maxContinuations": 2
+    },
+    {
+      "taskClassId": "content_generation",
+      "displayName": "Content generation",
+      "description": "Agent-authored narrative work (briefs, copy, memos) under a task contract.",
+      "outputContract": "NARRATIVE",
+      "requiredCapabilities": [
+        "text.output"
+      ],
+      "modality": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "segmentable": true,
+      "evalSuiteId": "suite.content",
+      "minQuality": 0.75,
+      "minReliability": 0.9,
+      "qualificationValidityDays": 60,
+      "minContextTokens": null,
+      "requiredTools": [],
+      "callSites": [
+        "kernel.model_task"
+      ],
+      "defaultForContracts": [
+        "NARRATIVE"
+      ],
+      "maxContinuations": 2
+    },
+    {
+      "taskClassId": "conversation",
+      "displayName": "Conversation",
+      "description": "Replies inside an operator or business conversation.",
+      "outputContract": "NARRATIVE",
+      "requiredCapabilities": [
+        "text.output"
+      ],
+      "modality": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "segmentable": false,
+      "evalSuiteId": "suite.conversation",
+      "minQuality": 0.75,
+      "minReliability": 0.9,
+      "qualificationValidityDays": 60,
+      "minContextTokens": null,
+      "requiredTools": [],
+      "callSites": [
+        "concierge.reply",
+        "jarvis.command",
+        "api.generate"
+      ],
+      "defaultForContracts": [],
+      "maxContinuations": 0
+    },
+    {
+      "taskClassId": "planning",
+      "displayName": "Planning",
+      "description": "Decompose an objective into ordered, checkable steps.",
+      "outputContract": "NARRATIVE",
+      "requiredCapabilities": [
+        "text.output"
+      ],
+      "modality": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "segmentable": false,
+      "evalSuiteId": "suite.planning",
+      "minQuality": 0.8,
+      "minReliability": 0.9,
+      "qualificationValidityDays": 60,
+      "minContextTokens": null,
+      "requiredTools": [],
+      "callSites": [
+        "orchestrator.decompose"
+      ],
+      "defaultForContracts": [],
+      "maxContinuations": 0
+    },
+    {
+      "taskClassId": "coding",
+      "displayName": "Coding",
+      "description": "Produce code that satisfies a stated specification.",
+      "outputContract": "NARRATIVE",
+      "requiredCapabilities": [
+        "text.output"
+      ],
+      "modality": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "segmentable": true,
+      "evalSuiteId": "suite.coding",
+      "minQuality": 0.85,
+      "minReliability": 0.9,
+      "qualificationValidityDays": 45,
+      "minContextTokens": null,
+      "requiredTools": [],
+      "callSites": [],
+      "defaultForContracts": [],
+      "maxContinuations": 2
+    },
+    {
+      "taskClassId": "code_review",
+      "displayName": "Code review",
+      "description": "Assess code or a change for defects and risks.",
+      "outputContract": "NARRATIVE",
+      "requiredCapabilities": [
+        "text.output"
+      ],
+      "modality": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "segmentable": false,
+      "evalSuiteId": "suite.code_review",
+      "minQuality": 0.8,
+      "minReliability": 0.9,
+      "qualificationValidityDays": 45,
+      "minContextTokens": null,
+      "requiredTools": [],
+      "callSites": [
+        "development.review"
+      ],
+      "defaultForContracts": [],
+      "maxContinuations": 0
+    },
+    {
+      "taskClassId": "tool_use",
+      "displayName": "Tool use",
+      "description": "Select and call declared tools with valid arguments.",
+      "outputContract": "NARRATIVE",
+      "requiredCapabilities": [
+        "tools.function_calling"
+      ],
+      "modality": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "segmentable": false,
+      "evalSuiteId": "suite.tool_use",
+      "minQuality": 0.9,
+      "minReliability": 0.95,
+      "qualificationValidityDays": 45,
+      "minContextTokens": null,
+      "requiredTools": [
+        "function_calling"
+      ],
+      "callSites": [
+        "skill.model"
+      ],
+      "defaultForContracts": [],
+      "maxContinuations": 0
+    },
+    {
+      "taskClassId": "long_context_reasoning",
+      "displayName": "Long-context reasoning",
+      "description": "Reason over inputs larger than 100k tokens without dropping constraints.",
+      "outputContract": "NARRATIVE",
+      "requiredCapabilities": [
+        "text.output"
+      ],
+      "modality": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "segmentable": true,
+      "evalSuiteId": "suite.long_context",
+      "minQuality": 0.8,
+      "minReliability": 0.9,
+      "qualificationValidityDays": 45,
+      "minContextTokens": 100000,
+      "requiredTools": [],
+      "callSites": [],
+      "defaultForContracts": [],
+      "maxContinuations": 2
+    },
+    {
+      "taskClassId": "image_understanding",
+      "displayName": "Image understanding",
+      "description": "Describe or extract facts from supplied images.",
+      "outputContract": "NARRATIVE",
+      "requiredCapabilities": [
+        "image.input"
+      ],
+      "modality": {
+        "input": [
+          "text",
+          "image"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "segmentable": false,
+      "evalSuiteId": "suite.image",
+      "minQuality": 0.8,
+      "minReliability": 0.9,
+      "qualificationValidityDays": 45,
+      "minContextTokens": null,
+      "requiredTools": [],
+      "callSites": [],
+      "defaultForContracts": [],
+      "maxContinuations": 0
+    },
+    {
+      "taskClassId": "speech",
+      "displayName": "Speech",
+      "description": "Speech synthesis or transcription.",
+      "outputContract": "NARRATIVE",
+      "requiredCapabilities": [
+        "audio.output"
+      ],
+      "modality": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "audio"
+        ]
+      },
+      "segmentable": false,
+      "evalSuiteId": "suite.speech",
+      "minQuality": 0.8,
+      "minReliability": 0.9,
+      "qualificationValidityDays": 45,
+      "minContextTokens": null,
+      "requiredTools": [],
+      "callSites": [
+        "voice.fish",
+        "voice.fish.free_tier"
+      ],
+      "defaultForContracts": [],
+      "maxContinuations": 0
+    },
+    {
+      "taskClassId": "agent_orchestration",
+      "displayName": "Agent orchestration",
+      "description": "A managed agent loop that plans, calls tools and reports.",
+      "outputContract": "NARRATIVE",
+      "requiredCapabilities": [
+        "text.output"
+      ],
+      "modality": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "segmentable": false,
+      "evalSuiteId": "suite.agent",
+      "minQuality": 0.8,
+      "minReliability": 0.9,
+      "qualificationValidityDays": 30,
+      "minContextTokens": null,
+      "requiredTools": [],
+      "callSites": [
+        "runtime.antigravity"
+      ],
+      "defaultForContracts": [],
+      "maxContinuations": 0
+    }
+  ]
+}

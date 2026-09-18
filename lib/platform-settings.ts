@@ -28,7 +28,7 @@
 
 import { getDatabase } from './persistence';
 
-export const PLATFORM_SETTING_KEYS = ['antigravity.enabled', 'autonomy.level', 'spend.policy', 'registry.manualDiscovery'] as const;
+export const PLATFORM_SETTING_KEYS = ['antigravity.enabled', 'autonomy.level', 'spend.policy', 'registry.manualDiscovery', 'registry.routeRefresh', 'router.policy'] as const;
 export type PlatformSettingKey = (typeof PLATFORM_SETTING_KEYS)[number];
 
 /** The environment variable that, when set, overrides each setting. */

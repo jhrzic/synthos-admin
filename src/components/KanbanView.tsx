@@ -20,6 +20,7 @@ import {
 import { VerificationOutcomePanel, TaskStatusBadge } from './verification/outcome';
 import { RegistryModelSelect } from './registry/RegistryModelSelect';
 import { EvaluationRequestPanel } from './registry/EvaluationRequestPanel';
+import { TaskRoutingPanel } from './registry/TaskRoutingPanel';
 
 interface KanbanViewProps {
   tasks: KanbanTask[];
@@ -136,7 +137,7 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
   const [highlightCriticalOnly, setHighlightCriticalOnly] = useState<boolean>(false);
   const [highlightedTaskId, setHighlightedTaskId] = useState<string | null>(null);
   const [selectedTaskForDetail, setSelectedTaskForDetail] = useState<KanbanTask | null>(null);
-  const [detailTab, setDetailTab] = useState<'overview' | 'trace' | 'dependencies' | 'artifact' | 'receipt'>('overview');
+  const [detailTab, setDetailTab] = useState<'overview' | 'routing' | 'trace' | 'dependencies' | 'artifact' | 'receipt'>('overview');
 
   // Triage Staging Bar State
   const [triageInput, setTriageInput] = useState('');
@@ -1294,6 +1295,14 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
                 Overview & Subtasks
               </button>
               <button
+                onClick={() => setDetailTab('routing')}
+                className={`px-3 py-1.5 rounded-lg transition ${
+                  detailTab === 'routing' ? 'bg-[#615EFF] text-white font-bold' : 'text-[#8E94B8] hover:text-white'
+                }`}
+              >
+                Routing &amp; Continuity
+              </button>
+              <button
                 onClick={() => setDetailTab('trace')}
                 className={`px-3 py-1.5 rounded-lg transition ${
                   detailTab === 'trace' ? 'bg-[#615EFF] text-white font-bold' : 'text-[#8E94B8] hover:text-white'
@@ -1403,6 +1412,10 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
                     </div>
                   </div>
                 </div>
+              )}
+
+              {detailTab === 'routing' && (
+                <TaskRoutingPanel workspaceId={activeWorkspaceId || ""} taskId={selectedTaskForDetail.id} />
               )}
 
               {detailTab === 'trace' && (

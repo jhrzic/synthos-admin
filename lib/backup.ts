@@ -26,7 +26,8 @@ import * as tar from 'tar';
 import { getDatabasePath, getDatabase } from './persistence';
 import { VAULT_ROOT } from './vault';
 
-export const BACKUP_ROOT = path.join(process.cwd(), 'backups');
+// SYNTHOS_BACKUP_DIR relocates backup archives (absolute path). Unset: ./backups.
+export const BACKUP_ROOT = process.env.SYNTHOS_BACKUP_DIR ? path.resolve(process.env.SYNTHOS_BACKUP_DIR) : path.join(process.cwd(), 'backups');
 export const STAGED_RESTORE_ROOT = path.join(BACKUP_ROOT, '.staged-restore');
 
 export const BACKUP_FORMAT_VERSION = '1.0.0';

@@ -56,14 +56,17 @@ export type EndpointResolution =
   | { ok: true; baseUrl: string; host: string; overridden: boolean }
   | { ok: false; reason: string; envVar: string | null };
 
-export function validateEndpointUrl(raw: string, provider: Pick<ProviderManifestBody, 'approvedHosts' | 'providerId'>, env: NodeJS.ProcessEnv = process.env): { ok: true; url: URL } | { ok: false; reason: string } {
+export function validateEndpointUrl(raw: string, provider: Pick<ProviderManifestBody, 'approvedHosts' | 'providerId'> & Partial<Pick<ProviderManifestBody, 'routeKind' | 'auth'>>, env: NodeJS.ProcessEnv = process.env): { ok: true; url: URL } | { ok: false; reason: string } {
   let url: URL;
   try { url = new URL(raw); } catch { return { ok: false, reason: `"${raw}" is not a valid URL` }; }
   if (url.username || url.password) return { ok: false, reason: 'the URL embeds credentials' };
   if (url.search || url.hash) return { ok: false, reason: 'a base URL must not carry a query string or fragment' };
   const host = url.hostname.toLowerCase();
   if (isLoopbackHost(host)) {
-    if (!loopbackProvidersAllowed(env)) return { ok: false, reason: `loopback host ${host} is only permitted under test or with SYNTHOS_ALLOW_LOOPBACK_PROVIDERS=true outside production` };
+    // A LOCAL route that sends no credential (e.g. a self-hosted runtime) may
+    // use loopback anywhere: there is no secret for a local listener to take.
+    const credentialFreeLocal = provider.routeKind === 'LOCAL' && provider.auth?.type === 'NONE';
+    if (!credentialFreeLocal && !loopbackProvidersAllowed(env)) return { ok: false, reason: `loopback host ${host} is only permitted under test or with SYNTHOS_ALLOW_LOOPBACK_PROVIDERS=true outside production` };
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return { ok: false, reason: 'only http(s) is supported' };
     return { ok: true, url };
   }

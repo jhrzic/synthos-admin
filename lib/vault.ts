@@ -49,7 +49,23 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { getDatabase, recordArtifact, type ArtifactRecord } from './persistence';
 
-export const VAULT_ROOT = path.join(process.cwd(), 'vault');
+// SYNTHOS_ARTIFACT_VAULT_DIR relocates the artifact vault (absolute path).
+// Unset (production): ./vault, as always. The test setup points it at a
+// per-worker temporary directory so tests never write into — or archive —
+// the real vault.
+// It may never point into the operator's real knowledge vault
+// (SYNTHOS_VAULT_PATH): that is refused at startup, loudly.
+function resolveArtifactVaultRoot(): string {
+  const override = process.env.SYNTHOS_ARTIFACT_VAULT_DIR;
+  if (!override) return path.join(process.cwd(), 'vault');
+  const root = path.resolve(override);
+  const knowledge = process.env.SYNTHOS_VAULT_PATH ? path.resolve(process.env.SYNTHOS_VAULT_PATH) : null;
+  if (knowledge && (root === knowledge || root.startsWith(knowledge + path.sep) || knowledge.startsWith(root + path.sep))) {
+    throw new Error(`SYNTHOS_ARTIFACT_VAULT_DIR (${root}) overlaps the knowledge vault SYNTHOS_VAULT_PATH (${knowledge}); refusing to write artifacts there.`);
+  }
+  return root;
+}
+export const VAULT_ROOT = resolveArtifactVaultRoot();
 
 export interface VaultEntry {
   artifact_id: string;

@@ -154,11 +154,18 @@ describe('SYNTHOS PROVIDER IDENTITY RULE: non-Gemini requests must never silentl
   it('lib/fabric/kernel.ts routes through the model registry (resolveRoute) before the task is marked RUNNING', () => {
     // The kernel no longer classifies by name prefix: the registry resolves a
     // canonical provider/model and protocol, and refuses anything else.
+    // The kernel's model step lives in lib/continuity/segment-runner.ts: a
+    // named model is resolved there, and the task claims RUNNING (the
+    // kernel's onRunning callback) only after identity resolved.
     const kernelContent = fs.readFileSync(path.resolve(process.cwd(), 'lib/fabric/kernel.ts'), 'utf-8');
-    expect(kernelContent).toContain('resolveRoute(assignedModel)');
-    expect(kernelContent).toContain('if (!route.ok) {');
+    const runner = fs.readFileSync(path.resolve(process.cwd(), 'lib/continuity/segment-runner.ts'), 'utf-8');
+    expect(kernelContent).toContain('runModelSegments({');
+    expect(runner).toContain('resolveRoute(inp.assignedModel)');
+    expect(runner).toContain('if (!route.ok) return');
     expect(kernelContent).not.toContain('classifyModelRequest(');
-    expect(kernelContent.indexOf('resolveRoute(assignedModel)')).toBeLessThan(kernelContent.indexOf('updateTaskStatus(taskId, "RUNNING"'));
+    expect(runner).not.toContain('classifyModelRequest(');
+    expect(runner.indexOf('resolveRoute(inp.assignedModel)')).toBeLessThan(runner.indexOf('inp.onRunning?.()'));
+    expect(kernelContent.indexOf('onRunning: () => {')).toBeLessThan(kernelContent.indexOf('updateTaskStatus(taskId, "RUNNING"'));
     // The old exclude-list hack (silent Gemini fallback for claude/o3/sonar
     // while leaving deepseek/hermes/perplexity/chatgpt unguarded) must be gone
     expect(kernelContent).not.toContain('!v.includes("claude")');

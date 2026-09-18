@@ -581,6 +581,16 @@ export function startScheduler(intervalMs = 10000): void {
       .then((m) => m.reconcileStaleUsage())
       .catch(() => { /* bookkeeping must never stop scheduled work */ });
 
+    // CONTINUITY — paused tasks whose condition cleared go back to READY (a
+    // routing preview; nothing dispatched here). ROUTE REFRESH — metadata
+    // only, and a no-op unless an operator switched it on (OFF by default).
+    import('../continuity/resume')
+      .then((m) => m.continuityTickForScheduler())
+      .catch(() => { /* bookkeeping must never stop scheduled work */ });
+    import('../registry/route-import')
+      .then((m) => m.routeRefreshTickForScheduler())
+      .catch(() => { /* a refresh failure marks the route STALE; it never stops the tick */ });
+
     // AUTHORITY RECORD — sign each moved workspace's chain head at most once a
     // day (throttled to one sweep an hour). Local database work only.
     import('../authority-ledger')

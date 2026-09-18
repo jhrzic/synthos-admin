@@ -209,19 +209,40 @@ describe('the fallback the guard protects against is real', () => {
     }
   });
 
-  it('artifact storage is structurally confined to the repository, whatever the environment', async () => {
-    // The milder class, asserted rather than policed. VAULT_ROOT is derived
-    // from cwd at import time, so no environment variable can point artifact
-    // writes at the operator's real vault. If this ever becomes
-    // environment-driven, this test fails and artifact-writing tests must then
-    // be isolated too.
+  it('artifact storage: ./vault by default, isolated per test worker, and never allowed inside the knowledge vault', async () => {
+    // It became environment-driven (SYNTHOS_ARTIFACT_VAULT_DIR), which is the
+    // condition this test used to warn about — so artifact-writing tests are
+    // now isolated centrally (test/setup/isolate-database.ts), and the
+    // override refuses any path that overlaps SYNTHOS_VAULT_PATH.
     const vaultSource = fs.readFileSync(path.join(process.cwd(), 'lib/vault.ts'), 'utf8');
-    expect(vaultSource).toMatch(/export const VAULT_ROOT = path\.join\(process\.cwd\(\), 'vault'\)/);
-    expect(vaultSource).not.toMatch(/process\.env\.[A-Z_]*VAULT/);
+    expect(vaultSource).toContain("if (!override) return path.join(process.cwd(), 'vault');");
+    expect(vaultSource).toContain('overlaps the knowledge vault SYNTHOS_VAULT_PATH');
 
     const { VAULT_ROOT } = await import('../lib/vault');
-    expect(VAULT_ROOT).toBe(REPO_VAULT);
+    expect(VAULT_ROOT).not.toBe(REPO_VAULT);
+    expect(VAULT_ROOT.startsWith(REPO_VAULT + path.sep)).toBe(false);
+    expect(VAULT_ROOT.startsWith(fs.realpathSync(os.tmpdir())) || VAULT_ROOT.startsWith(os.tmpdir())).toBe(true);
     expect(VAULT_ROOT.startsWith(REAL_OBSIDIAN_VAULT)).toBe(false);
+
+    const setup = fs.readFileSync(path.join(process.cwd(), 'test/setup/isolate-database.ts'), 'utf8');
+    expect(setup).toContain("process.env.SYNTHOS_ARTIFACT_VAULT_DIR = path.join(dir, 'vault');");
+  });
+
+  it('an artifact-vault override inside the knowledge vault is refused at load', async () => {
+    const { vi } = await import('vitest');
+    const prevA = process.env.SYNTHOS_ARTIFACT_VAULT_DIR; const prevK = process.env.SYNTHOS_VAULT_PATH;
+    const knowledge = fs.mkdtempSync(path.join(os.tmpdir(), 'synthos-knowledge-'));
+    process.env.SYNTHOS_VAULT_PATH = knowledge;
+    process.env.SYNTHOS_ARTIFACT_VAULT_DIR = path.join(knowledge, 'artifacts');
+    vi.resetModules();
+    try {
+      await expect(import('../lib/vault')).rejects.toThrow(/overlaps the knowledge vault/);
+    } finally {
+      process.env.SYNTHOS_ARTIFACT_VAULT_DIR = prevA;
+      if (prevK === undefined) delete process.env.SYNTHOS_VAULT_PATH; else process.env.SYNTHOS_VAULT_PATH = prevK;
+      vi.resetModules();
+      fs.rmSync(knowledge, { recursive: true, force: true });
+    }
   });
 
   it('two isolations never collide, so parallel test files cannot share a vault', async () => {

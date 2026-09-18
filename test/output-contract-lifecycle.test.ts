@@ -176,9 +176,19 @@ describe('THE LIVE PROOF, REPRODUCED — persona + output cap + integrity-only A
     reply = { text: MEMO, status: 'incomplete', outputTokens: 512, incompleteReason: 'max_output_tokens' };
     const id = task();
     await tick(); await tick(); await tick();
-    expect(requests).toHaveLength(1);
-    expect(requests.map((r) => r.model)).toEqual([MODEL]);
+    // CONTINUITY: a truncated NARRATIVE continues in at most `maxContinuations`
+    // further segments (task-class data; 2 for this class). Each is its own
+    // segment with its own ledger key — a continuation, not a retry — on the
+    // SAME model (no fallback). Once INCOMPLETE, nothing is ever called again.
+    expect(requests).toHaveLength(3);
+    expect(requests.map((r) => r.model)).toEqual([MODEL, MODEL, MODEL]);
     expect(listUsageForKey(`orchestration:${id}`)).toHaveLength(1);
+    expect(listUsageForKey(`orchestration:${id}:s2`)).toHaveLength(1);
+    expect(listUsageForKey(`orchestration:${id}:s3`)).toHaveLength(1);
+    expect(status(id)).toBe('INCOMPLETE');
+    // The continuations carried the signed checkpoint's context, not the persona again.
+    expect(requests[1].input).toMatch(/You are continuing a task/);
+    expect(requests[1].input).not.toMatch(/Scribe Knowledge Architect/);
   });
 });
 

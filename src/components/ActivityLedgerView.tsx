@@ -57,7 +57,8 @@ export const ActivityLedgerView: React.FC<ActivityLedgerViewProps> = ({ events }
               const isPassed = evt.eventType.includes('PASSED') || evt.eventType.includes('SUCCESS') || evt.eventType.includes('VERIFIED') || evt.eventType.includes('ISSUED');
               const isRejected = evt.eventType.includes('REJECTED') || evt.eventType.includes('FAILED');
               // INCOMPLETE is its own state: unfinished output, evidence kept — not a pass, not an error.
-              const isIncomplete = evt.eventType.includes('INCOMPLETE');
+              // Paused / reconciling / switching are waiting states — attention, not failure.
+              const isIncomplete = evt.eventType.includes('INCOMPLETE') || evt.eventType.includes('PAUSED') || evt.eventType.includes('RECONCILIATION') || evt.eventType.includes('ROUTE_SWITCH') || evt.eventType.includes('CHECKPOINT');
 
               return (
                 <div key={evt.id} className="p-4 hover:bg-[#141628]/60 transition flex flex-col md:flex-row md:items-center justify-between gap-4">

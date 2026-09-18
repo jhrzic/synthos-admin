@@ -22,6 +22,7 @@ import {
   parseOpenAiPricingMarkdown, parseOpenAiLongContextThreshold, parseGeminiPricingMarkdown, parseGeminiCell,
   parseAntigravityUnderlyingModel, ratesAt,
 } from '../lib/pricing/parse';
+import { listTaskClasses, insertQualificationForTest } from '../lib/registry/qualification';
 import { refreshPricingCatalog, getCatalogPrice, priceHistory, listPricingSources, PRICING_SOURCES, type TextFetcher } from '../lib/pricing/catalog';
 import { saveSpendPolicy, DEFAULT_SPEND_POLICY, getModelPrice } from '../lib/spend/policy';
 import { estimateMaxCostUsd, ANTIGRAVITY_OVERSHOOT_MARGIN } from '../lib/spend/guard';
@@ -350,6 +351,10 @@ describe('SPEND GUARD ON REGISTRY PRICES', () => {
     expect((await call('fx-flat')).lastProviderError).toMatch(/MODEL_UNQUALIFIED/);
     expect(qualifyModel('openai', 'fx-flat', 'test').ok).toBe(true);
     expect(enableModel('openai', 'fx-flat', 'test').ok).toBe(true);
+    // Task-class qualifications were bound to the OLD price: the price change
+    // invalidated them too, so the model is not qualified for any task yet.
+    expect((await call('fx-flat')).lastProviderError).toMatch(/MODEL_NOT_QUALIFIED_FOR_TASK[\s\S]*pricing rates/);
+    for (const tc of listTaskClasses()) insertQualificationForTest({ providerId: 'openai', modelId: 'fx-flat', taskClass: tc.taskClassId });
     const r = await call('fx-flat');                                          // now $0.0301 max — does not
     expect(r.lastProviderError).toMatch(/TASK_CEILING_EXCEEDED/);
     expect(resolveDefaultOpenAiModel()).toBe(selectedBefore);

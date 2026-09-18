@@ -18,6 +18,7 @@ import { normalizeGeminiUsage, normalizeOpenAiUsage, guardedPaidCall, type Norma
 import { outputCeiling, requestKey, type SpendContext } from '../spend/adapters';
 import { scrubSecrets } from '../redact';
 import type { ProtocolId } from './types';
+import { getStoredProvider } from './store';
 
 export const PROTOCOL_ADAPTER_VERSION = '1.0.0';
 
@@ -104,6 +105,10 @@ function chatText(payload: any): string {
   return typeof c === 'string' ? c : '';
 }
 
+function idempotencyHeader(providerId: string): string | null {
+  try { return getStoredProvider(providerId)?.manifest.provider.idempotency?.header ?? null; } catch { return null; }
+}
+
 async function chatCompletionsCall(p: ModelCallParams): Promise<ModelCallResult> {
   const maxOutputTokens = outputCeiling(p.spend);
   const timeoutMs = p.timeoutMs ?? 60_000;
@@ -120,7 +125,14 @@ async function chatCompletionsCall(p: ModelCallParams): Promise<ModelCallResult>
     try {
       const res = await fetch(`${p.baseUrl}/chat/completions`, {
         method: 'POST', redirect: 'error', signal: controller.signal,
-        headers: { Authorization: `Bearer ${p.apiKey}`, 'Content-Type': 'application/json' },
+        headers: {
+          // A credential-free route (a local runtime) sends no Authorization header at all.
+          ...(p.apiKey ? { Authorization: `Bearer ${p.apiKey}` } : {}),
+          'Content-Type': 'application/json',
+          // Provider-supported idempotency (manifest-declared): the SAME key the
+          // spend ledger holds, so an ambiguous outcome can be looked up rather than re-sent.
+          ...(idempotencyHeader(p.providerId) ? { [idempotencyHeader(p.providerId)!]: p.spend.idempotencyKey || '' } : {}),
+        },
         body: JSON.stringify({ model: p.modelId, messages: [{ role: 'user', content: p.contents }], max_tokens: maxOutputTokens }),
       });
       const text = (await res.text()).slice(0, 2 * 1024 * 1024);

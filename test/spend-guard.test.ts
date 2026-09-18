@@ -151,7 +151,7 @@ describe('THE NETWORK BOUNDARY', () => {
   it('one permit = one paid request: a retry/fallback inside the same call is refused', async () => {
     policy();
     let second: unknown = null;
-    await guardedPaidCall({ provider: 'openai', model: 'gpt-test-standard', callSite: 'test', idempotencyKey: key(), inputChars: 5, maxOutputTokens: 16 }, async () => {
+    await guardedPaidCall({ provider: 'openai', model: 'gpt-test-standard', callSite: 'test.permit', idempotencyKey: key(), inputChars: 5, maxOutputTokens: 16 }, async () => {
       // Both bodies match what was priced, so the ONLY reason the second is refused is that it is a second request.
       const body = JSON.stringify({ model: 'gpt-test-standard', input: 'hello', max_output_tokens: 16 });
       await fetch(`${base}/v1/responses`, { method: 'POST', body });
@@ -334,7 +334,7 @@ describe('FAILURE INJECTION — outcomes, retries and call counts', () => {
   it('a preview decides without recording or reserving anything', () => {
     policy();
     const before = (getDatabase().prepare('SELECT COUNT(*) n FROM provider_usage').get() as any).n;
-    const p = previewPaidCall({ provider: 'openai', model: 'gpt-test-standard', callSite: 't', idempotencyKey: key(), inputChars: 10, maxOutputTokens: 16 });
+    const p = previewPaidCall({ provider: 'openai', model: 'gpt-test-standard', callSite: 'test.preview', idempotencyKey: key(), inputChars: 10, maxOutputTokens: 16 });
     expect(p.permitted).toBe(true);
     expect((getDatabase().prepare('SELECT COUNT(*) n FROM provider_usage').get() as any).n).toBe(before);
   });
@@ -389,11 +389,13 @@ describe('BUDGET ALERTS — 50/75/90/100, no paid inference to produce them', ()
 });
 
 describe('ORCHESTRATION — a budget refusal makes work wait, it does not fail or spend', () => {
-  it('an orchestrated model task under a closed switch goes back to READY with zero provider calls', async () => {
-    createOrchestratedTask({ taskId: 'spend-orch-1', workspaceId: 'ws-spend-a', title: 'bounded', description: 'say hi', assignedAgent: 'scribe', assignedModel: 'gpt-5.6-terra' });
+  it('an orchestrated model task under a closed switch waits (PAUSED_AWAITING_BUDGET) with zero provider calls', async () => {
+    createOrchestratedTask({ taskId: 'spend-orch-1', workspaceId: 'ws-spend-a', title: 'bounded', description: 'say hi', assignedAgent: 'scribe', assignedModel: 'gpt-test-standard' });
     const step = await advanceTask(getOrchestratorTask('spend-orch-1', 'ws-spend-a')!);
     expect(step.outcome).toBe('DEFERRED');
-    expect(getOrchestratorTask('spend-orch-1', 'ws-spend-a')!.status).toBe('READY');
+    // Not READY (a later tick would just refuse again) and never FAILED: the
+    // scheduler's continuity sweep returns it to READY when the switch opens.
+    expect(getOrchestratorTask('spend-orch-1', 'ws-spend-a')!.status).toBe('PAUSED_AWAITING_BUDGET');
     expect(calls).toBe(0);
   });
 });

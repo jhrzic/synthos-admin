@@ -9,6 +9,7 @@ import { health as windmillHealth, isWindmillConfigured } from './windmill-clien
 import { getModelCredentialStatus, SUPPORTED_MODEL_PROVIDERS } from './model-credentials';
 import { getSchedulerHealth } from './fabric/scheduler';
 import { checkGuardianRules } from './kil-gate';
+import { VAULT_ROOT } from './vault';
 import { hermesLocalHealth, isHermesLocalConfigured, isHermesLocalEnabled } from './hermes-local-runtime';
 import { resolveProviderState, type ProviderState, type ProviderStateReport } from './provider-state';
 import { health as antigravityHealth, isAntigravityConfigured, isAntigravityEnabled } from './antigravity-client';
@@ -253,7 +254,7 @@ function computeBackupStatus(): RuntimeSystemReport {
 }
 
 function vaultStatus(): RuntimeSystemReport {
-  const vaultPath = path.join(process.cwd(), 'vault');
+  const vaultPath = VAULT_ROOT;
   const exists = fs.existsSync(vaultPath);
   return {
     system: 'Vault',

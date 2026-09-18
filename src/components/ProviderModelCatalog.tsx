@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Layers, RefreshCw, ShieldCheck, History, Upload, KeyRound, Search } from 'lucide-react';
 import { useModelRegistry, modelKey, type RegistryModel } from './registry/useModelRegistry';
 import { filterRegistryModels } from './registry/RegistryModelSelect';
+import { ModelFamiliesPanel } from './registry/ModelFamiliesPanel';
 
 // ---------------------------------------------------------------------------
 // MODEL REGISTRY — provider → models, from the persisted local registry.
@@ -108,6 +109,9 @@ export const ProviderModelCatalog: React.FC<Props> = ({ workspaceId, providerId 
       </div>
       {reg.error && <div className="text-xs text-[#FF6B6B]">Registry unavailable: {reg.error}</div>}
       {msg && <div className="text-xs text-[#C9CCE6]">{msg}</div>}
+
+      {/* Family → canonical version → routes, route imports, task qualification */}
+      <ModelFamiliesPanel workspaceId={workspaceId} models={reg.models} providers={reg.providers} onChanged={() => { reg.reload(); loadAdmin(); }} />
 
       {/* Providers */}
       <div className="overflow-x-auto">

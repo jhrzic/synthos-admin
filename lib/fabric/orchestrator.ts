@@ -590,7 +590,9 @@ export async function advanceTask(task: OrchestratorTaskRow): Promise<Orchestrat
       taskTitle: task.title ?? task.task_id,
       description: task.description ?? '',
       assignedAgent: task.assigned_agent ?? 'scribe',
-      assignedModel: task.assigned_model ?? 'gpt-5.6-terra',
+      // No default model: a task with none is routed by the canonical router
+      // to a route qualified for its class — never to a hardcoded model.
+      assignedModel: task.assigned_model ?? '',
       inputs: contextualInputs,
     }, workspaceId, ctx);
 
@@ -632,6 +634,12 @@ export async function advanceTask(task: OrchestratorTaskRow): Promise<Orchestrat
     // SPEND GUARD — a "not now" refusal (switch off, budget spent, concurrency
     // full) means nothing ran. The task waits for a later tick instead of
     // failing; duplicates and ambiguous outcomes stay terminal.
+    // CONTINUITY — a paused or reconciling task is not failed and not
+    // re-queued here; the scheduler's continuity sweep resumes it when its
+    // condition clears (or an operator reconciles it).
+    if (kernelResult.status === 202) {
+      return finish({ ...base, outcome: 'DEFERRED', reason: String(body?.error || body?.status), finalStatus: body?.status ?? 'PAUSED_AWAITING_CAPACITY' });
+    }
     const spendBlock = /BLOCKED_BUDGET \(([A-Z_]+)\)/.exec(String(body?.error || body?.lastProviderError || ''));
     if (spendBlock && SPEND_WAIT_CODES.has(spendBlock[1])) {
       updateTaskStatus(task.task_id, 'READY', undefined, workspaceId);

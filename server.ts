@@ -68,6 +68,17 @@ import {
 } from "./lib/model-catalog";
 import { effectiveModelsForProvider, lastRefresh } from "./lib/model-discovery";
 import { installBundledPlugins } from "./lib/registry/install";
+import { resolveTaskClass } from "./lib/registry/qualification";
+import { routeIdentity, listFamiliesAndVersions, approveRouteMapping } from "./lib/registry/identity";
+import { runRouteImport, refreshRoute, listRouteImportStatus, getRouteRefreshSettings, setRouteRefreshSettings } from "./lib/registry/route-import";
+import { listTaskClasses, upsertTaskClass, listQualifications, startQualificationRun, recordCaseResult, evaluateRun, approveQualification, revokeQualification, getRun as getQualificationRun } from "./lib/registry/qualification";
+import { executeQualificationCases } from "./lib/registry/qualification-exec";
+import { activePolicy, listPolicies, ROUTING_MODES, getWorkspaceRouting, setWorkspaceRouting, listDecisions } from "./lib/registry/router";
+import { proposeRouteStats, proposePolicyWeights, decideProposal, listProposals, sampleCount } from "./lib/registry/performance";
+import { continuityView, listPausedTasks, resolveUnknownSegment } from "./lib/continuity/controller";
+import { resumeByOperator } from "./lib/continuity/resume";
+import { routeTask, requirementsFor } from "./lib/registry/router";
+import { runWithRouteContext } from "./lib/registry/route-context";
 import { listProviderViews, listModelViews, registerModelViaAdmin, qualifyModel, enableModel, disableModel } from "./lib/registry";
 import { ALL_STATES } from "./lib/registry/types";
 import { importManifest, listImports, listTrustedKeys, addTrustedKey, getWorkspacePolicy, setWorkspacePolicy, modelHistory } from "./lib/registry/store";
@@ -2582,8 +2593,20 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
               const rolePrompt = nodeContract.mode === "NARRATIVE"
                 ? buildAgentRolePrompt({ assignedAgent: nodeAgent, taskTitle, description: nodeDescription, inputs: previousOutput })
                 : buildContractPrompt(nodeContract, taskTitle, nodeDescription);
+              // ROUTING EVIDENCE — the node's model is a pinned route. The
+              // router records (before dispatch) whether it is qualified for
+              // the node's task class and why; the spend guard's gate then
+              // enforces that qualification. Nothing is substituted.
+              const nodeTaskClass = resolveTaskClass({ taskClass: (currentNode as any)?.data?.taskClass ?? null, outputContract: nodeContract.mode });
+              const nodeReq = nodeTaskClass ? requirementsFor({ taskClass: nodeTaskClass.taskClassId, outputContract: nodeContract.mode, inputChars: rolePrompt.length }) : null;
+              const nodeDecision = nodeReq && !('error' in nodeReq)
+                ? routeTask({ workspaceId, taskId: `graph:${runId}:${currentNode.id}`, requirements: nodeReq, constraints: { pinnedRoute: { providerId: route.providerId, modelId: route.modelId }, mode: 'PINNED_ROUTE' } })
+                : null;
               // Keyed per run+node, so a graph resume cannot pay for the same node twice.
-              return route.adapter.call!({ providerId: route.providerId, modelId: route.modelId, apiKey: nodeCredential, baseUrl: route.baseUrl, contents: rolePrompt, spend: { callSite: 'graph.node', workspaceId, idempotencyKey: nodeSpendKey } });
+              return runWithRouteContext(
+                { taskClass: nodeTaskClass?.taskClassId ?? null, outputContract: nodeContract.mode, routingDecisionId: nodeDecision?.decisionId ?? null, canonicalVersionId: nodeDecision?.selected?.canonicalVersionId ?? null, deploymentId: nodeDecision?.selected?.deploymentId ?? null },
+                () => route.adapter.call!({ providerId: route.providerId, modelId: route.modelId, apiKey: nodeCredential, baseUrl: route.baseUrl, contents: rolePrompt, spend: { callSite: 'graph.node', workspaceId, idempotencyKey: nodeSpendKey } }),
+              );
             });
             if (!genResult.output) {
               nodeExecData = {
@@ -6994,6 +7017,201 @@ Rules for spokenSummary specifically:
     const actor = (req as AuthedRequest).authUser!.user_id;
     const policy = setWorkspacePolicy({ workspaceId, mode: req.body?.mode === "ALLOWLIST" ? "ALLOWLIST" : "INHERIT", allowed: Array.isArray(req.body?.allowed) ? req.body.allowed : [], denied: Array.isArray(req.body?.denied) ? req.body.denied : [] }, actor);
     return res.json({ success: true, workspacePolicy: policy });
+  });
+
+  // ===========================================================================
+  // MODEL IDENTITY, ROUTE IMPORTS, TASK QUALIFICATION, ROUTER, CONTINUITY.
+  //
+  // Reads are local and free (no provider call, no inference). Writes are
+  // platform-admin actions, audited as MODEL_REGISTRY_CHANGED. Nothing here
+  // qualifies or enables anything implicitly, and nothing reaches a provider
+  // except (a) a route refresh an operator switched on and (b) a
+  // qualification run's cases, which go through the spend guard like any
+  // other paid call.
+  // ===========================================================================
+  app.get("/api/registry/identity", requireWorkspaceMember(fromQuery), (_req, res) => {
+    const models = listModelViews();
+    const routes = models.map((m) => ({ displayName: m.displayName, ...routeIdentity(m.providerId, m.modelId) }));
+    return res.json({ success: true, providerCallsMade: 0, families: listFamiliesAndVersions(), routes });
+  });
+
+  app.post("/api/registry/route-mappings/approve", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-mapping"), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const r = approveRouteMapping({ providerId: String(req.body?.providerId || ""), modelId: String(req.body?.modelId || ""), canonicalVersionId: String(req.body?.canonicalVersionId || ""), family: req.body?.family ?? null, actor });
+    registryAudit(req, `${req.body?.providerId}/${req.body?.modelId}`, { action: "ROUTE_MAPPING_APPROVED", canonicalVersionId: req.body?.canonicalVersionId, ok: r.ok, error: r.ok ? null : r.error });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, ...(r.ok ? { identity: routeIdentity(String(req.body.providerId), String(req.body.modelId)) } : { error: r.error }) });
+  });
+
+  app.get("/api/registry/route-imports", requireWorkspaceMember(fromQuery), (_req, res) => {
+    return res.json({ success: true, importers: listRouteImportStatus(), refresh: getRouteRefreshSettings() });
+  });
+
+  // Manual route import: the operator supplies the metadata document. No network.
+  app.post("/api/registry/route-imports/:importerId", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-route-import"), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const r = runRouteImport({ importerId: String(req.params.importerId), payload: req.body?.payload, actor, trigger: "MANUAL" });
+    registryAudit(req, String(req.params.importerId), { action: "ROUTE_IMPORT", ok: r.ok, error: r.ok ? null : r.error, added: r.ok ? r.outcome.added.length : 0, pending: r.ok ? r.outcome.identityPending?.length ?? 0 : 0, conflicts: r.ok ? r.outcome.identityConflicts?.length ?? 0 : 0 });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, result: r });
+  });
+
+  // A metadata refresh from the route's own endpoint — only when an operator switched refresh on.
+  app.post("/api/registry/route-imports/:importerId/refresh", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-route-refresh"), async (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    if (!getRouteRefreshSettings().enabled) return res.status(409).json({ success: false, code: "ROUTE_REFRESH_DISABLED", error: "Route refresh is switched off. Import the route document manually, or switch refresh on first." });
+    const r = await refreshRoute(String(req.params.importerId), actor);
+    registryAudit(req, String(req.params.importerId), { action: "ROUTE_REFRESH", ok: r.ok, error: r.ok ? null : r.error });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, result: r });
+  });
+
+  app.put("/api/registry/route-refresh", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-route-refresh-settings"), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const r = setRouteRefreshSettings({ enabled: req.body?.enabled === true, cadenceHours: req.body?.cadenceHours === undefined ? undefined : Number(req.body.cadenceHours), importers: Array.isArray(req.body?.importers) ? req.body.importers : undefined }, actor);
+    registryAudit(req, "route-refresh", { action: "ROUTE_REFRESH_SETTINGS", ok: r.ok, ...(r.ok ? r.settings : { error: r.error }) });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, ...(r.ok ? { refresh: r.settings } : { error: r.error }) });
+  });
+
+  app.get("/api/registry/task-classes", requireWorkspaceMember(fromQuery), (_req, res) => {
+    return res.json({ success: true, taskClasses: listTaskClasses() });
+  });
+
+  app.put("/api/registry/task-classes", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-task-class"), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const r = upsertTaskClass(req.body?.taskClass, actor);
+    registryAudit(req, String(req.body?.taskClass?.taskClassId), { action: "TASK_CLASS_UPSERT", ok: r.ok, error: r.ok ? null : r.error });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, ...(r.ok ? { taskClasses: listTaskClasses() } : { error: r.error }) });
+  });
+
+  app.get("/api/registry/qualifications", requireWorkspaceMember(fromQuery), (req, res) => {
+    const f = { providerId: req.query.providerId ? String(req.query.providerId) : undefined, modelId: req.query.modelId ? String(req.query.modelId) : undefined, taskClass: req.query.taskClass ? String(req.query.taskClass) : undefined };
+    return res.json({ success: true, qualifications: listQualifications(f) });
+  });
+
+  app.post("/api/registry/qualifications/runs", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-qual-run"), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const r = startQualificationRun({ providerId: String(req.body?.providerId || ""), modelId: String(req.body?.modelId || ""), deploymentId: req.body?.deploymentId ? String(req.body.deploymentId) : undefined, taskClass: String(req.body?.taskClass || ""), actor });
+    registryAudit(req, `${req.body?.providerId}/${req.body?.modelId}`, { action: "QUALIFICATION_RUN_STARTED", taskClass: req.body?.taskClass, ok: r.ok, error: r.ok ? null : r.error });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, ...r });
+  });
+
+  // Execute the run's cases through the normal spend-guarded dispatch (paid calls; refused while paid execution is OFF).
+  app.post("/api/registry/qualifications/runs/:runId/execute", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-qual-exec"), async (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const workspaceId = String(req.body?.workspaceId || "");
+    if (!workspaceId) return res.status(400).json({ success: false, error: "workspaceId is required (the sandbox or canary workspace the calls are billed to)" });
+    const r = await executeQualificationCases({ runId: String(req.params.runId), workspaceId, source: req.body?.source === "CANARY" ? "CANARY" : "SANDBOX", actor });
+    registryAudit(req, String(req.params.runId), { action: "QUALIFICATION_RUN_EXECUTED", ok: r.ok, recorded: r.ok ? r.recorded : 0, refused: r.ok ? r.refused.length : 0 });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, ...r, run: getQualificationRun(String(req.params.runId)) });
+  });
+
+  // Record a case result produced elsewhere (e.g. an operator-supplied fixture case). Scored deterministically here.
+  app.post("/api/registry/qualifications/runs/:runId/results", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-qual-result"), (req, res) => {
+    const b = req.body || {};
+    const r = recordCaseResult(String(req.params.runId), { caseId: String(b.caseId || ""), repetition: Number(b.repetition) || 1, output: typeof b.output === "string" ? b.output : null, termination: ["COMPLETE", "INCOMPLETE", "NOT_REPORTED", "ERROR", "BLOCKED"].includes(b.termination) ? b.termination : "NOT_REPORTED", usageId: b.usageId ? String(b.usageId) : null, receiptId: b.receiptId ? String(b.receiptId) : null, source: b.source === "CANARY" ? "CANARY" : "SANDBOX" });
+    registryAudit(req, String(req.params.runId), { action: "QUALIFICATION_RESULT_RECORDED", caseId: b.caseId, ok: r.ok });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, ...r, run: getQualificationRun(String(req.params.runId)) });
+  });
+
+  app.post("/api/registry/qualifications/runs/:runId/evaluate", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-qual-eval"), (req, res) => {
+    const r = evaluateRun(String(req.params.runId));
+    registryAudit(req, String(req.params.runId), { action: "QUALIFICATION_RUN_EVALUATED", ok: r.ok, ...(r.ok ? { status: r.status, quality: r.quality, reliability: r.reliability } : { error: r.error }) });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, ...r });
+  });
+
+  app.post("/api/registry/qualifications/runs/:runId/approve", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-qual-approve"), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const r = approveQualification({ runId: String(req.params.runId), actor, scope: req.body?.scope, validityDays: req.body?.validityDays === undefined ? undefined : Number(req.body.validityDays) });
+    registryAudit(req, String(req.params.runId), { action: "TASK_QUALIFICATION_APPROVED", ok: r.ok, ...(r.ok ? { qualificationId: r.qualificationId } : { error: r.error }) });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, ...r });
+  });
+
+  app.post("/api/registry/qualifications/:qualificationId/revoke", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-qual-revoke"), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const ok = revokeQualification(String(req.params.qualificationId), actor, String(req.body?.reason || ""));
+    registryAudit(req, String(req.params.qualificationId), { action: "TASK_QUALIFICATION_REVOKED", ok });
+    return res.status(ok ? 200 : 400).json({ success: ok });
+  });
+
+  app.get("/api/router/policies", requireWorkspaceMember(fromQuery), (req, res) => {
+    const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+    return res.json({ success: true, active: activePolicy(), policies: listPolicies(), modes: ROUTING_MODES, workspaceRouting: getWorkspaceRouting(workspaceId) });
+  });
+
+  app.put("/api/router/workspace-routing", requireWorkspaceAdmin(fromBody), (req, res) => {
+    const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const r = setWorkspaceRouting(workspaceId, req.body?.constraints || {}, actor);
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, ...r });
+  });
+
+  // A routing PREVIEW: evaluates every route for a hypothetical task. Nothing persisted, nothing sent.
+  app.post("/api/router/preview", requireWorkspaceMember(fromBody), (req, res) => {
+    const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+    const reqs = requirementsFor({ taskClass: String(req.body?.taskClass || ""), outputContract: req.body?.outputContract, inputChars: Number(req.body?.inputChars) || 0, expectedOutputTokens: req.body?.expectedOutputTokens ? Number(req.body.expectedOutputTokens) : undefined, privacyClass: req.body?.privacyClass });
+    if ("error" in reqs) return res.status(400).json({ success: false, error: reqs.error });
+    const decision = routeTask({ workspaceId, requirements: reqs, constraints: req.body?.constraints || {}, persist: false });
+    return res.json({ success: true, providerCallsMade: 0, decision });
+  });
+
+  app.get("/api/router/decisions", requireWorkspaceMember(fromQuery), (req, res) => {
+    const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+    const taskId = req.query.taskId ? String(req.query.taskId) : undefined;
+    if (taskId && getTaskWorkspaceId(taskId) && getTaskWorkspaceId(taskId) !== workspaceId) return res.status(404).json({ success: false, error: "not found" });
+    return res.json({ success: true, decisions: listDecisions({ taskId, workspaceId, limit: Number(req.query.limit) || 50 }) });
+  });
+
+  app.get("/api/router/evidence", requirePlatformAdmin, (_req, res) => {
+    return res.json({ success: true, samples: sampleCount(), proposals: listProposals(), policy: activePolicy() });
+  });
+
+  app.post("/api/router/evidence/propose", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "router-evidence"), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const pol = activePolicy();
+    const r = req.body?.kind === "POLICY_WEIGHTS"
+      ? proposePolicyWeights({ actor, basePolicyId: pol.policyId, baseVersion: pol.version, newVersion: String(req.body?.newVersion || ""), weights: req.body?.weights || {}, rationale: String(req.body?.rationale || "") })
+      : { ok: true as const, ...proposeRouteStats({ actor, workspaceId: req.body?.workspaceId ?? null, minSamples: pol.evidence.minSamples, trimFraction: pol.evidence.trimFraction }) };
+    registryAudit(req, "routing-evidence", { action: "ROUTING_EVIDENCE_PROPOSED", kind: req.body?.kind ?? "ROUTE_STATS", ok: r.ok });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, ...r });
+  });
+
+  app.post("/api/router/evidence/:proposalId/decide", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "router-evidence-decide"), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const r = decideProposal({ proposalId: String(req.params.proposalId), actor, approve: req.body?.approve === true, note: req.body?.note });
+    registryAudit(req, String(req.params.proposalId), { action: req.body?.approve === true ? "ROUTING_EVIDENCE_APPROVED" : "ROUTING_EVIDENCE_REJECTED", ok: r.ok });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, ...r });
+  });
+
+  const taskInWorkspace = (taskId: string, workspaceId: string) => getTaskWorkspaceId(taskId) === workspaceId;
+
+  app.get("/api/tasks/:taskId/continuity", requireWorkspaceMember(fromQuery), (req, res) => {
+    const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+    const taskId = String(req.params.taskId);
+    if (!taskInWorkspace(taskId, workspaceId)) return res.status(404).json({ success: false, error: "not found" });
+    const CONTINUITY_EVENTS = new Set(["ROUTING_DECIDED", "CAPACITY_WARNING", "SEGMENT_STARTED", "SEGMENT_COMPLETED", "CHECKPOINT_CREATED", "CHECKPOINT_STARTED", "ROUTE_SWITCH_PROPOSED", "ROUTE_SWITCHED", "TASK_PAUSED", "TASK_RESUMED", "RESUME_REFUSED", "RECONCILIATION_REQUIRED", "RECONCILIATION_RESOLVED", "CONTINUITY_AWAITING_CONTINUATION", "GUARDIAN_BLOCKED", "PROVIDER_COMPLETED", "PROVIDER_FAILED", "AEGIS_REVIEWED", "AEGIS_INCOMPLETE", "RECEIPT_CREATED", "AUDIT_RECEIPT_CREATED", "TASK_COMPLETED"]);
+    const activity = (getTaskActivityEvents(taskId) as any[]).filter((e) => CONTINUITY_EVENTS.has(e.event_type));
+    return res.json({ success: true, ...continuityView(taskId), decisions: listDecisions({ taskId, limit: 50 }), activity, receipts: getTaskReceipts(taskId).map((r: any) => ({ receiptId: r.receipt_id, createdAt: r.created_at, verified: verifyReceipt(r), payload: JSON.parse(r.payload_json) })) });
+  });
+
+  app.get("/api/continuity/paused", requireWorkspaceMember(fromQuery), (req, res) => {
+    const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+    return res.json({ success: true, tasks: listPausedTasks().filter((c) => c.workspaceId === workspaceId) });
+  });
+
+  app.post("/api/tasks/:taskId/continuity/resume", requireWorkspaceAdmin(fromBody), (req, res) => {
+    const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+    const taskId = String(req.params.taskId);
+    if (!taskInWorkspace(taskId, workspaceId)) return res.status(404).json({ success: false, error: "not found" });
+    const r = resumeByOperator(taskId, (req as AuthedRequest).authUser!.user_id);
+    return res.status(r.ok ? 200 : 409).json({ success: r.ok, reason: r.reason, ...continuityView(taskId) });
+  });
+
+  app.post("/api/tasks/:taskId/continuity/reconcile", requireWorkspaceAdmin(fromBody), (req, res) => {
+    const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+    const taskId = String(req.params.taskId);
+    if (!taskInWorkspace(taskId, workspaceId)) return res.status(404).json({ success: false, error: "not found" });
+    const resolution = ["NOT_ACCEPTED", "ACCEPTED", "ABANDON"].includes(req.body?.resolution) ? req.body.resolution : null;
+    if (!resolution) return res.status(400).json({ success: false, error: "resolution must be NOT_ACCEPTED, ACCEPTED or ABANDON" });
+    const r = resolveUnknownSegment({ taskId, segmentId: String(req.body?.segmentId || ""), resolution, actor: (req as AuthedRequest).authUser!.user_id, evidence: String(req.body?.evidence || "") });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, ...r, ...continuityView(taskId) });
   });
 
   app.get("/api/status", requireAuth, (req, res) => {

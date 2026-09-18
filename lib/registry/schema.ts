@@ -45,6 +45,9 @@ const PROVIDER_ID = /^[a-z][a-z0-9_-]{1,39}$/;
 const HOST = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
 const SEMVER = /^\d+\.\d+\.\d+$/;
 const CONTRACTS = new Set(['NARRATIVE', 'LITERAL', 'JSON_OBJECT']);
+const PRIVACY = ['STANDARD', 'NO_TRAINING', 'ZERO_RETENTION', 'LOCAL_ONLY'];
+const FAMILY_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const CANONICAL_ID = /^[a-z][a-z0-9_-]{1,39}\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 function isIso(v: unknown): v is string {
   return typeof v === 'string' && !Number.isNaN(Date.parse(v));
@@ -158,7 +161,10 @@ function validateProvider(p: any, errors: string[]): void {
   let base: URL | null = null;
   try { base = new URL(p.defaultBaseUrl); } catch { errors.push('provider.defaultBaseUrl must be a URL'); }
   if (base) {
-    if (base.protocol !== 'https:') errors.push('provider.defaultBaseUrl must be https');
+    // A credential-free LOCAL route (a self-hosted runtime) may default to
+    // plain http on loopback; everything else must be https.
+    const localLoopback = p.routeKind === 'LOCAL' && p.auth?.type === 'NONE' && base.protocol === 'http:' && /^(127\.\d+\.\d+\.\d+|localhost|\[::1\])$/.test(base.hostname);
+    if (base.protocol !== 'https:' && !localLoopback) errors.push('provider.defaultBaseUrl must be https');
     if (strArr(p.approvedHosts) && !p.approvedHosts.includes(base.hostname)) errors.push('provider.defaultBaseUrl host must be one of approvedHosts');
     if (base.username || base.password) errors.push('provider.defaultBaseUrl must not carry credentials');
   }
@@ -170,6 +176,31 @@ function validateProvider(p: any, errors: string[]): void {
     if (p.auth.type !== 'NONE' && (!strArr(p.auth.envVars) || p.auth.envVars.length === 0) && !p.auth.credentialSlot) errors.push('provider.auth needs envVars or a credentialSlot');
   }
   if (!['METERED', 'MANAGED_AGENT', 'FREE_LOCAL'].includes(p.billing)) errors.push('provider.billing is invalid');
+  if (p.routeKind !== undefined && !['DIRECT', 'AGGREGATOR', 'LOCAL', 'ENTERPRISE'].includes(p.routeKind)) errors.push('provider.routeKind is invalid');
+  if (p.privacyClass !== undefined && !PRIVACY.includes(p.privacyClass)) errors.push('provider.privacyClass is invalid');
+  if (p.idempotency !== undefined && p.idempotency !== null && !(typeof p.idempotency?.header === 'string' && /^[A-Za-z][A-Za-z0-9-]{1,63}$/.test(p.idempotency.header))) errors.push('provider.idempotency.header is invalid');
+  if (p.reconciliation !== undefined && p.reconciliation !== null && !(typeof p.reconciliation?.lookupPath === 'string' && p.reconciliation.lookupPath.startsWith('/') && p.reconciliation.lookupPath.includes('{key}'))) errors.push('provider.reconciliation.lookupPath must be a path containing {key}');
+  if (p.deployments !== undefined) {
+    if (!Array.isArray(p.deployments) || p.deployments.length === 0) errors.push('provider.deployments must be a non-empty array when present');
+    else {
+      const ids = new Set<string>();
+      p.deployments.forEach((d: any, i: number) => {
+        const path = `provider.deployments[${i}]`;
+        if (typeof d?.deploymentId !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(d.deploymentId)) errors.push(`${path}.deploymentId is invalid`);
+        else if (ids.has(d.deploymentId)) errors.push(`${path}.deploymentId is duplicated`);
+        else ids.add(d.deploymentId);
+        if (!(d.region === null || (typeof d.region === 'string' && d.region.length <= 64))) errors.push(`${path}.region is invalid`);
+        if (!(d.baseUrlEnvVar === null || (typeof d.baseUrlEnvVar === 'string' && /^[A-Z][A-Z0-9_]{2,63}$/.test(d.baseUrlEnvVar)))) errors.push(`${path}.baseUrlEnvVar is invalid`);
+        if (!(d.credentialSlot === null || (typeof d.credentialSlot === 'string' && PROVIDER_ID.test(d.credentialSlot)))) errors.push(`${path}.credentialSlot is invalid`);
+        if (!strArr(d.envVars)) errors.push(`${path}.envVars must be a list`);
+        const rl = d.rateLimits;
+        if (!rl || !['requestsPerMinute', 'tokensPerMinute', 'tokensPerDay'].every((k) => rl[k] === null || nonNeg(rl[k]))) errors.push(`${path}.rateLimits is invalid`);
+        if (!PRIVACY.includes(d.privacyClass)) errors.push(`${path}.privacyClass is invalid`);
+        if (!(d.dataRetention === null || typeof d.dataRetention === 'string')) errors.push(`${path}.dataRetention is invalid`);
+        if (d.status !== 'ACTIVE' && d.status !== 'DISABLED') errors.push(`${path}.status is invalid`);
+      });
+    }
+  }
   if (!p.restrictions || !strArr(p.restrictions.regions) || !strArr(p.restrictions.compliance)) errors.push('provider.restrictions must have regions[] and compliance[]');
 }
 
@@ -202,6 +233,17 @@ function validateModel(providerId: string, protocol: string, m: any, i: number, 
   }
   if (!m.restrictions || !strArr(m.restrictions.regions) || !strArr(m.restrictions.compliance)) errors.push(`${path}.restrictions must have regions[] and compliance[]`);
   if (m.extensions !== undefined && (typeof m.extensions !== 'object' || m.extensions === null || Array.isArray(m.extensions))) errors.push(`${path}.extensions must be an object`);
+  if (m.family !== undefined && m.family !== null) {
+    const f = m.family;
+    if (typeof f?.familyId !== 'string' || !FAMILY_ID.test(f.familyId)) errors.push(`${path}.family.familyId is invalid`);
+    if (typeof f?.displayName !== 'string' || !f.displayName.trim()) errors.push(`${path}.family.displayName is required`);
+    if (typeof f?.publisher !== 'string' || !PROVIDER_ID.test(f.publisher)) errors.push(`${path}.family.publisher is invalid`);
+  }
+  if (m.canonicalVersionId !== undefined && m.canonicalVersionId !== null && !(typeof m.canonicalVersionId === 'string' && CANONICAL_ID.test(m.canonicalVersionId))) errors.push(`${path}.canonicalVersionId must look like publisher/version`);
+  // A canonical version may be declared alone (a route's proposal); a family always names its version.
+  if (m.family && !m.canonicalVersionId) errors.push(`${path}: a family is declared together with its canonicalVersionId`);
+  if (m.family && m.canonicalVersionId && !String(m.canonicalVersionId).startsWith(`${m.family.publisher}/`)) errors.push(`${path}.canonicalVersionId must be namespaced by the family publisher`);
+  if (m.freeTier !== undefined && m.freeTier !== null && !(typeof m.freeTier?.free === 'boolean' && typeof m.freeTier?.guaranteed === 'boolean')) errors.push(`${path}.freeTier must be { free, guaranteed }`);
   void providerId;
 }
 
@@ -269,6 +311,9 @@ export function validateManifest(raw: unknown): ValidationResult {
       adapterCompatibility: { protocol: model.adapterCompatibility.protocol, minAdapterVersion: model.adapterCompatibility.minAdapterVersion },
       restrictions: { regions: [...model.restrictions.regions], compliance: [...model.restrictions.compliance] },
       ...(model.extensions ? { extensions: model.extensions } : {}),
+      ...(model.family ? { family: { familyId: model.family.familyId, displayName: model.family.displayName, publisher: model.family.publisher } } : {}),
+      ...(model.canonicalVersionId ? { canonicalVersionId: model.canonicalVersionId } : {}),
+      ...(model.freeTier ? { freeTier: { free: model.freeTier.free, guaranteed: model.freeTier.guaranteed } } : {}),
     } satisfies ModelManifest;
   });
 
@@ -279,6 +324,15 @@ export function validateManifest(raw: unknown): ValidationResult {
     auth: { type: m.provider.auth.type, credentialSlot: m.provider.auth.credentialSlot ?? null, envVars: [...m.provider.auth.envVars] },
     billing: m.provider.billing,
     restrictions: { regions: [...m.provider.restrictions.regions], compliance: [...m.provider.restrictions.compliance] },
+    ...(m.provider.routeKind ? { routeKind: m.provider.routeKind } : {}),
+    ...(m.provider.privacyClass ? { privacyClass: m.provider.privacyClass } : {}),
+    ...(m.provider.idempotency ? { idempotency: { header: m.provider.idempotency.header } } : {}),
+    ...(m.provider.reconciliation ? { reconciliation: { lookupPath: m.provider.reconciliation.lookupPath } } : {}),
+    ...(m.provider.deployments ? { deployments: m.provider.deployments.map((d: any) => ({
+      deploymentId: d.deploymentId, region: d.region ?? null, baseUrlEnvVar: d.baseUrlEnvVar ?? null, credentialSlot: d.credentialSlot ?? null,
+      envVars: [...(d.envVars || [])], rateLimits: { requestsPerMinute: d.rateLimits.requestsPerMinute ?? null, tokensPerMinute: d.rateLimits.tokensPerMinute ?? null, tokensPerDay: d.rateLimits.tokensPerDay ?? null },
+      privacyClass: d.privacyClass, dataRetention: d.dataRetention ?? null, status: d.status,
+    })) } : {}),
   };
   return {
     ok: true,
@@ -297,6 +351,20 @@ export function validateManifest(raw: unknown): ValidationResult {
 /** Hash of the parts of a model record an operator qualifies (everything, pricing included). */
 export function modelRecordHash(providerId: string, model: ModelManifest): string {
   return sha256(canonicalJson({ providerId, model }));
+}
+
+/**
+ * What an operator qualifies: the record's substance. A price re-confirmation
+ * (same rates, new verifiedAt/staleAfter) is not a change; different rates,
+ * capabilities, limits or contracts are. Staleness is judged separately.
+ */
+export function modelSubstanceHash(providerId: string, model: ModelManifest): string {
+  const pricing = model.pricing.map(({ verifiedAt: _v, staleAfter: _s, source: _src, ...rest }) => rest);
+  // Import stamps (provenance, manifestVersion, lastUpdated) are bookkeeping, not substance.
+  const capabilities = model.capabilities.map(({ provenance: _p, manifestVersion: _m, adapterVersion: _a, lastUpdated: _l, ...c }) => c);
+  // The display name is presentation, not substance.
+  const { displayName: _d, ...rest } = model;
+  return sha256(canonicalJson({ providerId, model: { ...rest, pricing, capabilities } }));
 }
 
 /** Hash of the price-bearing part only — used in the price snapshot version key. */

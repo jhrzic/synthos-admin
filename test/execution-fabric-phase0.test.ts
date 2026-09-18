@@ -95,19 +95,21 @@ describe('F1: /api/execute-agent-task never claims a tool ran (originally server
   // trace that says "model.gemini" is exactly the falsehood F1 existed to
   // prevent, so the derivation is pinned rather than a single literal.
   it('the real ctx.invoke() call site in the kernel is named from real provider identity — never a fabricated or per-role tool name', () => {
-    expect(kernelContent).toContain('await ctx.invoke(invocationName, async () => {');
-    // The name is computed from the classified provider, and from nothing
-    // else — not from the agent role, not from a caller-supplied string.
-    expect(kernelContent).toContain('const invocationName = `model.${provider}`;');
-    expect(kernelContent).toContain('const provider = route.providerId;');
+    // The kernel hands ctx.invoke to the segment runner unchanged; the
+    // runner names each invocation from the ROUTER-SELECTED provider, and
+    // from nothing else — not the agent role, not a caller-supplied string.
+    expect(kernelContent).toContain('invoke: (name, fn) => ctx.invoke(name, fn)');
+    const runner = fs.readFileSync(path.resolve(process.cwd(), 'lib/continuity/segment-runner.ts'), 'utf-8');
+    expect(runner).toContain('await inp.invoke(`model.${sel.providerId}`, () => runWithRouteContext(');
+    expect(runner).toContain('const sel = decision.selected;');
 
     // The wrapped block calls the shared real adapters — one per provider,
     // neither inlining its own retry loop nor inventing a mechanism.
-    const invokeIdx = kernelContent.indexOf('await ctx.invoke(invocationName');
-    const wrappedBlock = kernelContent.slice(invokeIdx, invokeIdx + 2000);
+    const invokeIdx = runner.indexOf('await inp.invoke(`model.${sel.providerId}`');
+    const wrappedBlock = runner.slice(invokeIdx, invokeIdx + 1200);
     // Dispatch goes through the provider's shared protocol adapter, resolved
     // by the registry — one call, one model, no per-provider branch here.
-    expect(wrappedBlock).toContain('await route.adapter.call!({');
+    expect(wrappedBlock).toContain('adapter.call!({');
     const protocols = fs.readFileSync(path.resolve(process.cwd(), 'lib/registry/protocols.ts'), 'utf-8');
     expect(protocols).toContain('generateViaGemini({');
     expect(protocols).toContain('generateViaOpenAI({');

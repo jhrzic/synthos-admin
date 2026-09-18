@@ -1,0 +1,311 @@
+{
+  "schemaVersion": "synthos.eval-suites/v1",
+  "dataVersion": "2026.09.18-1",
+  "suites": [
+    {
+      "suiteId": "suite.literal",
+      "version": "1.0.0",
+      "taskClass": "literal_transformation",
+      "repetitions": 2,
+      "cases": [
+        {
+          "caseId": "lit-1",
+          "prompt": "Reply with exactly: ALPHA-7",
+          "check": {
+            "type": "EXACT",
+            "expected": "ALPHA-7"
+          }
+        },
+        {
+          "caseId": "lit-2",
+          "prompt": "Reply with exactly the uppercase form of: route ready",
+          "check": {
+            "type": "EXACT",
+            "expected": "ROUTE READY"
+          }
+        },
+        {
+          "caseId": "lit-3",
+          "prompt": "Reply with exactly: 3 apples, 2 pears",
+          "check": {
+            "type": "EXACT",
+            "expected": "3 apples, 2 pears"
+          }
+        }
+      ]
+    },
+    {
+      "suiteId": "suite.json",
+      "version": "1.0.0",
+      "taskClass": "json_extraction",
+      "repetitions": 2,
+      "cases": [
+        {
+          "caseId": "json-1",
+          "prompt": "Return a JSON object with keys name and city for: Ana lives in Split.",
+          "check": {
+            "type": "JSON_KEYS",
+            "requiredKeys": [
+              "name",
+              "city"
+            ],
+            "expectedValues": {
+              "name": "Ana",
+              "city": "Split"
+            }
+          }
+        },
+        {
+          "caseId": "json-2",
+          "prompt": "Return a JSON object with keys total and currency for: the invoice is 120 EUR.",
+          "check": {
+            "type": "JSON_KEYS",
+            "requiredKeys": [
+              "total",
+              "currency"
+            ],
+            "expectedValues": {
+              "currency": "EUR"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "suiteId": "suite.summarization",
+      "version": "1.0.0",
+      "taskClass": "summarization",
+      "repetitions": 1,
+      "cases": [
+        {
+          "caseId": "sum-1",
+          "prompt": "Summarize in under 40 words: The store opens at 9, closes at 18, and is closed on Sundays.",
+          "check": {
+            "type": "CONTAINS_ALL",
+            "terms": [
+              "9",
+              "18",
+              "Sunday"
+            ],
+            "maxChars": 400
+          }
+        }
+      ]
+    },
+    {
+      "suiteId": "suite.research",
+      "version": "1.0.0",
+      "taskClass": "research_synthesis",
+      "repetitions": 1,
+      "cases": [
+        {
+          "caseId": "res-1",
+          "prompt": "Using only these facts, write a two-sentence brief: Source A says demand rose 4%. Source B says prices fell 2%.",
+          "check": {
+            "type": "CONTAINS_ALL",
+            "terms": [
+              "4%",
+              "2%"
+            ],
+            "maxChars": 800
+          }
+        }
+      ]
+    },
+    {
+      "suiteId": "suite.content",
+      "version": "1.0.0",
+      "taskClass": "content_generation",
+      "repetitions": 1,
+      "cases": [
+        {
+          "caseId": "con-1",
+          "prompt": "Write a three-line product note that mentions the word 'warranty' exactly once.",
+          "check": {
+            "type": "CONTAINS_ALL",
+            "terms": [
+              "warranty"
+            ],
+            "maxChars": 1200
+          }
+        }
+      ]
+    },
+    {
+      "suiteId": "suite.conversation",
+      "version": "1.0.0",
+      "taskClass": "conversation",
+      "repetitions": 1,
+      "cases": [
+        {
+          "caseId": "conv-1",
+          "prompt": "A customer asks: what are your opening hours? Known hours: 9-18. Reply in one sentence.",
+          "check": {
+            "type": "CONTAINS_ALL",
+            "terms": [
+              "9",
+              "18"
+            ],
+            "maxChars": 400
+          }
+        }
+      ]
+    },
+    {
+      "suiteId": "suite.planning",
+      "version": "1.0.0",
+      "taskClass": "planning",
+      "repetitions": 1,
+      "cases": [
+        {
+          "caseId": "plan-1",
+          "prompt": "List exactly three numbered steps to publish a blog post.",
+          "check": {
+            "type": "REGEX",
+            "pattern": "^\\s*1[.)].*\\n\\s*2[.)].*\\n\\s*3[.)]",
+            "flags": "s"
+          }
+        }
+      ]
+    },
+    {
+      "suiteId": "suite.coding",
+      "version": "1.0.0",
+      "taskClass": "coding",
+      "repetitions": 1,
+      "cases": [
+        {
+          "caseId": "code-1",
+          "prompt": "Write a JavaScript function named add that returns the sum of its two arguments. Reply with code only.",
+          "check": {
+            "type": "REGEX",
+            "pattern": "function\\s+add\\s*\\(",
+            "flags": ""
+          }
+        }
+      ]
+    },
+    {
+      "suiteId": "suite.code_review",
+      "version": "1.0.0",
+      "taskClass": "code_review",
+      "repetitions": 1,
+      "cases": [
+        {
+          "caseId": "cr-1",
+          "prompt": "Review: `if (user = null) { deny() }`. Name the defect in one sentence.",
+          "check": {
+            "type": "CONTAINS_ANY",
+            "terms": [
+              "assignment",
+              "==",
+              " === ",
+              "comparison"
+            ],
+            "maxChars": 600
+          }
+        }
+      ]
+    },
+    {
+      "suiteId": "suite.tool_use",
+      "version": "1.0.0",
+      "taskClass": "tool_use",
+      "repetitions": 1,
+      "cases": [
+        {
+          "caseId": "tool-1",
+          "prompt": "Call the declared tool get_time with argument zone set to UTC. Reply with the call as JSON {\"tool\":...,\"args\":...}.",
+          "check": {
+            "type": "JSON_KEYS",
+            "requiredKeys": [
+              "tool",
+              "args"
+            ],
+            "expectedValues": {
+              "tool": "get_time"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "suiteId": "suite.long_context",
+      "version": "1.0.0",
+      "taskClass": "long_context_reasoning",
+      "repetitions": 1,
+      "cases": [
+        {
+          "caseId": "lc-1",
+          "prompt": "The constraint stated first applies: never mention prices. Now describe the product range.",
+          "check": {
+            "type": "NOT_CONTAINS",
+            "terms": [
+              "$",
+              "\u20ac",
+              "price"
+            ],
+            "maxChars": 2000
+          }
+        }
+      ]
+    },
+    {
+      "suiteId": "suite.image",
+      "version": "1.0.0",
+      "taskClass": "image_understanding",
+      "repetitions": 1,
+      "cases": [
+        {
+          "caseId": "img-1",
+          "prompt": "(image case: requires an operator-supplied fixture image; output must name the object labelled in the fixture)",
+          "check": {
+            "type": "CONTAINS_ALL",
+            "terms": [
+              "{fixture_label}"
+            ],
+            "maxChars": 400
+          }
+        }
+      ]
+    },
+    {
+      "suiteId": "suite.speech",
+      "version": "1.0.0",
+      "taskClass": "speech",
+      "repetitions": 1,
+      "cases": [
+        {
+          "caseId": "sp-1",
+          "prompt": "(speech case: requires an operator-supplied fixture; transcript must contain the fixture phrase)",
+          "check": {
+            "type": "CONTAINS_ALL",
+            "terms": [
+              "{fixture_phrase}"
+            ],
+            "maxChars": 400
+          }
+        }
+      ]
+    },
+    {
+      "suiteId": "suite.agent",
+      "version": "1.0.0",
+      "taskClass": "agent_orchestration",
+      "repetitions": 1,
+      "cases": [
+        {
+          "caseId": "ag-1",
+          "prompt": "Plan and report: produce a JSON object with keys steps (array) and status (string).",
+          "check": {
+            "type": "JSON_KEYS",
+            "requiredKeys": [
+              "steps",
+              "status"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

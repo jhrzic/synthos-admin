@@ -186,18 +186,27 @@ describe('FAILURE BEHAVIOUR under the proof policy — provider calls counted', 
       getDatabase().prepare("DELETE FROM execution_claims WHERE idempotency_key = ?").run(`orchestration-task:${taskId}`);
       await tick();
       expect(seen).toHaveLength(1);
-      expect(listUsageForKey(`orchestration:${taskId}`).map((r) => r.reason_code)).toContain('RECONCILIATION_REQUIRED');
+      // Refused before any second call: by the spend guard's per-key check
+      // (the timeout case, where the ledger row came first) or by the
+      // continuity controller's unreconciled-segment check — either way the
+      // task is left RECONCILING_UNKNOWN_EXECUTION for an operator.
+      if (m === 'timeout') expect(listUsageForKey(`orchestration:${taskId}`).map((r) => r.reason_code)).toContain('RECONCILIATION_REQUIRED');
+      expect(getOrchestratorTask(taskId, WS)!.status).toBe('RECONCILING_UNKNOWN_EXECUTION');
     });
   }
 
-  for (const [m, label] of [['429', 'rate limit'], ['401', 'auth failure']] as const) {
-    it(`${label} → rejected once; the task fails and is never retried on its own`, async () => {
+  // A rate limit is a CAPACITY condition: the pinned route is rejected, it is
+  // not retried, nothing is substituted, and the task waits (the scheduler's
+  // continuity sweep resumes it after the route's cool-down). An auth failure
+  // is a real rejection: the task fails. Neither is ever retried on its own.
+  for (const [m, label, final] of [['429', 'rate limit', 'PAUSED_AWAITING_CAPACITY'], ['401', 'auth failure', 'FAILED']] as const) {
+    it(`${label} → rejected once; the task ends ${final} and is never retried on its own`, async () => {
       mode = m;
       const taskId = orchestrated();
       await tick(); await tick(); await tick();
       expect(seen).toHaveLength(1);
       expect(listUsageForKey(`orchestration:${taskId}`)[0]).toMatchObject({ status: 'PROVIDER_REJECTION', actual_cost_usd: 0 });
-      expect(getOrchestratorTask(taskId, WS)!.status).toBe('FAILED');
+      expect(getOrchestratorTask(taskId, WS)!.status).toBe(final);
     });
   }
 
@@ -237,7 +246,7 @@ describe('THE REQUEST CANNOT DRIFT FROM ITS RESERVATION', () => {
   });
   it('INTEGRATED: a guarded call priced for one model that sends another is refused before it leaves the process', async () => {
     let err: any = null;
-    await guardedPaidCall({ provider: 'openai', model: MODEL, callSite: 't', idempotencyKey: `drift-${Date.now()}`, inputChars: 10, maxOutputTokens: 64 }, async () => {
+    await guardedPaidCall({ provider: 'openai', model: MODEL, callSite: 'test.drift', idempotencyKey: `drift-${Date.now()}`, inputChars: 10, maxOutputTokens: 64 }, async () => {
       try {
         await fetch(`${process.env.OPENAI_BASE_URL}/responses`, { method: 'POST', body: JSON.stringify({ model: 'gpt-6-astra', input: 'x', max_output_tokens: 64 }) });
       } catch (e) { err = e; }

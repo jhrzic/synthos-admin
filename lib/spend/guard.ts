@@ -37,6 +37,7 @@ import { recordRuntimeEvent } from '../runtime-events';
 import { getDatabase } from '../persistence';
 import { runWithPermit, type SpendPermit } from './network-guard';
 import { isRegistryGoverned, registryGate } from '../registry';
+import { currentRouteContext } from '../registry/route-context';
 import {
   getSpendPolicy, getModelPrice, costTierFor, tierRank, estimateTokensFromChars,
   type PaidProvider, type CostTier, type SpendPolicy, type ModelPrice,
@@ -186,6 +187,16 @@ export function actualCostUsd(provider: string, snap: PriceSnapshot | null, u: N
 
 let dryRunDepth = 0;
 
+/** The routing decision this call runs under, for the ledger row. */
+function routeEvidence(): Record<string, string | null> {
+  const r = currentRouteContext();
+  if (!r) return {};
+  return {
+    task_class: r.taskClass ?? null, canonical_version_id: r.canonicalVersionId ?? null, deployment_id: r.deploymentId ?? null,
+    routing_decision_id: r.routingDecisionId ?? null, segment_id: r.segmentId ?? null,
+  };
+}
+
 function block(req: PaidCallRequest, attempt: number, code: string, reason: string, extra: Record<string, unknown> = {}): { permitted: false; usageId: string; status: 'BLOCKED'; code: string; reason: string; estimatedCostUsd: number | null } {
   const usageId = newUsageId();
   if (dryRunDepth > 0) return { permitted: false, usageId, status: 'BLOCKED', code, reason, estimatedCostUsd: (extra.estimatedCostUsd as number) ?? null };
@@ -197,6 +208,7 @@ function block(req: PaidCallRequest, attempt: number, code: string, reason: stri
       input_chars: req.inputChars, max_output_tokens: req.maxOutputTokens ?? null, approval_id: req.approvalId ?? null,
       created_at: new Date().toISOString(), completed_at: new Date().toISOString(),
       estimated_cost_usd: (extra.estimatedCostUsd as number) ?? null, cost_tier: (extra.tier as string) ?? null,
+      ...routeEvidence(),
     });
   } catch { /* the refusal stands even if it cannot be recorded */ }
   return { permitted: false, usageId, status: 'BLOCKED', code, reason, estimatedCostUsd: (extra.estimatedCostUsd as number) ?? null };
@@ -218,7 +230,7 @@ export function authorizePaidCall(req: PaidCallRequest): { permitted: false; usa
   // qualified, enabled, priced, configured model this workspace permits.
   // Appearing in a manifest is not permission.
   if (isRegistryGoverned(req.provider)) {
-    const gate = registryGate(req.provider, req.model, { workspaceId: req.workspaceId ?? null });
+    const gate = registryGate(req.provider, req.model, { workspaceId: req.workspaceId ?? null, callSite: req.callSite, route: currentRouteContext() ?? null });
     if (!gate.ok) return block(req, attempt, gate.code, gate.reason);
   }
 
@@ -316,6 +328,7 @@ export function authorizePaidCall(req: PaidCallRequest): { permitted: false; usa
     estimated_cost_usd: est.usd, cost_tier: tier, approval_id: req.approvalId ?? null,
     price_version: price.versionKey, price_snapshot_json: JSON.stringify(snapshotOf(price)),
     created_at: new Date().toISOString(),
+    ...routeEvidence(),
   });
   if (txn) getDatabase().exec('COMMIT');
   return { permitted: true, usageId, estimatedCostUsd: est.usd, tier, attempt, maxTotalTokens: est.maxTotalTokens };

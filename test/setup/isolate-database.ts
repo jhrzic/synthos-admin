@@ -50,6 +50,24 @@ if (!process.env.SYNTHOS_DB_PATH) {
   process.env.SYNTHOS_DB_PATH = dbPath;
 }
 
+// ARTIFACT VAULT + BACKUPS — the same isolation for the two directories that
+// used to default to the repository's own ./vault and ./backups. Tests wrote
+// thousands of artifacts into the real vault and hundreds of archives into
+// ./backups, and every backup test then archived (and hashed) all of it — the
+// cause of the backup tests' timeouts, which no timeout increase could fix.
+if (!process.env.SYNTHOS_ARTIFACT_VAULT_DIR) {
+  process.env.SYNTHOS_ARTIFACT_VAULT_DIR = path.join(dir, 'vault');
+  fs.mkdirSync(process.env.SYNTHOS_ARTIFACT_VAULT_DIR, { recursive: true });
+}
+if (!process.env.SYNTHOS_BACKUP_DIR) {
+  process.env.SYNTHOS_BACKUP_DIR = path.join(dir, 'backups');
+}
+for (const [name, prod] of [['SYNTHOS_ARTIFACT_VAULT_DIR', 'vault'], ['SYNTHOS_BACKUP_DIR', 'backups']] as const) {
+  if (path.resolve(process.env[name]!) === path.resolve(process.cwd(), prod)) {
+    throw new Error(`Test isolation failed: ${name} resolves to the repository's ${prod}/ directory. Refusing to run.`);
+  }
+}
+
 // Belt and braces: whatever the path ended up being, it must not be production.
 const production = path.resolve(process.cwd(), 'data', 'synthos-admin.db');
 if (path.resolve(process.env.SYNTHOS_DB_PATH) === production) {
