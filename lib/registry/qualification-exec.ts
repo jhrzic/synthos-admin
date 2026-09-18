@@ -68,6 +68,19 @@ export type QualificationExecResult =
 
 const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
 
+/**
+ * A LOCAL case's ledger row must show a CALCULATED $0 — reserved at $0 and
+ * settled with a KNOWN actual cost of $0. An actual cost the guard could not
+ * calculate (ACTUAL_COST_UNKNOWN) fails this check; the $0 estimate is never
+ * substituted for it.
+ */
+export function localZeroCostCheck(row: any): { check: string; ok: boolean; evidence: string } {
+  const est = row?.estimated_cost_usd;
+  const act = row?.actual_cost_usd;
+  const ok = !!row && est !== null && est !== undefined && Number(est) === 0 && row.actual_cost_state === 'KNOWN' && act !== null && act !== undefined && Number(act) === 0;
+  return { check: 'integrity:local_zero_cost', ok, evidence: `estimated $${est ?? '?'}, actual $${act ?? '?'} (${row?.actual_cost_state ?? 'no state'})` };
+}
+
 export async function executeQualificationCases(p: { runId: string; workspaceId: string; source: 'SANDBOX' | 'CANARY'; actor: string }): Promise<QualificationExecResult> {
   const run = getRun(p.runId);
   if (!run) return { ok: false, error: 'no such run' };
@@ -136,7 +149,7 @@ export async function executeQualificationCases(p: { runId: string; workspaceId:
         { check: 'integrity:ledger_names_route', ok: row?.provider === run.provider_id && row?.model === run.model_id && (row?.deployment_id ?? run.deployment_id) === run.deployment_id, evidence: `${row?.provider}/${row?.model}@${row?.deployment_id ?? 'default'}` },
         { check: 'integrity:ledger_names_decision', ok: row?.routing_decision_id === decision.decisionId, evidence: `routing_decision_id ${row?.routing_decision_id ?? 'none'}` },
         { check: 'integrity:ledger_names_run', ok: row?.correlation_id === p.runId, evidence: `correlation_id ${row?.correlation_id ?? 'none'}` },
-        ...(local ? [{ check: 'integrity:local_zero_cost', ok: Number(row?.actual_cost_usd ?? row?.estimated_cost_usd ?? NaN) === 0 && Number(row?.estimated_cost_usd ?? NaN) === 0, evidence: `estimated $${row?.estimated_cost_usd ?? '?'}, actual $${row?.actual_cost_usd ?? '?'}` }] : []),
+        ...(local ? [localZeroCostCheck(row)] : []),
       ];
       const integrityOk = integrityChecks.every((x) => x.ok);
       const scored = output ? evaluateCase(c.check, output) : { pass: false, detail: 'no output' };

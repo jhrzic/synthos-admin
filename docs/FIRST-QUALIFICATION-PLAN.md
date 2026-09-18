@@ -94,6 +94,11 @@ route → *Run suite*). Approval is refused unless at least one case is a CANARY
 
 ## B. Zero-cost local path — a runtime is actually installed
 
+> **Executed 2026-09-18** for `qwen2.5-coder:14b` × `literal_transformation`: PASSED 6/6, not approved, not enabled.
+> Evidence and one ledger-cost defect: `docs/qualification/2026-09-18-local-qwen2.5-coder-14b-literal.md`.
+> The steps below are what that run followed. Import went through the Admin "Pull once" path, which is gated by
+> manual discovery, on the pinned `127.0.0.1:11434` endpoint.
+
 Evidence gathered without contacting it (filesystem and process table only):
 
 - `/usr/local/bin/ollama` exists; `Ollama.app` is in `/Applications`.

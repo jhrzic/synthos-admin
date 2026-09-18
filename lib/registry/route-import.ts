@@ -220,7 +220,10 @@ const localRuntime: RouteImporter = {
         outputContracts: ['NARRATIVE', 'LITERAL'],
         // A $0 record the OPERATOR must approve: unknown pricing is never
         // treated as free, so an unreviewed local model cannot run.
-        pricing: [importedPricing({ input: 0, output: 0, cachedInput: null }, src, false, now, previous.get(id))].map((r) => ({ ...r, staleAfter: hoursFrom(now, 24 * 365), reasoningTokens: 'NOT_BILLED' as const })),
+        // cachedInput is an explicit 0, not null: a local runtime reports prompt-
+        // cache hits (Ollama does), and a null cached rate makes the ledger's
+        // actual cost UNKNOWN rather than $0 (the guard never guesses a rate).
+        pricing: [importedPricing({ input: 0, output: 0, cachedInput: 0 }, src, false, now, previous.get(id))].map((r) => ({ ...r, staleAfter: hoursFrom(now, 24 * 365), reasoningTokens: 'NOT_BILLED' as const })),
         freeTier: { free: true, guaranteed: true },
       });
     }

@@ -84,7 +84,9 @@ beforeAll(async () => {
         const content = String(body?.messages?.[0]?.content ?? '');
         const text = mode === 'wrong-on-2' && n === 2 ? 'Sure! ROUTE READY' : answer(content);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ id: `chatcmpl-${n}`, model: MODEL, choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 4, total_tokens: 24 } }));
+        // Like Ollama: after the first call the prompt prefix is served from cache.
+        const usage = { prompt_tokens: 20, completion_tokens: 4, total_tokens: 24, ...(n > 1 ? { prompt_tokens_details: { cached_tokens: 12 } } : {}) };
+        return res.end(JSON.stringify({ id: `chatcmpl-${n}`, model: MODEL, choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }], usage }));
       }
       res.writeHead(404); res.end();
     });
@@ -147,7 +149,7 @@ describe('metadata import, identity and price — nothing runs until each is app
     const view = evaluateModel(LOC, MODEL)!;
     expect(view.executable).toBe(false);
     expect(view.blockers.map((b) => b.state)).toEqual(expect.arrayContaining(['PRICING_REQUIRED', 'UNQUALIFIED']));
-    expect(currentPricing(getStoredModel(LOC, MODEL)!.record)).toMatchObject({ state: 'NOT_APPROVED', record: { approval: 'UNREVIEWED', rates: { input: 0, output: 0 } } });
+    expect(currentPricing(getStoredModel(LOC, MODEL)!.record)).toMatchObject({ state: 'NOT_APPROVED', record: { approval: 'UNREVIEWED', rates: { input: 0, output: 0, cachedInput: 0 } } });
     expect(routeIdentity(LOC, MODEL).resolved).toBe(false);
   });
 
@@ -162,6 +164,7 @@ describe('metadata import, identity and price — nothing runs until each is app
   it('price approval takes exactly the reviewed $0 record, and nothing that is not a credential-free local route', () => {
     expect(approveLocalZeroPrice({ providerId: LOC, modelId: MODEL, versionKey: 'registry:wrong', actor: 'operator' })).toMatchObject({ ok: false, error: expect.stringMatching(/review it again/) });
     expect(approveLocalZeroPrice({ providerId: 'openai', modelId: 'gpt-5.6-terra', versionKey: 'x', actor: 'operator' })).toMatchObject({ ok: false });
+    expect(fs.readFileSync(path.join(process.cwd(), 'lib/registry/index.ts'), 'utf8')).toContain('r.rates.cachedInput === 0');
     const r = approveLocalZeroPrice({ providerId: LOC, modelId: MODEL, versionKey: priceKey(), actor: 'operator' });
     expect(r.ok, JSON.stringify(r)).toBe(true);
     expect(currentPricing(getStoredModel(LOC, MODEL)!.record)).toMatchObject({ state: 'CURRENT', record: { approval: 'APPROVED', source: 'route-import:local-runtime' } });
@@ -177,6 +180,17 @@ describe('metadata import, identity and price — nothing runs until each is app
     // Admitted (record + price reviewed), NOT enabled for production.
     expect(qualifyModel(LOC, MODEL, 'operator').ok).toBe(true);
     expect(evaluateModel(LOC, MODEL)!.blockers.map((b) => b.state)).toContain('QUALIFIED');
+  });
+});
+
+describe('local $0 integrity check', () => {
+  it('requires a CALCULATED $0: an estimate of $0 with an unknown actual cost fails', async () => {
+    const { localZeroCostCheck } = await import('../lib/registry/qualification-exec');
+    expect(localZeroCostCheck({ estimated_cost_usd: 0, actual_cost_usd: 0, actual_cost_state: 'KNOWN' }).ok).toBe(true);
+    expect(localZeroCostCheck({ estimated_cost_usd: 0, actual_cost_usd: null, actual_cost_state: 'ACTUAL_COST_UNKNOWN' }).ok).toBe(false);
+    expect(localZeroCostCheck({ estimated_cost_usd: 0, actual_cost_usd: 0.0001, actual_cost_state: 'KNOWN' }).ok).toBe(false);
+    expect(localZeroCostCheck({ estimated_cost_usd: 0.01, actual_cost_usd: 0, actual_cost_state: 'KNOWN' }).ok).toBe(false);
+    expect(localZeroCostCheck(null).ok).toBe(false);
   });
 });
 
@@ -214,7 +228,9 @@ describe('the qualification run — canonical path, $0, evidence only', () => {
       const row = db.prepare('SELECT * FROM provider_usage WHERE usage_id = ?').get(c.usageId) as any;
       expect(row).toMatchObject({ provider: LOC, model: MODEL, status: 'SUCCESS', routing_decision_id: c.decisionId, correlation_id: s.runId, call_site: 'registry.qualification' });
       expect(Number(row.estimated_cost_usd)).toBe(0);
-      expect(Number(row.actual_cost_usd)).toBe(0);
+      // A CALCULATED $0, including calls whose prompt was served from cache.
+      expect(row.actual_cost_state).toBe('KNOWN');
+      expect(row.actual_cost_usd).toBe(0);
       const review = db.prepare('SELECT * FROM quality_reviews WHERE review_id = ?').get(c.reviewId) as any;
       expect(review).toMatchObject({ decision: 'VERIFIED', reviewer: 'Guardian-Aegis-Qualification-v1' });
       const receipt = db.prepare('SELECT * FROM receipts WHERE receipt_id = ?').get(c.receiptId) as any;

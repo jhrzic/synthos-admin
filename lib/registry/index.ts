@@ -390,7 +390,9 @@ export function approveLocalZeroPrice(p: { providerId: string; modelId: string; 
   if (key !== p.versionKey) return { ok: false, error: `the price in force is ${key}, not the reviewed ${p.versionKey}; review it again` };
   if (cur.record.approval === 'APPROVED') return { ok: false, error: 'this price record is already approved' };
   const r = cur.record;
-  const zero = r.rates.input === 0 && r.rates.output === 0 && (r.rates.cachedInput === null || r.rates.cachedInput === 0)
+  // cachedInput must be an explicit 0: an unstated cached rate makes every
+  // prompt-cache hit's actual cost UNKNOWN on the ledger (never guessed).
+  const zero = r.rates.input === 0 && r.rates.output === 0 && r.rates.cachedInput === 0
     && r.tiers.length === 0 && r.toolCharges.length === 0 && r.modalityCharges.length === 0;
   if (!zero) return { ok: false, error: 'the record is not exactly $0 (a rate, tier or surcharge is non-zero); a local route is never approved at a price' };
   if (!/local/i.test(r.source)) return { ok: false, error: `the record's source "${r.source}" does not identify local execution` };
