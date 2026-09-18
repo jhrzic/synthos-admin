@@ -34,6 +34,13 @@ export interface ExecuteAgentTaskInput {
   outputContract?: unknown;
   /** Registry task class (data). Absent → the class registered for the output contract. */
   taskClass?: string;
+  /**
+   * What the artifact is FOR (lib/memory-index.ts). Absent → PRODUCTION_WORK
+   * (ordinary retrieval, the pre-existing behaviour). ACCEPTANCE_EVIDENCE /
+   * QUALIFICATION_EVIDENCE / TEST_FIXTURE are kept as evidence but are never
+   * admitted to ordinary retrieval.
+   */
+  artifactPurpose?: string;
   /** Routing constraints/mode for the canonical router (narrow the workspace's; never widen). */
   routing?: import('../registry/router').RoutingConstraints;
   privacyClass?: import('../registry/types').PrivacyClass;

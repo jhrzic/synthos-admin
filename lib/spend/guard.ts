@@ -33,6 +33,7 @@
 //   2xx but unusable           → KNOWN_FAILURE (may have been billed)
 // ---------------------------------------------------------------------------
 
+import { isDraining } from '../runtime-lifecycle';
 import { recordRuntimeEvent } from '../runtime-events';
 import { getDatabase } from '../persistence';
 import { runWithPermit, type SpendPermit } from './network-guard';
@@ -245,6 +246,9 @@ export function authorizePaidCall(req: PaidCallRequest): { permitted: false; usa
   const attempt = prior.length ? Math.max(...prior.map((r) => r.attempt)) + 1 : 1;
 
   if (!req.idempotencyKey || !req.idempotencyKey.trim()) return block(req, attempt, 'NO_IDEMPOTENCY_KEY', 'A paid call must carry an idempotency key.');
+  // DRAINING: no new dispatch leaves the process. A wait code, not a failure:
+  // the task pauses durably and resumes after the restart.
+  if (isDraining()) return block(req, attempt, 'SERVICE_DRAINING', 'The service is shutting down; no new provider request is sent. The work resumes after the restart.');
   // ONE policy, three permissions: any model execution at all; paid external
   // execution; genuinely $0 LOCAL execution. Paid OFF blocks every
   // positive-cost call — it does not block a governed $0 local route, which
@@ -390,7 +394,7 @@ export function previewPaidCall(req: PaidCallRequest) {
 
 /** Refusals that mean "not now" — the work should wait, not fail. */
 export const SPEND_WAIT_CODES = new Set([
-  'PAID_EXECUTION_DISABLED', 'LOCAL_EXECUTION_DISABLED', 'MODEL_EXECUTION_DISABLED', 'PROVIDER_DISABLED', 'PRICING_UNKNOWN',
+  'PAID_EXECUTION_DISABLED', 'LOCAL_EXECUTION_DISABLED', 'MODEL_EXECUTION_DISABLED', 'PROVIDER_DISABLED', 'PRICING_UNKNOWN', 'SERVICE_DRAINING',
   'CONCURRENCY_GLOBAL', 'CONCURRENCY_PROVIDER', 'CONCURRENCY_WORKSPACE',
   'BUDGET_GLOBAL_DAILY', 'BUDGET_GLOBAL_MONTHLY', 'BUDGET_PROVIDER_DAILY', 'BUDGET_PROVIDER_MONTHLY', 'BUDGET_WORKSPACE_DAILY',
 ]);

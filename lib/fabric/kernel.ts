@@ -44,6 +44,8 @@
 // different-sounding concept for them.
 // ---------------------------------------------------------------------------
 
+import { classifyArtifactPurpose, isArtifactPurpose, ARTIFACT_PURPOSES } from '../memory-index';
+import { isDraining, noteExecutionStarted } from '../runtime-lifecycle';
 import crypto from 'node:crypto';
 import { normalizeOutputContract, buildContractPrompt, type OutputContract, type ProviderTermination } from './output-contract';
 import { runScopedAegis, receiptOutcomeFields, commitContentFailure, isContentFailure } from './scoped-verification';
@@ -240,7 +242,34 @@ sourceHash: ${packageMetadataResult.sourceHash}
   return rolePrompt;
 }
 
+/**
+ * The one entry for running a task (HTTP ingress and the orchestrator alike).
+ * While the service is DRAINING it starts nothing — zero writes, zero spend —
+ * and every execution it does start is registered as in flight, so shutdown
+ * waits for it (bounded) and settles it durably instead of abandoning it.
+ */
 export async function executeAgentTask(
+  rawBody: ExecuteAgentTaskInput | null | undefined,
+  resolvedWorkspaceId: string,
+  ctx: ExecutionContext
+): Promise<ExecutionResult> {
+  const body = { ...((rawBody || {}) as ExecuteAgentTaskInput) };
+  if (!body.taskId) body.taskId = `task-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+  if ((body as any).artifactPurpose !== undefined && !isArtifactPurpose((body as any).artifactPurpose)) {
+    return { status: 400, body: { success: false, status: "REFUSED", reason: "INVALID_ARTIFACT_PURPOSE", error: `artifactPurpose must be one of ${ARTIFACT_PURPOSES.join(', ')}. Nothing was run.`, taskId: body.taskId } };
+  }
+  if (isDraining()) {
+    return { status: 503, body: { success: false, status: "REFUSED", reason: "SERVICE_DRAINING", error: "The service is shutting down; no new task is started. Submit it again after the restart.", taskId: body.taskId } };
+  }
+  const finished = noteExecutionStarted(body.taskId, 'kernel.task');
+  try {
+    return await executeAgentTaskInner(body, resolvedWorkspaceId, ctx);
+  } finally {
+    finished();
+  }
+}
+
+async function executeAgentTaskInner(
   rawBody: ExecuteAgentTaskInput | null | undefined,
   resolvedWorkspaceId: string,
   ctx: ExecutionContext
@@ -479,6 +508,16 @@ export async function executeAgentTask(
       extension: 'md',
       createdAt: nowIso,
     });
+
+    // Purpose is recorded the moment the artifact exists — before any index
+    // path runs — so acceptance/qualification/test output never enters
+    // ordinary retrieval, not even briefly. Absent → PRODUCTION_WORK (default).
+    const requestedPurpose = (rawBody as any)?.artifactPurpose;
+    if (requestedPurpose !== undefined && requestedPurpose !== 'PRODUCTION_WORK') {
+      if (!isArtifactPurpose(requestedPurpose)) throw new Error(`artifactPurpose must be one of ${ARTIFACT_PURPOSES.join(', ')}`);
+      const c = classifyArtifactPurpose({ workspaceId: resolvedWorkspaceId, artifactId: persistedArtifact.artifact_id, purpose: requestedPurpose, reason: `declared by the task at creation (${taskId})`, actor: 'kernel' });
+      if (!c.ok) throw new Error(c.error);
+    }
 
     recordActivityEvent({
       taskId,

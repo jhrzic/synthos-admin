@@ -32,7 +32,9 @@ export type AdminEventType =
   | 'SPEND_POLICY_CHANGED'
   | 'SPEND_PRICING_CHANGED'
   | 'SPEND_USAGE_CLEARED'
-  | 'MODEL_REGISTRY_CHANGED';
+  | 'MODEL_REGISTRY_CHANGED'
+  | 'ARTIFACT_PURPOSE_CHANGED'
+  | 'TASK_QUEUE_ACTION';
 
 export interface AdminAuditEventRecord {
   event_id: string;

@@ -35,7 +35,7 @@ import { recordRegistryEvent } from '../registry/store';
  */
 export const SPEND_LEDGER_GUARD_SINCE = '2026-09-18T04:17:58.000Z';
 
-const PROCESS_STARTED_AT = new Date(Date.now() - Math.round(process.uptime() * 1000)).toISOString();
+export const PROCESS_STARTED_AT = new Date(Date.now() - Math.round(process.uptime() * 1000)).toISOString();
 
 export type OrphanVerdict = 'OUTCOME_KNOWN_DONE' | 'NEVER_DISPATCHED' | 'AMBIGUOUS_DISPATCH';
 
@@ -123,4 +123,74 @@ export function reconcileOrphanedRunningTask(taskId: string, actor: string, proc
   updateTaskStatus(taskId, d.status, undefined, e.workspaceId);
   recordRegistryEvent('ORPHAN_TASK_RECONCILED', { actor, taskId, verdict: d.verdict, status: d.status });
   return { ok: true, verdict: d.verdict, status: d.status, reason: d.reason, evidence: e };
+}
+
+// ---------------------------------------------------------------------------
+// SHUTDOWN SETTLEMENT — the drain's last step (lib/fabric/scheduler.ts).
+//
+// After the bounded wait, anything THIS process started and did not finish is
+// marked durably before exit, from its own evidence:
+//   ledger RESERVED, never sent      → PRE_DISPATCH_FAILURE at $0 (released)
+//   ledger DISPATCHED (sent, no answer) → UNKNOWN — may have been processed;
+//                                       never retried
+//   task with a receipt              → DONE (outcome known)
+//   task never dispatched            → resumable (continuity pause, or READY)
+//   task with an ambiguous dispatch  → RECONCILING_UNKNOWN_EXECUTION
+// Nothing is deleted or rewritten: statuses are appended, events recorded,
+// checkpoints, provider events and idempotency keys untouched.
+// ---------------------------------------------------------------------------
+
+export type ShutdownOutcome = 'NEVER_DISPATCHED' | 'COMPLETED' | 'KNOWN_PROVIDER_FAILURE' | 'AMBIGUOUS';
+
+export interface ShutdownSettlement {
+  releasedReservations: string[];
+  markedUnknown: string[];
+  tasks: Array<{ taskId: string; outcome: ShutdownOutcome; from: string; to: string; reason: string }>;
+}
+
+const OPEN_TASK_STATES = ['RUNNING', 'AWAITING_VERIFICATION', 'AWAITING_RECEIPT'];
+
+export function settleInterruptedAtShutdown(p: { processStartedAt?: string; actor: string }): ShutdownSettlement {
+  const since = p.processStartedAt ?? PROCESS_STARTED_AT;
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  const out: ShutdownSettlement = { releasedReservations: [], markedUnknown: [], tasks: [] };
+  try {
+    for (const r of db.prepare("SELECT usage_id FROM provider_usage WHERE status = 'RESERVED' AND dispatched_at IS NULL AND created_at >= ?").all(since) as any[]) {
+      db.prepare("UPDATE provider_usage SET status = 'PRE_DISPATCH_FAILURE', reason_code = 'SERVICE_SHUTDOWN', reason = 'Reserved but never sent before the service shut down.', estimated_cost_usd = 0, actual_cost_usd = 0, actual_cost_state = 'KNOWN', completed_at = ? WHERE usage_id = ? AND status = 'RESERVED'").run(now, r.usage_id);
+      out.releasedReservations.push(r.usage_id);
+    }
+    for (const r of db.prepare("SELECT usage_id FROM provider_usage WHERE status = 'DISPATCHED' AND created_at >= ?").all(since) as any[]) {
+      db.prepare("UPDATE provider_usage SET status = 'UNKNOWN', reason_code = 'SERVICE_SHUTDOWN', reason = 'Sent, and the service shut down before its outcome was recorded. It may have been processed; it will not be retried automatically.', completed_at = ? WHERE usage_id = ? AND status = 'DISPATCHED'").run(now, r.usage_id);
+      out.markedUnknown.push(r.usage_id);
+    }
+  } catch { /* no ledger table: nothing to settle */ }
+
+  const tasks = db.prepare(`SELECT task_id, workspace_id, status FROM tasks WHERE status IN (${OPEN_TASK_STATES.map(() => '?').join(', ')}) AND updated_at >= ?`).all(...OPEN_TASK_STATES, since) as any[];
+  for (const t of tasks) {
+    const e = orphanEvidence(t.task_id, since)!;
+    const rows = e.ledgerRows;
+    const ambiguous = rows.some((r) => ['UNKNOWN', 'TIMEOUT_AFTER_DISPATCH', 'DISPATCHED', 'SUCCESS'].includes(r.status));
+    const knownFailure = !ambiguous && rows.some((r) => ['PROVIDER_REJECTION', 'KNOWN_FAILURE'].includes(r.status));
+    let outcome: ShutdownOutcome; let to: string; let reason: string;
+    if (e.receipts > 0) { outcome = 'COMPLETED'; to = 'DONE'; reason = 'a signed receipt was recorded before the shutdown finished'; }
+    else if (ambiguous) { outcome = 'AMBIGUOUS'; to = 'RECONCILING_UNKNOWN_EXECUTION'; reason = `interrupted by service shutdown after a provider request was sent (${rows.map((r) => `${r.usageId}=${r.status}`).join(', ')}); it may have been processed and is never retried automatically`; }
+    else { outcome = knownFailure ? 'KNOWN_PROVIDER_FAILURE' : 'NEVER_DISPATCHED'; to = 'PAUSED_AWAITING_CAPACITY'; reason = knownFailure ? 'interrupted by service shutdown after a known provider refusal; nothing was processed; resumes after the restart' : 'interrupted by service shutdown before any provider request was sent; resumes after the restart'; }
+    let continuityState: string | null = null;
+    try { continuityState = (db.prepare('SELECT state FROM task_continuity WHERE task_id = ?').get(t.task_id) as any)?.state ?? null; } catch { /* none */ }
+    recordActivityEvent({ taskId: t.task_id, expectedWorkspaceId: t.workspace_id, eventType: 'SHUTDOWN_INTERRUPTED', agentId: p.actor, payload: { outcome, fromStatus: t.status, toStatus: to, reason, ledgerRows: rows } });
+    if (continuityState !== null) {
+      // The continuity controller owns the transition (it appends status + event).
+      try {
+        for (const seg of db.prepare("SELECT segment_id FROM task_segments WHERE task_id = ? AND status = 'RUNNING'").all(t.task_id) as any[]) {
+          db.prepare('UPDATE task_segments SET status = ?, status_reason = ?, completed_at = ? WHERE segment_id = ?').run(outcome === 'AMBIGUOUS' ? 'UNKNOWN' : 'BLOCKED', `service shutdown: ${reason}`.slice(0, 500), now, seg.segment_id);
+        }
+      } catch { /* no segments */ }
+      db.prepare('UPDATE task_continuity SET state = ?, state_reason = ? WHERE task_id = ?').run(to === 'DONE' ? 'DONE' : to, reason.slice(0, 1000), t.task_id);
+    }
+    updateTaskStatus(t.task_id, to, undefined, t.workspace_id);
+    out.tasks.push({ taskId: t.task_id, outcome, from: t.status, to, reason });
+  }
+  recordRegistryEvent('SHUTDOWN_SETTLED', { actor: p.actor, releasedReservations: out.releasedReservations.length, markedUnknown: out.markedUnknown.length, tasks: out.tasks.map((x) => `${x.taskId}:${x.outcome}`) });
+  return out;
 }

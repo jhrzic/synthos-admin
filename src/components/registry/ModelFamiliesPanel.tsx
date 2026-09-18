@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { GitMerge, Upload, ShieldCheck, RefreshCw } from 'lucide-react';
 import { Badge, type Tone } from '../verification/outcome';
 import type { RegistryModel, RegistryProvider } from './useModelRegistry';
+import { LocalRouteControls } from './LocalRouteControls';
 
 // ---------------------------------------------------------------------------
 // MODEL REGISTRY BY FAMILY — family → canonical version → routes.
@@ -182,6 +183,9 @@ export const ModelFamiliesPanel: React.FC<Props> = ({ workspaceId, models, provi
           </div>
         )}
       </div>
+
+      {/* Local route controls: substance, exact $0 price, qualification evidence, enablement, local execution */}
+      <LocalRouteControls workspaceId={workspaceId} models={models} identityRoutes={routes} qualifications={quals} onChanged={() => { load(); onChanged(); }} />
 
       {/* Qualification */}
       <div className={`${box} space-y-2`} data-testid="qualification-runner">

@@ -46,6 +46,7 @@
 // BLOCKED, because that is a decision rather than a delay.
 // ---------------------------------------------------------------------------
 
+import { isDraining } from '../runtime-lifecycle';
 import {
   listOrchestratorEligibleTasks,
   claimTaskForOrchestration,
@@ -283,6 +284,8 @@ export async function advanceTask(task: OrchestratorTaskRow): Promise<Orchestrat
   const workspaceId = String(task.workspace_id || '');
   const correlationId = correlationFor(task);
   const base = { taskId: task.task_id, workspaceId, capability: task.capability, correlationId };
+  // DRAINING: nothing is claimed or started; the task stays exactly as it was.
+  if (isDraining()) return { ...base, outcome: 'DEFERRED', reason: 'SERVICE_DRAINING: the service is shutting down; the task was not claimed.' } as OrchestrationStep;
 
   // Declared before the claim so every exit path can settle it.
   let settle: ((outcome: OrchestrationOutcome) => void) | null = null;
@@ -746,6 +749,10 @@ export async function runOrchestrationTick(opts: { maxTasks?: number; workspaceI
   const stranded: string[] = [];
   const resumed: Array<{ taskId: string; to: string; approvalId: string }> = [];
 
+  // DRAINING: claim nothing. Work already running is settled by the drain.
+  if (isDraining()) {
+    return { level, considered: 0, steps, stranded, resumed };
+  }
   if (level === 'MANUAL') {
     return { level, considered: 0, steps, stranded, resumed };
   }

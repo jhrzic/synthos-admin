@@ -32,9 +32,11 @@ export type RuntimeEventType =
   | 'DEVELOPMENT_TASK'
   // SPEND GUARD — every refused or non-successful paid call, and budget threshold alerts.
   | 'SPEND_GUARD'
-  | 'SPEND_ALERT';
+  | 'SPEND_ALERT'
+  // SERVICE LIFECYCLE — DRAINING / DRAINED around a shutdown (lib/fabric/scheduler.ts drainAndSettle).
+  | 'SERVICE_LIFECYCLE';
 
-export type RuntimeEventTargetType = 'skill' | 'mcp_server' | 'hermes_runtime' | 'provider' | 'external_execution' | 'capability' | 'development_task';
+export type RuntimeEventTargetType = 'skill' | 'mcp_server' | 'hermes_runtime' | 'provider' | 'external_execution' | 'capability' | 'development_task' | 'service';
 
 // ADR-006 — RUNNING/SUBMITTED/CANCELLED added for the external-execution
 // lifecycle (Workstream M). Purely additive: every existing producer of

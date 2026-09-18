@@ -138,6 +138,8 @@ describe.skipIf(!bundleExists)('graceful shutdown — real process, real signal'
     const log = stdout();
     expect(log).toContain('[Shutdown] SIGTERM received');
     expect(log).toContain('[Shutdown] Database checkpointed and closed');
+    // Nothing was in flight: the drain settled within its bound and settled nothing.
+    expect(log).toMatch(/\[Shutdown\] Drain settled: 0 execution\(s\) outstanding; settled — reservations released 0, calls marked UNKNOWN 0, tasks none\./);
 
     // Order is the correctness property: arming must stop before draining, or a
     // scheduler tick can dispatch real work into a dying process.
@@ -148,7 +150,7 @@ describe.skipIf(!bundleExists)('graceful shutdown — real process, real signal'
     expect(schedulerAt).toBeLessThan(httpAt);
 
     // Drain entered exactly once despite two signals.
-    const drains = log.split('[Shutdown] SIGTERM received. Draining.').length - 1;
+    const drains = log.split('[Shutdown] SIGTERM received. DRAINING').length - 1;
     expect(drains, 'drain must be entered exactly once').toBe(1);
 
     // TRUNCATE checkpoint folds the WAL back and removes the sidecars.
@@ -169,11 +171,11 @@ describe.skipIf(!bundleExists)('graceful shutdown — real process, real signal'
   // in test/voice-routing-separation.test.ts.
   it('SIGINT is wired to the identical shutdown path, not a second implementation', () => {
     const src = fs.readFileSync(path.join(ROOT, 'server.ts'), 'utf8');
-    expect(src).toContain("process.on('SIGTERM', () => shutdown('SIGTERM'))");
-    expect(src).toContain("process.on('SIGINT', () => shutdown('SIGINT'))");
+    expect(src).toContain("process.on('SIGTERM', () => { void shutdown('SIGTERM'); });");
+    expect(src).toContain("process.on('SIGINT', () => { void shutdown('SIGINT'); });");
     // One drain implementation, not two that can drift apart.
     expect(
-      src.split('const shutdown = (signal: string) =>').length - 1,
+      src.split('const shutdown = async (signal: string) =>').length - 1,
       'there must be exactly one shutdown implementation',
     ).toBe(1);
   });

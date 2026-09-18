@@ -8,8 +8,104 @@
 // virtual table); this module is the read/write service over it.
 // ---------------------------------------------------------------------------
 
+import crypto from 'node:crypto';
 import { recordActivityEvent, getDatabase } from './persistence';
 import { getWorkspaceVaultEntry, listWorkspaceVaultEntries } from './vault';
+
+// ---------------------------------------------------------------------------
+// ARTIFACT PURPOSE AND RETRIEVAL POLICY.
+//
+// Integrity verification decides whether an artifact is TRUE evidence; it
+// must not also decide whether operational test output shows up when someone
+// searches their workspace. So every artifact has a PURPOSE, and the purpose
+// sets its RETRIEVAL POLICY:
+//
+//   PRODUCTION_WORK         ORDINARY    in the memory index (ordinary search)
+//   ACCEPTANCE_EVIDENCE     AUDIT_ONLY  preserved, hash-verifiable, receipt-
+//   QUALIFICATION_EVIDENCE  AUDIT_ONLY  addressable — found only by an
+//   TEST_FIXTURE            AUDIT_ONLY  explicit, authorized evidence search
+//
+// Append-only: a classification is a row in artifact_purpose_events; the
+// latest one for an artifact is its purpose. The artifact row, its file and
+// hash, its review, receipt, ledger row and earlier events are never
+// rewritten. Only the DERIVED memory index follows the policy.
+//
+// BACKWARD COMPATIBILITY: an artifact with no purpose event is
+// PRODUCTION_WORK / ORDINARY — exactly how every artifact behaved before this
+// existed, so no existing work silently disappears from search.
+//
+// KNOWLEDGE is separate: admission to canonical knowledge is decided by KIL
+// alone. A purpose never promotes anything; ORDINARY retrieval is not
+// knowledge, and verification is not knowledge.
+// ---------------------------------------------------------------------------
+
+export const ARTIFACT_PURPOSES = ['PRODUCTION_WORK', 'ACCEPTANCE_EVIDENCE', 'QUALIFICATION_EVIDENCE', 'TEST_FIXTURE'] as const;
+export type ArtifactPurpose = (typeof ARTIFACT_PURPOSES)[number];
+export type RetrievalPolicy = 'ORDINARY' | 'AUDIT_ONLY';
+
+export function retrievalPolicyFor(purpose: ArtifactPurpose): RetrievalPolicy {
+  return purpose === 'PRODUCTION_WORK' ? 'ORDINARY' : 'AUDIT_ONLY';
+}
+
+export function isArtifactPurpose(v: unknown): v is ArtifactPurpose {
+  return typeof v === 'string' && (ARTIFACT_PURPOSES as readonly string[]).includes(v);
+}
+
+function ensurePurposeTable(): void {
+  getDatabase().exec(`CREATE TABLE IF NOT EXISTS artifact_purpose_events (
+    event_id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+    purpose TEXT NOT NULL, retrieval_policy TEXT NOT NULL, reason TEXT NOT NULL, actor TEXT NOT NULL, created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_artifact_purpose_events_artifact ON artifact_purpose_events (artifact_id, created_at);`);
+}
+
+export interface ArtifactPurposeView {
+  artifactId: string;
+  purpose: ArtifactPurpose;
+  retrievalPolicy: RetrievalPolicy;
+  source: 'EVENT' | 'DEFAULT';
+  eventId: string | null;
+  reason: string | null;
+  classifiedAt: string | null;
+}
+
+export function currentArtifactPurpose(artifactId: string): ArtifactPurposeView {
+  ensurePurposeTable();
+  const r = getDatabase().prepare('SELECT * FROM artifact_purpose_events WHERE artifact_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1').get(artifactId) as any;
+  if (!r) return { artifactId, purpose: 'PRODUCTION_WORK', retrievalPolicy: 'ORDINARY', source: 'DEFAULT', eventId: null, reason: null, classifiedAt: null };
+  return { artifactId, purpose: r.purpose, retrievalPolicy: r.retrieval_policy, source: 'EVENT', eventId: r.event_id, reason: r.reason, classifiedAt: r.created_at };
+}
+
+export function artifactPurposeHistory(artifactId: string): Array<{ eventId: string; purpose: string; retrievalPolicy: string; reason: string; actor: string; createdAt: string }> {
+  ensurePurposeTable();
+  return (getDatabase().prepare('SELECT * FROM artifact_purpose_events WHERE artifact_id = ? ORDER BY created_at, rowid').all(artifactId) as any[])
+    .map((r) => ({ eventId: r.event_id, purpose: r.purpose, retrievalPolicy: r.retrieval_policy, reason: r.reason, actor: r.actor, createdAt: r.created_at }));
+}
+
+/**
+ * Classify an artifact (append-only). The memory index follows: AUDIT_ONLY
+ * removes it from ordinary retrieval; ORDINARY re-admits it only if ACTIVE.
+ * Idempotent: classifying to the current purpose appends nothing.
+ */
+export function classifyArtifactPurpose(p: { workspaceId: string; artifactId: string; purpose: ArtifactPurpose; reason: string; actor: string }): { ok: true; changed: boolean; view: ArtifactPurposeView } | { ok: false; error: string } {
+  if (!isArtifactPurpose(p.purpose)) return { ok: false, error: `purpose must be one of ${ARTIFACT_PURPOSES.join(', ')}` };
+  if (!p.reason || p.reason.trim().length < 3) return { ok: false, error: 'a classification must state its reason' };
+  const db = getDatabase();
+  const row = db.prepare('SELECT a.artifact_id, a.task_id FROM artifacts a JOIN tasks t ON t.task_id = a.task_id WHERE a.artifact_id = ? AND t.workspace_id = ?').get(p.artifactId, p.workspaceId) as any;
+  if (!row) return { ok: false, error: `artifact ${p.artifactId} does not exist in workspace ${p.workspaceId}` };
+  const cur = currentArtifactPurpose(p.artifactId);
+  if (cur.source === 'EVENT' && cur.purpose === p.purpose) return { ok: true, changed: false, view: cur };
+  const policy = retrievalPolicyFor(p.purpose);
+  const eventId = `apx-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+  db.prepare('INSERT INTO artifact_purpose_events (event_id, artifact_id, workspace_id, purpose, retrieval_policy, reason, actor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(eventId, p.artifactId, p.workspaceId, p.purpose, policy, p.reason.slice(0, 1000), p.actor, new Date().toISOString());
+  if (policy === 'AUDIT_ONLY') db.prepare('DELETE FROM memory_index WHERE artifact_id = ? AND workspace_id = ?').run(p.artifactId, p.workspaceId);
+  else indexVaultArtifact(p.workspaceId, p.artifactId);
+  try {
+    recordActivityEvent({ taskId: row.task_id, expectedWorkspaceId: p.workspaceId, eventType: 'ARTIFACT_PURPOSE_CLASSIFIED', agentId: p.actor, payload: { artifactId: p.artifactId, from: cur.purpose, to: p.purpose, retrievalPolicy: policy, reason: p.reason, eventId } });
+  } catch { /* the classification stands even if the event cannot be written */ }
+  return { ok: true, changed: true, view: currentArtifactPurpose(p.artifactId) };
+}
 
 export interface MemorySearchResult {
   artifact_id: string;
@@ -38,6 +134,12 @@ export function indexVaultArtifact(workspaceId: string, artifactId: string): boo
   // bring it back into retrieval.
   const status = db.prepare('SELECT retrieval_status FROM artifacts WHERE artifact_id = ?').get(artifactId) as { retrieval_status?: string } | undefined;
   if (status && status.retrieval_status && status.retrieval_status !== 'ACTIVE') {
+    db.prepare(`DELETE FROM memory_index WHERE artifact_id = ? AND workspace_id = ?`).run(artifactId, workspaceId);
+    return false;
+  }
+  // Only ORDINARY artifacts (production work) enter ordinary retrieval. The
+  // same gate runs on every rebuild, so a rebuild cannot restore evidence.
+  if (currentArtifactPurpose(artifactId).retrievalPolicy !== 'ORDINARY') {
     db.prepare(`DELETE FROM memory_index WHERE artifact_id = ? AND workspace_id = ?`).run(artifactId, workspaceId);
     return false;
   }
@@ -359,4 +461,53 @@ export function quarantineArtifact(params: { workspaceId: string; artifactId: st
 export function getArtifactRetrievalStatus(artifactId: string): { status: string; reason: string | null; at: string | null } | null {
   const row = getDatabase().prepare('SELECT retrieval_status, retrieval_status_reason, retrieval_status_at FROM artifacts WHERE artifact_id = ?').get(artifactId) as any;
   return row ? { status: row.retrieval_status, reason: row.retrieval_status_reason ?? null, at: row.retrieval_status_at ?? null } : null;
+}
+
+
+/**
+ * AUTHORIZED EVIDENCE SEARCH — explicit, never part of ordinary retrieval.
+ * Reads the evidence artifacts themselves (not the memory index), re-checks
+ * each file against its recorded hash, and says which purpose and retrieval
+ * state it has. Callers must gate it on workspace-admin / platform-admin.
+ */
+export interface EvidenceSearchResult {
+  artifactId: string;
+  taskId: string;
+  title: string;
+  purpose: ArtifactPurpose;
+  retrievalPolicy: RetrievalPolicy;
+  retrievalStatus: string | null;
+  contentHash: string;
+  hashVerifies: boolean | null;
+  relativePath: string;
+  createdAt: string;
+  snippet: string;
+}
+
+export function searchEvidenceArtifacts(workspaceId: string, query: string, opts: { purposes?: ArtifactPurpose[]; includeQuarantined?: boolean; limit?: number } = {}): EvidenceSearchResult[] {
+  ensurePurposeTable();
+  const purposes = new Set(opts.purposes?.length ? opts.purposes : ARTIFACT_PURPOSES.filter((x) => x !== 'PRODUCTION_WORK'));
+  const tokens = ((query || '').toLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
+  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+  const out: EvidenceSearchResult[] = [];
+  const rows = getDatabase().prepare(`SELECT a.artifact_id FROM artifacts a JOIN tasks t ON t.task_id = a.task_id WHERE t.workspace_id = ? ORDER BY a.created_at DESC LIMIT 2000`).all(workspaceId) as any[];
+  for (const { artifact_id } of rows) {
+    if (out.length >= limit) break;
+    const view = currentArtifactPurpose(artifact_id);
+    const entry = getWorkspaceVaultEntry(workspaceId, artifact_id);
+    if (!entry) continue;
+    const quarantined = entry.retrieval_status === 'QUARANTINED';
+    if (!purposes.has(view.purpose) && !(opts.includeQuarantined && quarantined)) continue;
+    if (quarantined && !opts.includeQuarantined) continue;
+    const text = entry.content ?? '';
+    const hay = `${entry.title}\n${text}`.toLowerCase();
+    if (tokens.length && !tokens.every((t) => hay.includes(t))) continue;
+    const hashVerifies = entry.content === null ? null : `sha256:${crypto.createHash('sha256').update(entry.content, 'utf8').digest('hex')}` === entry.content_hash;
+    out.push({
+      artifactId: artifact_id, taskId: entry.task_id, title: entry.title, purpose: view.purpose, retrievalPolicy: view.retrievalPolicy,
+      retrievalStatus: entry.retrieval_status, contentHash: entry.content_hash, hashVerifies, relativePath: entry.relative_path, createdAt: entry.created_at,
+      snippet: text.replace(/\s+/g, ' ').slice(0, 240),
+    });
+  }
+  return out;
 }

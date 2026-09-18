@@ -89,7 +89,7 @@ import { applyCatalogPricesToRegistry } from "./lib/registry/catalog-bridge";
 import { previewEvaluation, runEvaluation } from "./lib/fabric/evaluation";
 import { runManualDiscovery, runManualPricingRefresh, isManualDiscoveryEnabled, setManualDiscoveryEnabled, listDiscoveryCandidates } from "./lib/registry/discovery";
 import { listKnowledgeNotes, searchKnowledgeNotes, listKnowledgeNotesDetailed } from "./lib/knowledge-vault";
-import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory, listWorkspaceMemory, getArtifactRetrievalStatus } from "./lib/memory-index";
+import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory, listWorkspaceMemory, getArtifactRetrievalStatus, searchEvidenceArtifacts, currentArtifactPurpose, artifactPurposeHistory, classifyArtifactPurpose, isArtifactPurpose } from "./lib/memory-index";
 import { runAeoAudit, createAuditMissionTasks, resolveGeoProvider } from "./lib/aeo/service";
 import { listCapabilities, conversationModelConfigured, toolPackCapabilities } from "./lib/fabric/registry";
 import { TOOL_PACK_1, resolveToolReadiness } from "./lib/fabric/tool-pack";
@@ -107,7 +107,9 @@ import { resolveAutonomyLevel, AUTONOMY_LEVELS, describeAutonomyLevel, isAutonom
 import { getAntigravityControlStatus } from "./lib/antigravity-control";
 import { setPlatformSetting } from "./lib/platform-settings";
 import { describeAntigravityEnablement } from "./lib/antigravity-client";
-import { readBuildInfo } from "./lib/build-info";
+import { settleInterruptedAtShutdown } from "./lib/continuity/orphans";
+import { reviewQueuedTasks, applyQueueAction, type QueueAction } from "./lib/task-queue-review";
+import { readBuildInfo, runtimeVersionReport } from "./lib/build-info";
 import {
   summarizeExternalSources,
   indexExternalVaultSources,
@@ -239,6 +241,7 @@ import {
 import {
   startScheduler,
   stopScheduler,
+  drainAndSettle,
   createValidatedSchedule,
   parseSchedulePhrase,
   computeResumeNextRunAt,
@@ -5562,6 +5565,37 @@ Rules for spokenSummary specifically:
   // index from what's already in the Vault, never to seed sample data.
   // ==========================================
 
+  // AUTHORIZED EVIDENCE SEARCH — acceptance / qualification / test artifacts
+  // are never in ordinary memory retrieval; an admin finds them here, with
+  // their purpose, retrieval state and a fresh hash check. Never part of
+  // ordinary search, conversation or Brain retrieval.
+  app.get("/api/memory/evidence", requireWorkspaceAdmin(fromQuery), (req, res) => {
+    const resolved = resolveWorkspaceId(req.query.workspaceId);
+    if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
+    const purposes = String(req.query.purposes || "").split(",").map((x) => x.trim()).filter(isArtifactPurpose);
+    const results = searchEvidenceArtifacts(resolved.workspaceId, String(req.query.q || ""), { purposes, includeQuarantined: req.query.includeQuarantined === "true", limit: Number(req.query.limit) || 50 });
+    return res.json({ success: true, scope: "AUDIT_EVIDENCE", results });
+  });
+
+  // An artifact's purpose (latest classification) and its full, append-only history.
+  app.get("/api/artifacts/:artifactId/purpose", requireWorkspaceMember(fromQuery), (req, res) => {
+    const resolved = resolveWorkspaceId(req.query.workspaceId);
+    if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
+    if (!getWorkspaceVaultEntry(resolved.workspaceId, String(req.params.artifactId))) return res.status(404).json({ success: false, error: "artifact not found in this workspace" });
+    return res.json({ success: true, current: currentArtifactPurpose(String(req.params.artifactId)), history: artifactPurposeHistory(String(req.params.artifactId)) });
+  });
+
+  // Classify an artifact's purpose. Append-only; audited; idempotent. Changes
+  // only retrieval visibility — never the artifact, review, receipt or ledger.
+  app.post("/api/artifacts/:artifactId/purpose", requireWorkspaceAdmin(fromBody), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const resolved = resolveWorkspaceId(req.body?.workspaceId);
+    if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
+    const r = classifyArtifactPurpose({ workspaceId: resolved.workspaceId, artifactId: String(req.params.artifactId), purpose: req.body?.purpose, reason: String(req.body?.reason || ""), actor });
+    if (r.ok && r.changed) recordAdminAuditEvent({ actorUserId: actor, eventType: "ARTIFACT_PURPOSE_CHANGED", targetType: "artifact", targetId: String(req.params.artifactId), detail: { workspaceId: resolved.workspaceId, purpose: r.view.purpose, retrievalPolicy: r.view.retrievalPolicy, eventId: r.view.eventId, reason: req.body?.reason } });
+    return res.status(r.ok ? 200 : 400).json(r.ok ? { success: true, changed: r.changed, current: r.view } : { success: false, error: r.error });
+  });
+
   app.get("/api/memory/search", requireWorkspaceMember(fromQuery), (req, res) => {
     try {
       const resolved = resolveWorkspaceId(req.query.workspaceId);
@@ -7061,6 +7095,25 @@ Rules for spokenSummary specifically:
   // ==========================================
 
   // 1. Comprehensive System Diagnostics
+  // QUEUED-TASK REVIEW (read-only): every queued task, why it can or cannot run
+  // under the current switches, and which operator actions are available.
+  app.get("/api/master-admin/task-queue", requirePlatformAdmin, (req, res) => {
+    const ws = typeof req.query.workspaceId === "string" && req.query.workspaceId ? req.query.workspaceId : null;
+    return res.json({ success: true, tasks: reviewQueuedTasks({ workspaceId: ws, limit: Number(req.query.limit) || 500 }) });
+  });
+
+  // One explicit operator action on one queued task — confirmed, workspace
+  // scoped, audited, idempotent. Never runs a task.
+  app.post("/api/task-queue/:taskId/action", requireWorkspaceAdmin(fromBody), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const resolved = resolveWorkspaceId(req.body?.workspaceId);
+    if ("error" in resolved) return res.status(400).json({ success: false, error: resolved.error });
+    const action = String(req.body?.action || "") as QueueAction;
+    const r = applyQueueAction({ workspaceId: resolved.workspaceId, taskId: String(req.params.taskId), action, reason: String(req.body?.reason || ""), actor, confirm: req.body?.confirm === true });
+    if (r.ok && r.changed) recordAdminAuditEvent({ actorUserId: actor, eventType: "TASK_QUEUE_ACTION", targetType: "task", targetId: String(req.params.taskId), detail: { workspaceId: resolved.workspaceId, action, reason: req.body?.reason, resultingState: r.state } });
+    return res.status(r.ok ? 200 : 400).json(r.ok ? { success: true, changed: r.changed, state: r.state } : { success: false, error: r.error });
+  });
+
   app.get("/api/master-admin/diagnostics", requirePlatformAdmin, async (req, res) => {
     try {
       const dbPath = getDatabasePath();
@@ -7241,6 +7294,10 @@ Rules for spokenSummary specifically:
             return { status: "UNKNOWN", mode: "DETERMINISTIC_GATE_IN_EXECUTION_SPINE", reviewsCount: dbStats.tables.quality_reviews, byDecision: {} };
           }
         })(),
+        // RUNNING VERSION — the same authority as /api/ready (lib/build-info.ts:
+        // stamped at build/launch, UNKNOWN when unstamped; git is never run
+        // per request), plus runtime and schema versions.
+        runtimeVersion: runtimeVersionReport(getDatabase()),
         aegis: {
           status: "LIVE",
           mode: "DETERMINISTIC_VERIFICATION",
@@ -8260,61 +8317,62 @@ Rules for spokenSummary specifically:
   }
 
   // -------------------------------------------------------------------------
-  // Graceful shutdown. Listed as a known deployment gap in
-  // docs/PRODUCTION-READINESS.md ("an in-flight request can be cut off on
-  // stop/restart"); closed here because every container platform stops a
-  // process by sending SIGTERM, so on a real deployment this path runs on
-  // every single redeploy, not just at the end of life.
+  // Graceful shutdown — DRAIN, then SETTLE, then exit.
   //
-  // Order matters and is deliberate:
-  //   1. stopScheduler()  — stop ARMING new work first. A tick that fires
-  //      while we are draining would dispatch a real execution through
-  //      executeEnvelope() into a process that is about to exit.
-  //   2. httpServer.close() — stop accepting NEW connections, then wait for
-  //      in-flight requests to finish. Node's close() does exactly this; it
-  //      does not sever open requests.
-  //   3. closeDatabase() — checkpoint the WAL and close, only once nothing
-  //      is still writing.
+  // ROOT CAUSE this replaces (task-restart-1789678099, 2026-09-17): shutdown
+  // waited only for HTTP connections (httpServer.close). Work the scheduler
+  // had started in the background — an orchestrated task mid-dispatch — was
+  // invisible to it, so process.exit abandoned it and nothing recorded the
+  // interruption; the task stayed RUNNING with an unknowable outcome.
   //
-  // The force-exit timer is the honest part: if a request hangs, the platform
-  // will SIGKILL us anyway (Docker's default grace is 10s), so we take the
-  // decision ourselves at 8s and say so in the log, rather than appearing to
-  // shut down cleanly while actually being killed.
+  // Now, in order (lib/fabric/scheduler.ts drainAndSettle):
+  //   1. DRAINING — observable (lifecycle flag, SERVICE_LIFECYCLE event). The
+  //      kernel starts no task (503 SERVICE_DRAINING), the orchestrator claims
+  //      none, the spend guard sends no provider request (a wait code: the
+  //      task pauses durably), the scheduler neither ticks nor re-arms.
+  //   2. HTTP stops accepting new connections (in-flight requests continue).
+  //   3. A BOUNDED wait for every execution already in flight — HTTP-started
+  //      and scheduler-started alike — and the scheduler's own tick work.
+  //   4. SETTLE what did not finish, from evidence: never-sent reservations
+  //      released at $0; sent-but-unanswered calls UNKNOWN (never retried);
+  //      interrupted tasks resumable or RECONCILING_UNKNOWN_EXECUTION.
+  //   5. Close the database; exit.
+  // The hard fallback (drain + 3s) still settles before it exits.
   let shuttingDown = false;
-  const shutdown = (signal: string) => {
+  const drainMs = Math.max(0, Math.min(60_000, Number(process.env.SYNTHOS_SHUTDOWN_DRAIN_MS) || 6000));
+  const shutdown = async (signal: string) => {
     if (shuttingDown) {
       console.log(`[Shutdown] ${signal} received again — already shutting down.`);
       return;
     }
     shuttingDown = true;
-    console.log(`[Shutdown] ${signal} received. Draining.`);
+    console.log(`[Shutdown] ${signal} received. DRAINING (bounded to ${drainMs}ms).`);
 
     const forceExit = setTimeout(() => {
-      console.error('[Shutdown] Drain exceeded 8s — forcing exit with requests still in flight.');
+      console.error(`[Shutdown] Drain exceeded ${drainMs + 3000}ms — settling what is left and forcing exit.`);
+      try { settleInterruptedAtShutdown({ actor: `shutdown:${signal}:forced` }); } catch (e: any) { console.error('[Shutdown] settlement failed:', e?.message || e); }
       closeDatabase();
       process.exit(1);
-    }, 8000);
-    // Do not let this timer alone hold the event loop open.
+    }, drainMs + 3000);
     forceExit.unref();
 
-    stopScheduler();
-    console.log('[Shutdown] Scheduler stopped.');
-
-    httpServer.close((err) => {
-      clearTimeout(forceExit);
-      if (err) {
-        console.error(`[Shutdown] HTTP server close error: ${err.message}`);
-      } else {
-        console.log('[Shutdown] HTTP server closed, in-flight requests drained.');
-      }
-      const closed = closeDatabase();
-      console.log(`[Shutdown] Database ${closed ? 'checkpointed and closed' : 'was not open'}.`);
-      process.exit(err ? 1 : 0);
-    });
+    const httpClosed = new Promise<Error | null>((resolve) => httpServer.close((err) => resolve(err ?? null)));
+    // drainAndSettle enters DRAINING and stops the scheduler synchronously, before its first await.
+    const draining = drainAndSettle({ timeoutMs: drainMs, actor: `shutdown:${signal}` });
+    console.log('[Shutdown] Scheduler stopped; DRAINING — no task, claim or provider request is started.');
+    const report = await draining;
+    console.log(`[Shutdown] Drain ${report.settledWithinTimeout ? 'settled' : 'TIMED OUT'}: ${report.outstandingAtTimeout.length} execution(s) outstanding; settled — reservations released ${report.settlement.releasedReservations.length}, calls marked UNKNOWN ${report.settlement.markedUnknown.length}, tasks ${report.settlement.tasks.map((t) => `${t.taskId}:${t.outcome}->${t.to}`).join(', ') || 'none'}.`);
+    const err = await Promise.race([httpClosed, new Promise<Error | null>((r) => setTimeout(() => r(new Error('HTTP close did not finish')), 2000))]);
+    clearTimeout(forceExit);
+    if (err) console.error(`[Shutdown] HTTP server close: ${err.message}`);
+    else console.log('[Shutdown] HTTP server closed.');
+    const closed = closeDatabase();
+    console.log(`[Shutdown] Database ${closed ? 'checkpointed and closed' : 'was not open'}.`);
+    process.exit(err || !report.settledWithinTimeout ? 1 : 0);
   };
 
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+  process.on('SIGINT', () => { void shutdown('SIGINT'); });
 }
 
 startServer();

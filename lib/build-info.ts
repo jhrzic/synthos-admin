@@ -10,6 +10,9 @@
 // environment value.
 // ---------------------------------------------------------------------------
 
+import { createHash } from 'node:crypto';
+import { REGISTRY_SCHEMA_VERSION } from './registry/types';
+
 export type BuildTree = 'CLEAN' | 'MODIFIED' | 'UNKNOWN';
 export type BuildSource = 'LAUNCHER_GIT' | 'BUILD_MANIFEST' | 'UNKNOWN';
 
@@ -40,4 +43,22 @@ export function readBuildInfo(env: Record<string, string | undefined> = process.
   const ref = REF_RE.test(rawRef) ? rawRef : 'UNKNOWN';
   const source: BuildSource = env.SYNTHOS_BUILD_SOURCE === 'LAUNCHER_GIT' || env.SYNTHOS_BUILD_SOURCE === 'BUILD_MANIFEST' ? env.SYNTHOS_BUILD_SOURCE : 'UNKNOWN';
   return { commit, buildTime, ref, tree, source };
+}
+
+/**
+ * The full running-version report for diagnostics: the stamped build
+ * (above), the Node runtime, the registry manifest schema, and the database
+ * schema. There is no versioned-migration scheme for the database, so its
+ * VERSION is reported as UNKNOWN, with a fingerprint of the live schema
+ * (SHA-256 of sqlite_master) so a change is still visible.
+ */
+export function runtimeVersionReport(db?: { prepare(sql: string): { all(): unknown[] } } | null): BuildInfo & { node: string; registrySchema: string; databaseSchema: { version: 'UNKNOWN'; fingerprint: string } } {
+  let fingerprint = 'UNKNOWN';
+  if (db) {
+    try {
+      const rows = db.prepare("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name").all() as Array<{ type: string; name: string; sql: string }>;
+      fingerprint = `sha256:${createHash('sha256').update(rows.map((r) => `${r.type}|${r.name}|${r.sql}`).join('\n')).digest('hex')}`;
+    } catch { /* stays UNKNOWN */ }
+  }
+  return { ...readBuildInfo(), node: process.version, registrySchema: REGISTRY_SCHEMA_VERSION, databaseSchema: { version: 'UNKNOWN', fingerprint } };
 }

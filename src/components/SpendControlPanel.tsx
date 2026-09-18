@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { ConfirmButton } from './registry/LocalRouteControls';
 import { Power, Wallet, AlertTriangle, Loader2, Gauge, ListChecks, ShieldAlert } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -101,11 +102,12 @@ export function SpendControlPanel() {
             ['model-execution', 'ALL MODEL EXECUTION', status.policy.modelExecutionEnabled !== false, 'Master switch: off means nothing runs, paid or free.'],
             ['local-execution', 'LOCAL $0 EXECUTION', status.policy.localExecutionEnabled === true, 'Only LOCAL routes with an approved $0 price record. Free external routes stay under paid execution.'],
           ] as const).map(([scope, label, on, help]) => (
-            <button key={scope} disabled={busy === `kill-${scope}`} onClick={() => post('/api/master-admin/spend/kill', { scope, enabled: !on }, `kill-${scope}`)}
-              className="text-left border border-[#1E223D] rounded-lg px-3 py-2 hover:border-[#615EFF]">
+            <div key={scope} className="text-left border border-[#1E223D] rounded-lg px-3 py-2">
               <div className={`font-mono text-[11px] font-bold ${on ? 'text-[#5FE3A1]' : 'text-[#FF6B6B]'}`}>{label} {on ? 'ON' : 'OFF'}</div>
-              <div className="text-[10px] text-[#6A7097]">{help}</div>
-            </button>
+              <div className="text-[10px] text-[#6A7097]">{help} Changes no model's enablement.</div>
+              <ConfirmButton testId={`switch-${scope}`} label={on ? 'Switch OFF' : 'Switch ON'} disabled={busy === `kill-${scope}`}
+                confirmText={`switch ${label} ${on ? 'OFF' : 'ON'}`} onConfirm={() => post('/api/master-admin/spend/kill', { scope, enabled: !on }, `kill-${scope}`)} />
+            </div>
           ))}
         </div>
         <div className="grid grid-cols-2 md:grid-cols-3 gap-2">

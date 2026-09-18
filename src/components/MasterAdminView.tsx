@@ -16,6 +16,7 @@ import { ProviderModelCatalog } from './ProviderModelCatalog';
 import { synthosControl } from '../services/synthosControlService';
 import { AntigravityControlPanel } from './AntigravityControlPanel';
 import { SpendControlPanel } from './SpendControlPanel';
+import { QueueReviewPanel } from './admin/QueueReviewPanel';
 import { speakText } from '../services/voiceEngine';
 
 interface MasterAdminViewProps {
@@ -55,9 +56,15 @@ export type MasterAdminSection =
   | 'backup'
   | 'users'
   | 'runtime'
-  | 'walkthrough';
+  | 'walkthrough'
+  | 'queue';
 
 interface LiveDiagnostics {
+  /** The running build/runtime/schema version — same authority as /api/ready (lib/build-info.ts). */
+  runtimeVersion?: {
+    commit: string; buildTime: string; ref: string; tree: string; source: string;
+    node: string; registrySchema: string; databaseSchema: { version: string; fingerprint: string };
+  };
   platform: {
     runtime: string;
     nodeVersion: string;
@@ -1137,6 +1144,7 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
           { id: 'runtime' as MasterAdminSection, label: 'Runtime', icon: Activity },
           { id: 'audit' as MasterAdminSection, label: 'Audit', icon: FileText },
           { id: 'backup' as MasterAdminSection, label: 'Backup & Restore', icon: HardDrive },
+          { id: 'queue' as MasterAdminSection, label: 'Queue Review', icon: FileText },
         ].map((tab) => {
           const Icon = tab.icon;
           const isActive = activeSection === tab.id;
@@ -1494,6 +1502,18 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
               </p>
             </div>
             {getStatusBadge(isPlatformReady ? 'LIVE' : 'NOT_CONNECTED')}
+          </div>
+
+          {/* RUNNING VERSION — injected at build/launch, UNKNOWN when not stamped. */}
+          <div className="p-4 bg-[#06070E] border border-[#1A1D34] rounded-xl font-mono text-xs space-y-1" data-testid="runtime-version">
+            <span className="text-[10px] text-slate-500 uppercase block">Running version</span>
+            <div className="text-white break-all" data-testid="runtime-version-commit">commit {diagnostics?.runtimeVersion?.commit ?? 'UNKNOWN'}</div>
+            <div className="text-slate-400" data-testid="runtime-version-meta">
+              ref {diagnostics?.runtimeVersion?.ref ?? 'UNKNOWN'} · tree {diagnostics?.runtimeVersion?.tree ?? 'UNKNOWN'} · built {diagnostics?.runtimeVersion?.buildTime ?? 'UNKNOWN'} · source {diagnostics?.runtimeVersion?.source ?? 'UNKNOWN'}
+            </div>
+            <div className="text-slate-500 break-all" data-testid="runtime-version-schema">
+              node {diagnostics?.runtimeVersion?.node ?? 'UNKNOWN'} · registry schema {diagnostics?.runtimeVersion?.registrySchema ?? 'UNKNOWN'} · database schema version {diagnostics?.runtimeVersion?.databaseSchema?.version ?? 'UNKNOWN'} (fingerprint {diagnostics?.runtimeVersion?.databaseSchema?.fingerprint ?? 'UNKNOWN'})
+            </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 font-mono text-xs">
@@ -2065,6 +2085,12 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {activeSection === 'queue' && (
+        <div className="bg-[#090A16] border border-[#1C203E] p-6 rounded-2xl space-y-6 shadow-xl">
+          <QueueReviewPanel />
         </div>
       )}
 
