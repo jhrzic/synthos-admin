@@ -192,11 +192,21 @@ describe('PATH 3 — graph execution cannot cross the boundary', () => {
 });
 
 describe('PATH 4 — retry and reconciliation cannot launder an action past Guardian', () => {
-  it('a retry re-runs the Guardian check rather than trusting the original approval', () => {
+  // Stronger than re-checking Guardian: a retry of a PAID remote run is refused
+  // outright, because a new run needs a new human approval. The spent approval
+  // of the failed attempt authorizes nothing.
+  it('an Antigravity retry is refused and sent back for a new human approval', () => {
     const source = fs.readFileSync(path.join(process.cwd(), 'lib/external-executions.ts'), 'utf8');
     const retry = source.slice(source.indexOf('export async function retryExternalExecution'));
     const body = retry.slice(0, retry.indexOf('\n}\n'));
-    expect(body).toContain('guardianCheckInstruction');
+    const agBranch = body.slice(body.indexOf("if (runtime === 'antigravity') {"), body.indexOf("if (runtime === 'antigravity') {") + 500);
+    expect(agBranch).toContain("code: 'APPROVAL_REQUIRED'");
+  });
+
+  it('the ledger refuses any Antigravity submission without a consumed approval bound to it', () => {
+    const source = fs.readFileSync(path.join(process.cwd(), 'lib/external-executions.ts'), 'utf8');
+    const submit = source.slice(source.indexOf('export async function submitExternalExecution'));
+    expect(submit.slice(0, 4000)).toMatch(/approval\.status !== 'CONSUMED'[\s\S]*approval\.correlation_id !== params\.idempotencyKey/);
   });
 
   it('a retry chains the parent correlation id, so the attempt chain stays traceable', () => {

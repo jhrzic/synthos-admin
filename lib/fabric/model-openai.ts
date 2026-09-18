@@ -40,6 +40,8 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 import { scrubSecrets as sharedScrubSecrets } from '../redact';
+import { guardedPaidCall, normalizeOpenAiUsage } from '../spend/guard';
+import { outputCeiling, requestKey, type SpendContext } from '../spend/adapters';
 
 export const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 
@@ -54,6 +56,12 @@ export interface GenerateViaOpenAiParams {
   candidateModels: string[];
   /** Bounds one provider call. Never unbounded — a hung provider must not hold an HTTP request open forever. */
   timeoutMs?: number;
+  /**
+   * SPEND GUARD — required. Every OpenAI generation is a paid call and runs
+   * through lib/spend/guard.ts: budgets, ceilings, idempotency and the
+   * one-request permit. There is no unguarded variant.
+   */
+  spend: SpendContext;
 }
 
 /**
@@ -70,6 +78,8 @@ export interface GenerateViaOpenAiResult {
   lastProviderError: string | null;
   /** Real wall-clock duration of the successful call, or of the last attempt when all failed. */
   latencyMs: number | null;
+  /** The spend-guard outcome. `blocked` means nothing was sent. */
+  spendGuard?: { usageId: string; status: string; blocked: boolean; code?: string; estimatedCostUsd: number | null };
 }
 
 /** A provider error can echo the key back. Never let a key-shaped token reach a log or a response. */
@@ -135,9 +145,14 @@ export function extractOpenAiText(payload: any): string {
  * no opinion about is not worth a 400 from the frontier model.
  */
 export async function generateViaOpenAI(params: GenerateViaOpenAiParams): Promise<GenerateViaOpenAiResult> {
-  const { apiKey, contents, candidateModels } = params;
+  const { apiKey, contents } = params;
   const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const baseUrl = resolveOpenAiBaseUrl();
+  // NO_PAID_FALLBACK: exactly one model per logical call. A candidate list is
+  // accepted for signature compatibility, but only its first entry is tried —
+  // silently moving to another (possibly more expensive) model is refused.
+  const m = params.candidateModels[0];
+  const maxOutputTokens = outputCeiling(params.spend);
 
   let output = '';
   let modelUsed: string | null = null;
@@ -146,8 +161,18 @@ export async function generateViaOpenAI(params: GenerateViaOpenAiParams): Promis
   let lastProviderError: string | null = null;
   let latencyMs: number | null = null;
 
+  if (!m) {
+    return { output, modelUsed, providerUsageMetadata, hadProviderError: true, lastProviderError: 'No model was selected for this OpenAI call.', latencyMs };
+  }
+
+  let guard: GenerateViaOpenAiResult['spendGuard'];
   try {
-    for (const m of candidateModels) {
+    const r = await guardedPaidCall({
+      provider: 'openai', model: m, callSite: params.spend.callSite,
+      workspaceId: params.spend.workspaceId ?? null, taskId: params.spend.taskId ?? null, correlationId: params.spend.correlationId ?? null,
+      idempotencyKey: params.spend.idempotencyKey || requestKey(params.spend.callSite),
+      inputChars: contents.length, maxOutputTokens, approvalId: params.spend.approvalId ?? null,
+    }, async () => {
       const startedAt = Date.now();
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -158,7 +183,9 @@ export async function generateViaOpenAI(params: GenerateViaOpenAiParams): Promis
             'Authorization': `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ model: m, input: contents }),
+          // max_output_tokens is sent, so the output bound is enforced by the
+          // provider rather than assumed by us.
+          body: JSON.stringify({ model: m, input: contents, max_output_tokens: maxOutputTokens }),
           signal: controller.signal,
         });
 
@@ -166,27 +193,25 @@ export async function generateViaOpenAI(params: GenerateViaOpenAiParams): Promis
         latencyMs = Date.now() - startedAt;
 
         if (!res.ok) {
-          hadProviderError = true;
           let detail = bodyText.slice(0, 300);
           try {
             const parsed = JSON.parse(bodyText);
             detail = parsed?.error?.message || detail;
           } catch { /* non-JSON error body — use the raw excerpt */ }
           lastProviderError = scrubSecrets(`OpenAI HTTP ${res.status}: ${detail}`);
-          console.warn(`[OpenAI Model Router] '${m}' failover:`, lastProviderError);
-          continue;
+          return { ok: false };
         }
 
         let payload: any;
         try {
           payload = JSON.parse(bodyText);
         } catch {
-          hadProviderError = true;
           lastProviderError = 'OpenAI returned a response that was not valid JSON.';
-          console.warn(`[OpenAI Model Router] '${m}' failover:`, lastProviderError);
-          continue;
+          return { ok: false };
         }
 
+        if (payload?.usage) providerUsageMetadata = payload.usage;
+        const usage = normalizeOpenAiUsage(payload?.usage, typeof payload?.id === 'string' ? payload.id : null);
         const text = extractOpenAiText(payload);
         if (text && text.trim().length > 0) {
           output = text;
@@ -194,30 +219,34 @@ export async function generateViaOpenAI(params: GenerateViaOpenAiParams): Promis
           // These differ whenever an alias resolves to a dated snapshot, and
           // the receipt must attest to what actually executed.
           modelUsed = typeof payload?.model === 'string' && payload.model.trim() ? payload.model : m;
-          if (payload?.usage) providerUsageMetadata = payload.usage;
-          break;
+          return { ok: true, usage };
         }
-
         // A 200 with no text is a real outcome, not a silent success.
-        hadProviderError = true;
         lastProviderError = `OpenAI model "${m}" returned a successful response containing no text.`;
-        console.warn(`[OpenAI Model Router] '${m}' failover:`, lastProviderError);
+        return { ok: false, usage };
       } catch (e: any) {
         latencyMs = Date.now() - startedAt;
-        hadProviderError = true;
-        lastProviderError = e?.name === 'AbortError'
+        const timedOut = e?.name === 'AbortError';
+        lastProviderError = timedOut
           ? `OpenAI request to "${m}" timed out after ${timeoutMs}ms.`
           : scrubSecrets(e?.message || String(e));
-        console.warn(`[OpenAI Model Router] '${m}' failover:`, lastProviderError);
+        return { ok: false, failureHint: timedOut ? 'TIMEOUT' : null };
       } finally {
         clearTimeout(timer);
       }
+    });
+
+    if (!r.permitted) {
+      lastProviderError = `BLOCKED_BUDGET (${r.code}): ${r.reason}`;
+      guard = { usageId: r.usageId, status: 'BLOCKED', blocked: true, code: r.code, estimatedCostUsd: r.estimatedCostUsd };
+    } else {
+      guard = { usageId: r.usageId, status: r.status, blocked: false, estimatedCostUsd: r.estimatedCostUsd };
     }
   } catch (outerErr: any) {
-    hadProviderError = true;
     lastProviderError = scrubSecrets(outerErr?.message || String(outerErr));
-    console.warn('[OpenAI Task Error]:', lastProviderError);
   }
 
-  return { output, modelUsed, providerUsageMetadata, hadProviderError, lastProviderError, latencyMs };
+  hadProviderError = !output;
+  if (hadProviderError && lastProviderError) console.warn('[OpenAI]', lastProviderError);
+  return { output, modelUsed, providerUsageMetadata, hadProviderError, lastProviderError, latencyMs, spendGuard: guard };
 }

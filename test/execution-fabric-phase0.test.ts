@@ -107,9 +107,11 @@ describe('F1: /api/execute-agent-task never claims a tool ran (originally server
     expect(wrappedBlock).toContain('generateViaGemini({');
     expect(wrappedBlock).toContain('generateViaOpenAI({');
 
-    // The real Gemini mechanics are still the real Gemini mechanics.
-    expect(modelGeminiContent).toContain('for (const m of candidateModels) {');
-    expect(modelGeminiContent).toContain('ai.models.generateContent({');
+    // The real Gemini mechanics, now under the spend guard: ONE model per
+    // logical call (NO_PAID_FALLBACK), sent through guardedGeminiGenerate.
+    expect(modelGeminiContent).toContain('const m = params.candidateModels[0];');
+    expect(modelGeminiContent).not.toContain('for (const m of candidateModels) {');
+    expect(modelGeminiContent).toContain('guardedGeminiGenerate(ai, {');
   });
 
   it('the thin route wrapper in server.ts contains no toolCalls logic of its own — it only maps the kernel\'s {status, body} onto the HTTP response', () => {

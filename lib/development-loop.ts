@@ -396,6 +396,8 @@ export async function requestDevelopmentReview(
     apiKey,
     contents: buildReviewPrompt(task, context),
     candidateModels: [classified.resolvedModel],
+    // One review per task state: a double-click cannot pay twice.
+    spend: { callSite: 'development.review', workspaceId, idempotencyKey: `devreview:${task.dev_task_id}:${task.updated_at}` },
   }));
 
   if (!generated.output.trim()) {

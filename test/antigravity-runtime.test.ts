@@ -7,7 +7,7 @@ const TEST_DB_PATH = path.join(os.tmpdir(), `synthos-antigravity-${Date.now()}-$
 process.env.SYNTHOS_DB_PATH = TEST_DB_PATH;
 
 import {
-  submitExternalExecution, getWorkspaceExternalExecution, listWorkspaceExternalExecutions,
+  submitExternalExecution as rawSubmitExternalExecution, getWorkspaceExternalExecution, listWorkspaceExternalExecutions,
   refreshExternalExecutionStatus, ingestExternalExecutionResult, cancelExternalExecution,
   retryExternalExecution, guardianCheckInstruction, isExternalRuntime, EXTERNAL_RUNTIMES,
 } from '../lib/external-executions';
@@ -15,6 +15,16 @@ import * as antigravity from '../lib/antigravity-client';
 import { getTaskReceipts, getTaskQualityReviews, verifyReceipt, getTaskArtifacts, getDatabase } from '../lib/persistence';
 import { listCapabilities } from '../lib/fabric/registry';
 import { getRuntimeStatus } from '../lib/runtime-status';
+import { allowPaidExecutionForTest, consumedAntigravityApproval } from './helpers/spend';
+
+// Every Antigravity submission needs a CONSUMED human approval bound to its
+// key. These tests drive the ledger directly, so each call gets a real one
+// through the real approval lifecycle — nothing is forged or bypassed.
+let agKeySeq = 0;
+const submitExternalExecution = (p: Parameters<typeof rawSubmitExternalExecution>[0]) => {
+  const key = p.idempotencyKey ?? `test-ag-${Date.now()}-${agKeySeq++}`;
+  return rawSubmitExternalExecution({ ...p, idempotencyKey: key, approvalId: consumedAntigravityApproval(p.workspaceId, key) });
+};
 
 // ---------------------------------------------------------------------------
 // PUSH 1 — Antigravity as a real SynthOS execution runtime.
@@ -60,6 +70,8 @@ let rejectSubmitWith: { status: number; message: string } | null = null;
 let server: http.Server;
 
 beforeAll(async () => {
+  // Explicit opt-in: paid execution against a local double (Antigravity is bounded by its per-run ceiling).
+  allowPaidExecutionForTest([]);
   getDatabase();
 
   server = http.createServer((req, res) => {
@@ -322,7 +334,9 @@ describe('2. GUARDIAN REMAINS AUTHORITATIVE over a runtime with its own autonomo
     expect(lastSubmit).toBeUndefined();
   });
 
-  it('Guardian is re-evaluated on retry, never inherited from the first attempt', async () => {
+  // Stronger than re-checking Guardian: a retry of a paid remote run is refused
+  // outright — it is a new paid run and needs a new human approval.
+  it('a retry is refused outright: a new paid run needs a new human approval', async () => {
     // A genuinely failed attempt, submitted while the instruction was benign
     // — Guardian allowed it, which is why a row exists at all.
     rejectSubmitWith = { status: 500, message: 'transient remote failure' };
@@ -343,7 +357,7 @@ describe('2. GUARDIAN REMAINS AUTHORITATIVE over a runtime with its own autonomo
       .prepare('UPDATE external_executions SET input_json = ? WHERE id = ?')
       .run(JSON.stringify({ instruction: 'sudo rm -rf /var and report' }), execution.id);
 
-    await expect(retryExternalExecution(WS_A, ACTOR, execution.id)).rejects.toThrow(/Guardian refused/);
+    await expect(retryExternalExecution(WS_A, ACTOR, execution.id)).rejects.toThrow(/new human approval/);
 
     // And the refusal creates no new attempt row.
     const attempts = listWorkspaceExternalExecutions(WS_A, 200).filter((e) => e.parent_execution_id === execution.id);

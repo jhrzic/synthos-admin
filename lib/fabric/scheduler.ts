@@ -592,6 +592,13 @@ export function startScheduler(intervalMs = 10000): void {
         });
     }
 
+    // SPEND — crash recovery for the usage ledger. A synchronous paid call left
+    // in flight by a process that died becomes UNKNOWN (never auto-retried),
+    // freeing its concurrency slot. One UPDATE; no provider call.
+    import('../spend/ledger')
+      .then((m) => m.reconcileStaleUsage())
+      .catch(() => { /* bookkeeping must never stop scheduled work */ });
+
     import('./orchestrator')
       .then((m) => m.orchestrationTickForScheduler())
       .then((result) => {

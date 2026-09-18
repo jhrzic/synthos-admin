@@ -58,6 +58,7 @@ import * as windmillClient from '../windmill-client';
 import { listWorkspaceExternalExecutions, guardianCheckInstruction, submitExternalExecution } from '../external-executions';
 import { resolveAntigravityAgent } from '../antigravity-client';
 import { scrubSecrets } from '../redact';
+import { previewPaidCall, SPEND_WAIT_CODES } from '../spend/guard';
 import { recordRuntimeEvent, type RuntimeEventStatus } from '../runtime-events';
 import { runHermesLocalTask, isHermesLocalConfigured, isHermesLocalEnabled, getHermesCliPath } from '../hermes-local-runtime';
 
@@ -2120,8 +2121,22 @@ async function enforceHumanApproval(
     if (!full.allowed) {
       return { refusal: { outcome: 'BLOCKED', capability: capabilityKey, reason: full.error || 'Guardian refused this instruction.', approval: null } };
     }
+    // SPEND — decided BEFORE an approval is requested or consumed, so a budget
+    // refusal never burns a human's single-use approval, and the approver sees
+    // the maximum this run may cost.
+    const spendPreview = previewPaidCall({
+      provider: 'antigravity', model: binding.agent, callSite: 'runtime.antigravity',
+      workspaceId: input.workspaceId, taskId: binding.taskId, idempotencyKey: `ag:${correlationId}`,
+      inputChars: binding.boundedInstruction.length,
+      // The approval this preview precedes is what satisfies the expensive-call threshold.
+      approvalId: 'pending-human-approval',
+    });
+    if (!spendPreview.permitted) {
+      const wait = SPEND_WAIT_CODES.has(spendPreview.code);
+      return { refusal: { outcome: wait ? 'NOT_CONFIGURED' : 'BLOCKED', capability: capabilityKey, reason: `BLOCKED_BUDGET (${spendPreview.code}): ${spendPreview.reason}`, approval: null } };
+    }
     inputDigest = antigravityApprovalDigest(binding);
-    summaryOverride = summarizeAntigravityForApproval(binding);
+    summaryOverride = `${summarizeAntigravityForApproval(binding)}\nEstimated maximum cost: $${spendPreview.estimatedCostUsd.toFixed(4)} (per-run ceiling; a managed agent's exact cost is known only after it runs)`;
   } else if (capabilityKey === 'gmail.send') {
     const conn = resolveGmailConnection(input.workspaceId, toolParam(input, 'account') || null);
     if (!conn.ok) {
@@ -3099,6 +3114,9 @@ async function executeAntigravityRuntime(input: ExecutionEnvelopeInput): Promise
       // The ledger's own idempotency: a replay of this correlation returns the
       // existing row and never submits a second remote interaction.
       idempotencyKey: correlationId,
+      // The approval the human gate just consumed. The ledger refuses an
+      // Antigravity submission without it.
+      approvalId: input.__consumedApprovalId,
     });
 
     const externalExecution = {

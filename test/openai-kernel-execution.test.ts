@@ -16,6 +16,7 @@ import { createExecutionContext } from '../lib/fabric/context';
 import {
   getDatabase, getTaskReceipts, getTaskQualityReviews, getTaskArtifacts, verifyReceipt,
 } from '../lib/persistence';
+import { allowPaidExecutionForTest } from './helpers/spend';
 
 // ---------------------------------------------------------------------------
 // PUSH 1 — OpenAI executing through the EXISTING Execution Fabric.
@@ -73,6 +74,8 @@ const REAL_OUTPUT = [
 ].join('\n');
 
 beforeAll(async () => {
+  // Explicit opt-in: this file exercises SUCCESSFUL paid calls against a local double.
+  allowPaidExecutionForTest([['openai', 'gpt-5.6-terra'], ['openai', 'gpt-5.6-luna'], ['openai', 'gpt-5.6-sol'], ['openai', 'gpt-6-astra'], ['openai', 'gpt-4o'], ['gemini', 'gemini-3.6-flash'], ['gemini', 'gemini-3.1-flash-lite']]);
   getDatabase();
 
   server = http.createServer((req, res) => {

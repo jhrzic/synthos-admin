@@ -28,6 +28,7 @@
 // that is never asked cannot answer from its own priors.
 // ---------------------------------------------------------------------------
 
+import { guardedGeminiGenerate, requestKey, type SpendContext } from '../spend/adapters';
 import { classifyModelRequest, explainUnroutableModel, generateWithFailover, type FailoverAttemptLog } from '../model-router';
 import type { BusinessProfile, ConversationMessage } from './engine';
 import type { ScopedMemoryResult } from '../memory-index';
@@ -249,17 +250,23 @@ export async function generateGroundedReply(params: {
   evidence: EvidenceItem[];
   preferredModel?: string;
   callModel?: (model: string, prompt: GroundedPrompt) => Promise<string>;
+  /** SPEND GUARD — one customer turn is one logical execution. */
+  spend?: { workspaceId?: string | null; idempotencyKey?: string };
 }): Promise<LlmReplyResult> {
   const availability = resolveConversationProvider(params.preferredModel);
   if (availability.available !== true) {
     return { ok: false, failureReason: availability.reason, failureDetail: availability.detail };
   }
 
-  const call = params.callModel ?? defaultGeminiCall;
+  // The key is fixed for the whole turn, so no retry below can pay twice and
+  // no second model can be tried (lib/spend/guard.ts: FALLBACK_REFUSED).
+  const spend = { callSite: 'concierge.reply', workspaceId: params.spend?.workspaceId ?? null, idempotencyKey: params.spend?.idempotencyKey || requestKey('concierge.reply') };
+  const call = params.callModel ?? ((model: string, prompt: GroundedPrompt) => defaultGeminiCall(model, prompt, spend));
   const result = await generateWithFailover(
-    availability.candidateModels,
+    // NO_PAID_FALLBACK: the first available model only.
+    availability.candidateModels.slice(0, 1),
     (model) => call(model, params.prompt),
-    { maxRetriesPerModel: 1 }
+    { maxRetriesPerModel: 0 }
   );
 
   if (!result.success || !result.text) {
@@ -293,12 +300,12 @@ export async function generateGroundedReply(params: {
 }
 
 /** The one real provider call. Imported lazily so tests never need the SDK. */
-async function defaultGeminiCall(model: string, prompt: GroundedPrompt): Promise<string> {
+async function defaultGeminiCall(model: string, prompt: GroundedPrompt, spend: SpendContext): Promise<string> {
   const { apiKey } = resolveModelApiKey('gemini');
   if (!apiKey) throw new Error('No Gemini API key is configured.');
   const { GoogleGenAI } = await import('@google/genai');
   const ai = new GoogleGenAI({ apiKey });
-  const response = await ai.models.generateContent({
+  const response = await guardedGeminiGenerate(ai, {
     model,
     contents: prompt.user,
     config: {
@@ -306,6 +313,6 @@ async function defaultGeminiCall(model: string, prompt: GroundedPrompt): Promise
       temperature: 0.3,          // phrasing, not invention
       maxOutputTokens: 400,
     },
-  });
+  }, { ...spend, maxOutputTokens: 400 });
   return String((response as any)?.text ?? '').trim();
 }

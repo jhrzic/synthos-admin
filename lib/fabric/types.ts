@@ -19,6 +19,13 @@
  */
 export interface ExecuteAgentTaskInput {
   taskId?: string;
+  /**
+   * SPEND GUARD — the logical-execution key for the paid model call. The
+   * orchestrator passes a stable per-task key so a requeue, restart or resume
+   * can never pay twice. Absent (a direct request), each request is its own
+   * logical execution.
+   */
+  spendIdempotencyKey?: string;
   taskTitle?: string;
   description?: string;
   assignedAgent?: string;

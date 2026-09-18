@@ -28,11 +28,11 @@
 
 import { getDatabase } from './persistence';
 
-export const PLATFORM_SETTING_KEYS = ['antigravity.enabled', 'autonomy.level'] as const;
+export const PLATFORM_SETTING_KEYS = ['antigravity.enabled', 'autonomy.level', 'spend.policy', 'spend.pricing'] as const;
 export type PlatformSettingKey = (typeof PLATFORM_SETTING_KEYS)[number];
 
 /** The environment variable that, when set, overrides each setting. */
-export const PLATFORM_SETTING_ENV_VAR: Record<PlatformSettingKey, string> = {
+export const PLATFORM_SETTING_ENV_VAR: Partial<Record<PlatformSettingKey, string>> = {
   'antigravity.enabled': 'ANTIGRAVITY_ENABLED',
   'autonomy.level': 'SYNTHOS_AUTONOMY_LEVEL',
 };
@@ -88,7 +88,11 @@ export function setPlatformSetting(key: PlatformSettingKey, value: string, updat
 
 /** The environment value for a setting, or null when the environment does not set it. */
 export function environmentValue(key: PlatformSettingKey, env: NodeJS.ProcessEnv = process.env): string | null {
-  const raw = env[PLATFORM_SETTING_ENV_VAR[key]];
+  const name = PLATFORM_SETTING_ENV_VAR[key];
+  // Spend policy and pricing have NO environment override on purpose: a
+  // budget must be visible and auditable in one place.
+  if (!name) return null;
+  const raw = env[name];
   const trimmed = typeof raw === 'string' ? raw.trim() : '';
   return trimmed ? trimmed : null;
 }

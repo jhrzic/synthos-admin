@@ -114,7 +114,8 @@ describe('5. conversational prompts remain on real generic chat — no broad key
       serverContent.indexOf('app.get("/api/apollo/status"')
     );
     expect(route).toContain('Natural Language Directive via Live Model');
-    expect(route).toContain('ai.models.generateContent');
+    // Still a real Gemini call — now through the spend guard.
+    expect(route).toContain('guardedGeminiGenerate(ai, {');
   });
 
   it('STEP 6: routing is now classifier-driven (lib/fabric/intent.ts), not lower.includes() substring matching — the old collision-prone routing is gone', () => {

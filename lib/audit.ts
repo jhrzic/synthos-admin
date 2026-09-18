@@ -28,7 +28,10 @@ export type AdminEventType =
   | 'BACKUP_RESTORE_STAGED'
   | 'PLATFORM_SETTING_CHANGED'
   | 'RUNTIME_CREDENTIAL_SAVED'
-  | 'RUNTIME_CREDENTIAL_DELETED';
+  | 'RUNTIME_CREDENTIAL_DELETED'
+  | 'SPEND_POLICY_CHANGED'
+  | 'SPEND_PRICING_CHANGED'
+  | 'SPEND_USAGE_CLEARED';
 
 export interface AdminAuditEventRecord {
   event_id: string;

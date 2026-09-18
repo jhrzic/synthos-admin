@@ -15,11 +15,15 @@
 // ---------------------------------------------------------------------------
 
 import { GoogleGenAI } from '@google/genai';
+import { guardedGeminiGenerate, type SpendContext } from '../spend/adapters';
+import { SpendBlockedError } from '../spend/guard';
 
 export interface GenerateViaGeminiParams {
   apiKey: string;
   contents: string;
   candidateModels: string[];
+  /** SPEND GUARD — required. Every Gemini generation is a paid call; see lib/spend/guard.ts. */
+  spend: SpendContext;
 }
 
 export interface GenerateViaGeminiResult {
@@ -28,48 +32,43 @@ export interface GenerateViaGeminiResult {
   providerUsageMetadata: any;
   hadProviderError: boolean;
   lastProviderError: string | null;
+  /** Set when the spend guard refused the call; nothing was sent. */
+  spendBlockedCode?: string | null;
 }
 
 export async function generateViaGemini(params: GenerateViaGeminiParams): Promise<GenerateViaGeminiResult> {
-  const { apiKey, contents, candidateModels } = params;
+  const { apiKey, contents } = params;
+  // NO_PAID_FALLBACK: one model per logical call (the first candidate).
+  const m = params.candidateModels[0];
   let output = '';
   let modelUsed: string | null = null;
   let providerUsageMetadata: any = null;
   let hadProviderError = false;
   let lastProviderError: string | null = null;
+  let spendBlockedCode: string | null = null;
+
+  if (!m) return { output, modelUsed, providerUsageMetadata, hadProviderError: true, lastProviderError: 'No model was selected for this Gemini call.' };
 
   try {
     const ai = new GoogleGenAI({
       apiKey,
       httpOptions: { headers: { "User-Agent": "aistudio-build" } },
     });
-
-    for (const m of candidateModels) {
-      try {
-        const resp = await ai.models.generateContent({
-          model: m,
-          contents,
-          config: { temperature: 0.2 },
-        });
-        if (resp?.text && resp.text.trim().length > 0) {
-          output = resp.text;
-          modelUsed = m;
-          if (resp.usageMetadata) {
-            providerUsageMetadata = resp.usageMetadata;
-          }
-          break;
-        }
-      } catch (e: any) {
-        hadProviderError = true;
-        lastProviderError = e?.message || String(e);
-        console.warn(`[Agent Model Router] '${m}' failover:`, lastProviderError);
-      }
+    const resp = await guardedGeminiGenerate(ai, { model: m, contents, config: { temperature: 0.2 } }, params.spend);
+    if (resp?.text && resp.text.trim().length > 0) {
+      output = resp.text;
+      modelUsed = m;
+      if (resp.usageMetadata) providerUsageMetadata = resp.usageMetadata;
+    } else {
+      hadProviderError = true;
+      lastProviderError = `Gemini model "${m}" returned no text.`;
     }
-  } catch (genErr: any) {
+  } catch (e: any) {
     hadProviderError = true;
-    lastProviderError = genErr?.message || String(genErr);
-    console.warn("[Agent Task GenAI Error]:", lastProviderError);
+    lastProviderError = e?.message || String(e);
+    if (e instanceof SpendBlockedError) spendBlockedCode = e.code;
+    console.warn(`[Gemini] '${m}':`, lastProviderError);
   }
 
-  return { output, modelUsed, providerUsageMetadata, hadProviderError, lastProviderError };
+  return { output, modelUsed, providerUsageMetadata, hadProviderError, lastProviderError, spendBlockedCode };
 }

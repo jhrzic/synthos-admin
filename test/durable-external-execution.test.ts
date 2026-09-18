@@ -7,12 +7,22 @@ const TEST_DB_PATH = path.join(os.tmpdir(), `synthos-durable-${Date.now()}-${Mat
 process.env.SYNTHOS_DB_PATH = TEST_DB_PATH;
 
 import {
-  submitExternalExecution, getWorkspaceExternalExecution, listWorkspaceExternalExecutions,
+  submitExternalExecution as rawSubmitExternalExecution, getWorkspaceExternalExecution, listWorkspaceExternalExecutions,
   listDueExternalExecutions, advanceExternalExecution, advanceDueExternalExecutions,
   pollBackoffSeconds, POLL_BACKOFF_SECONDS, MAX_POLL_ATTEMPTS,
 } from '../lib/external-executions';
 import { runExternalExecutionReconciliation } from '../lib/fabric/scheduler';
 import { getDatabase, getTaskArtifacts, getTaskReceipts, getTaskQualityReviews } from '../lib/persistence';
+import { allowPaidExecutionForTest, consumedAntigravityApproval } from './helpers/spend';
+
+// Every Antigravity submission needs a CONSUMED human approval bound to its
+// key. These tests drive the ledger directly, so each call gets a real one
+// through the real approval lifecycle — nothing is forged or bypassed.
+let agKeySeq = 0;
+const submitExternalExecution = (p: Parameters<typeof rawSubmitExternalExecution>[0]) => {
+  const key = p.idempotencyKey ?? `test-ag-${Date.now()}-${agKeySeq++}`;
+  return rawSubmitExternalExecution({ ...p, idempotencyKey: key, approvalId: consumedAntigravityApproval(p.workspaceId, key) });
+};
 
 // ---------------------------------------------------------------------------
 // PUSH 2A — durable advancement of background Antigravity executions.
@@ -53,6 +63,8 @@ const REAL_OUTPUT = [
 ].join('\n');
 
 beforeAll(async () => {
+  // Explicit opt-in: paid execution against a local double (Antigravity is bounded by its per-run ceiling).
+  allowPaidExecutionForTest([]);
   getDatabase();
   server = http.createServer((req, res) => {
     let body = '';

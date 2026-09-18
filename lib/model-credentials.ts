@@ -179,6 +179,8 @@ export async function verifyModelCredential(provider: ModelProvider): Promise<
   if (provider === 'openai') {
     const startedAt = Date.now();
     const result = await verifyOpenAiCredential(apiKey);
+    // A spend-guard refusal sent nothing, so it is not evidence about the provider.
+    if (!result.ok && /^BLOCKED_BUDGET \(/.test((result as { error: string }).error)) return result;
     // PROVIDER STATUS TRUTH — this is a REAL call, so its outcome is the
     // evidence lib/provider-state.ts reads to decide LIVE_VERIFIED versus
     // QUOTA_BLOCKED versus PROVIDER_ERROR. Before this, PROVIDER_CALL was a
@@ -201,11 +203,13 @@ export async function verifyModelCredential(provider: ModelProvider): Promise<
   try {
     const { GoogleGenAI } = await import('@google/genai');
     const ai = new GoogleGenAI({ apiKey });
-    const response = await ai.models.generateContent({
+    const { guardedGeminiGenerate } = await import('./spend/adapters');
+    // A verification is a real, paid generation — guarded like any other.
+    const response = await guardedGeminiGenerate(ai, {
       model,
       contents: 'Reply with the single word: ready',
       config: { maxOutputTokens: 10, temperature: 0 },
-    });
+    }, { callSite: 'credential.verify.gemini', maxOutputTokens: 10 });
     const sample = String((response as any)?.text ?? '').trim();
     if (!sample) {
       const empty = { ok: false as const, error: 'The provider accepted the key but returned nothing.' };
@@ -220,6 +224,7 @@ export async function verifyModelCredential(provider: ModelProvider): Promise<
     // Uses the one shared scrubber (lib/redact.ts) rather than a third local
     // copy of the pattern list — the divergence Pass 2 consolidated.
     const safe = scrubSecrets(String(err?.message || 'The provider call failed.'), 300);
+    if (err?.name === 'SpendBlockedError') return { ok: false, error: safe };
     recordProviderAttempt({ provider, ok: false, errorMessage: safe, latencyMs: Date.now() - geminiStartedAt });
     return { ok: false, error: safe };
   }
@@ -246,6 +251,8 @@ async function verifyOpenAiCredential(
     contents: 'Reply with the single word: ready',
     candidateModels: [model],
     timeoutMs: 20_000,
+    // A verification is a real, paid generation — guarded like any other.
+    spend: { callSite: 'credential.verify.openai', maxOutputTokens: 16 },
   });
 
   if (!result.output.trim()) {

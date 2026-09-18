@@ -71,6 +71,7 @@ import { recordRuntimeEvent } from '../runtime-events';
 import { searchWorkspaceKnowledge } from '../knowledge-vault';
 import { listApprovalsForCorrelation } from '../approvals';
 import { scrubSecrets } from '../redact';
+import { SPEND_WAIT_CODES } from '../spend/guard';
 
 export type OrchestrationOutcome =
   | 'ADVANCED'            // the task ran and reached a terminal state
@@ -581,6 +582,8 @@ export async function advanceTask(task: OrchestratorTaskRow): Promise<Orchestrat
 
     const kernelResult = await executeAgentTask({
       taskId: task.task_id,
+      // Stable per task: a requeue, restart or approval resume can never pay twice.
+      spendIdempotencyKey: `orchestration:${task.task_id}`,
       taskTitle: task.title ?? task.task_id,
       description: task.description ?? '',
       assignedAgent: task.assigned_agent ?? 'scribe',
@@ -601,6 +604,14 @@ export async function advanceTask(task: OrchestratorTaskRow): Promise<Orchestrat
         finalStatus: body?.status ?? 'DONE',
         brainContextNotes: brain.count,
       });
+    }
+    // SPEND GUARD — a "not now" refusal (switch off, budget spent, concurrency
+    // full) means nothing ran. The task waits for a later tick instead of
+    // failing; duplicates and ambiguous outcomes stay terminal.
+    const spendBlock = /BLOCKED_BUDGET \(([A-Z_]+)\)/.exec(String(body?.error || body?.lastProviderError || ''));
+    if (spendBlock && SPEND_WAIT_CODES.has(spendBlock[1])) {
+      updateTaskStatus(task.task_id, 'READY', undefined, workspaceId);
+      return finish({ ...base, outcome: 'DEFERRED', reason: String(body?.error), finalStatus: 'READY' });
     }
     // The kernel already wrote FAILED and its own PROVIDER_FAILED evidence.
     return finish({

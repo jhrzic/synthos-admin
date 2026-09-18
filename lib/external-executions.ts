@@ -40,6 +40,9 @@ import * as windmillClient from './windmill-client';
 // applies to it unchanged. The `runtime` column already existed and was
 // hardcoded to 'windmill'; it now carries its real value.
 import * as antigravityClient from './antigravity-client';
+import { guardedPaidCall, settleAsyncUsage } from './spend/guard';
+import { getSpendPolicy } from './spend/policy';
+import { getApproval } from './approvals';
 import { checkGuardianRules } from './kil-gate';
 
 // ---------------------------------------------------------------------------
@@ -243,11 +246,22 @@ export function guardianCheckInstruction(instruction: string): { allowed: boolea
   };
 }
 
+interface AntigravitySpendContext {
+  approvalId: string;
+  correlationId: string;
+  taskId?: string | null;
+}
+
 async function dispatchAntigravityInteraction(
   workspaceId: string,
   agent: string,
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
+  spend?: AntigravitySpendContext,
 ): Promise<{ ok: boolean; remoteJobId: string | null; error?: string }> {
+  // Defence in depth: submitExternalExecution already refused an Antigravity
+  // submission without a consumed approval. This path is never reached
+  // without one.
+  if (!spend) return { ok: false, remoteJobId: null, error: 'An Antigravity run requires a consumed human approval.' };
   const instruction = antigravityInstructionFrom(input);
   if (!instruction.trim()) {
     return { ok: false, remoteJobId: null, error: 'An "instruction" string is required to run an Antigravity interaction.' };
@@ -260,10 +274,26 @@ async function dispatchAntigravityInteraction(
   const tools = Array.isArray((input || {}).tools)
     ? ((input as any).tools as unknown[]).filter((t): t is { type: string } => !!t && typeof (t as any).type === 'string')
     : undefined;
-  const maxTotalTokens = typeof (input || {}).maxTotalTokens === 'number' ? (input as any).maxTotalTokens : undefined;
+  // The provider-side bound: never above the policy's max_total_tokens.
+  const policyMax = getSpendPolicy().antigravity.maxTotalTokens;
+  const requested = typeof (input || {}).maxTotalTokens === 'number' ? (input as any).maxTotalTokens : policyMax;
+  const maxTotalTokens = Math.min(requested, policyMax);
 
   const ctx = createExecutionContext({ workspaceId });
-  return ctx.invoke('runtime.antigravity', () => antigravityClient.submitInteraction({ instruction, agent, tools, maxTotalTokens }));
+  // SPEND GUARD: per-run ceiling, budgets, concurrency, and the one-request
+  // permit. A successful submission stays DISPATCHED in the usage ledger — the
+  // remote agent is still running — and is settled by the sweep.
+  const guarded = await guardedPaidCall({
+    provider: 'antigravity', model: agent, callSite: 'runtime.antigravity',
+    workspaceId, taskId: spend.taskId ?? null, correlationId: spend.correlationId,
+    idempotencyKey: `ag:${spend.correlationId}`, inputChars: instruction.length,
+    approvalId: spend.approvalId, asyncSettlement: true,
+  }, async () => {
+    const r = await ctx.invoke('runtime.antigravity', () => antigravityClient.submitInteraction({ instruction, agent, tools, maxTotalTokens }));
+    return { ok: r.ok, value: r, usage: r.remoteJobId ? { providerRequestId: r.remoteJobId } : null };
+  });
+  if (!guarded.permitted) return { ok: false, remoteJobId: null, error: `BLOCKED_BUDGET (${guarded.code}): ${guarded.reason}` };
+  return guarded.outcome.value ?? { ok: false, remoteJobId: null, error: 'Antigravity submission produced no result.' };
 }
 
 async function dispatchForRuntime(
@@ -271,10 +301,11 @@ async function dispatchForRuntime(
   workspaceId: string,
   remotePath: string,
   targetKind: string,
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
+  spend?: AntigravitySpendContext,
 ): Promise<{ ok: boolean; remoteJobId: string | null; error?: string }> {
   if (runtime === 'antigravity') {
-    return dispatchAntigravityInteraction(workspaceId, remotePath, input);
+    return dispatchAntigravityInteraction(workspaceId, remotePath, input, spend);
   }
   return dispatchWindmillJob(workspaceId, remotePath, targetKind as 'script' | 'flow', input);
 }
@@ -307,6 +338,14 @@ export interface SubmitExternalExecutionParams {
   skillId?: string;
   /** Q1 idempotency key. Omit for a call that should always create a new row (e.g. a UI "run once" click with no natural key). */
   idempotencyKey?: string;
+  /**
+   * Required for runtime 'antigravity': a CONSUMED human approval for
+   * runtime.antigravity in this workspace, bound to this idempotency key.
+   * Only the execution envelope sets it. Every other route into this ledger
+   * (the raw external-executions route, retry, skills, graphs) is refused for
+   * Antigravity — a paid remote run never happens without a person.
+   */
+  approvalId?: string | null;
 }
 
 export interface SubmitExternalExecutionResult {
@@ -350,6 +389,13 @@ export async function submitExternalExecution(params: SubmitExternalExecutionPar
     if (!antigravityClient.isAntigravityEnabled()) {
       throw Object.assign(new Error('Antigravity is not enabled — outward Antigravity execution is switched off (Master Admin → Antigravity).'), { code: 'RUNTIME_NOT_CONFIGURED' });
     }
+    const approval = params.approvalId ? getApproval(params.approvalId) : null;
+    if (
+      !approval || approval.status !== 'CONSUMED' || approval.capability !== 'runtime.antigravity'
+      || approval.workspace_id !== params.workspaceId || !params.idempotencyKey || approval.correlation_id !== params.idempotencyKey
+    ) {
+      throw Object.assign(new Error('An Antigravity run requires a consumed human approval bound to this execution. Submit it as a task through the execution envelope, where it is approved.'), { code: 'APPROVAL_REQUIRED' });
+    }
     const instruction = antigravityInstructionFrom(params.input || {});
     if (!instruction.trim()) {
       throw Object.assign(new Error('An "instruction" string is required to run an Antigravity interaction.'), { code: 'INVALID_INPUT' });
@@ -391,7 +437,8 @@ export async function submitExternalExecution(params: SubmitExternalExecutionPar
     correlationId, input: params.input || {}, createdByUserId: params.createdByUserId, attemptNumber: 1,
   });
 
-  const submission = await dispatchForRuntime(runtime, params.workspaceId, remotePath, targetKind, params.input || {});
+  const submission = await dispatchForRuntime(runtime, params.workspaceId, remotePath, targetKind, params.input || {},
+    runtime === 'antigravity' ? { approvalId: params.approvalId!, correlationId, taskId: params.taskId ?? null } : undefined);
   if (!submission.ok) {
     execution = patchRow(execution.id, { status: 'FAILED', error_code: 'SUBMISSION_FAILED', error_message_safe: sanitizeError(submission.error), next_poll_at: null });
     recordTransition(execution, 'PENDING', 'FAILED');
@@ -688,7 +735,7 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
     result_ingested_at: nowIso,
   });
 
-  syncOrchestratedTaskForExecution(updated);
+  syncOrchestratedTaskForExecution(updated, runtimeEvidence.usage ?? null);
   return { execution: updated, alreadyIngested: false, verified: !!receiptId };
 }
 
@@ -983,20 +1030,11 @@ export async function retryExternalExecution(workspaceId: string, actorUserId: s
   let targetKind: string;
 
   if (runtime === 'antigravity') {
-    if (!antigravityClient.isAntigravityConfigured() || !antigravityClient.isAntigravityEnabled()) {
-      throw Object.assign(new Error('The Antigravity runtime is no longer configured or enabled in this deployment.'), { code: 'RUNTIME_NOT_CONFIGURED' });
-    }
-    // Guardian is re-evaluated on every retry, never inherited from the
-    // first attempt: policy can change between attempts, and a retry is a
-    // new outward dispatch decision.
-    const guardian = guardianCheckInstruction(antigravityInstructionFrom(input));
-    if (!guardian.allowed) {
-      throw Object.assign(new Error(guardian.error || 'Guardian refused this instruction.'), { code: 'GUARDIAN_BLOCKED' });
-    }
-    targetId = null;
-    remotePath = prior.remote_path;
-    targetKind = prior.target_kind;
-  } else {
+    // A retry is a NEW paid run, and a paid remote run needs its own human
+    // approval. The spent approval of the failed attempt authorizes nothing.
+    throw Object.assign(new Error('An Antigravity run cannot be retried from here: a new run needs a new human approval. Re-queue the task so it is approved again.'), { code: 'APPROVAL_REQUIRED' });
+  }
+  {
     if (!prior.target_id) {
       throw Object.assign(new Error('The prior attempt has no resolvable target to retry.'), { code: 'NOT_RETRYABLE' });
     }
@@ -1096,7 +1134,8 @@ export async function submitAndAwaitExternalExecution(
 // Acts only on a task with an OPEN orchestration claim. A Development-loop or
 // ad-hoc execution has none, so its behaviour is unchanged.
 // ---------------------------------------------------------------------------
-export function syncOrchestratedTaskForExecution(execution: ExternalExecutionRecord | null | undefined): void {
+export function syncOrchestratedTaskForExecution(execution: ExternalExecutionRecord | null | undefined, remoteUsage?: any): void {
+  settleAntigravitySpend(execution, remoteUsage);
   try {
     if (!execution || !execution.task_id) return;
     const workspaceId = execution.workspace_id;
@@ -1145,4 +1184,23 @@ export function syncOrchestratedTaskForExecution(execution: ExternalExecutionRec
   } catch {
     /* settlement is best-effort; the ledger row itself is the durable truth */
   }
+}
+
+
+/**
+ * SPEND — settle the usage row of an Antigravity run when the sweep observes
+ * its outcome. Until then the row stays DISPATCHED: its reserved per-run
+ * ceiling keeps counting against budgets and it holds a concurrency slot.
+ * Token counts are recorded only as the provider reported them.
+ */
+function settleAntigravitySpend(execution: ExternalExecutionRecord | null | undefined, remoteUsage?: any): void {
+  if (!execution || execution.runtime !== 'antigravity' || !execution.remote_job_id) return;
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const usage = remoteUsage && typeof remoteUsage === 'object'
+    ? { inputTokens: n(remoteUsage.input_tokens ?? remoteUsage.total_input_tokens), outputTokens: n(remoteUsage.output_tokens ?? remoteUsage.total_output_tokens), totalTokens: n(remoteUsage.total_tokens) }
+    : null;
+  if (execution.result_ingested_at) return settleAsyncUsage(execution.remote_job_id, 'SUCCESS', usage);
+  if (execution.status === 'FAILED' || execution.status === 'CANCELLED') return settleAsyncUsage(execution.remote_job_id, 'KNOWN_FAILURE', usage);
+  if (execution.status === 'SUCCEEDED' && execution.next_poll_at === null && execution.error_code) return settleAsyncUsage(execution.remote_job_id, 'KNOWN_FAILURE', usage);
+  if (execution.status === 'UNKNOWN' && execution.next_poll_at === null) return settleAsyncUsage(execution.remote_job_id, 'UNKNOWN', usage);
 }

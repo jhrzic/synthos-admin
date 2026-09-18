@@ -247,7 +247,7 @@ export async function answerWithBestAvailableMode(params: {
   }
 
   const prompt = buildGroundedPrompt({ profile, history: params.history, question: text, evidence });
-  const llm = await generateGroundedReply({ prompt, evidence, callModel: params.callModel as any });
+  const llm = await generateGroundedReply({ prompt, evidence, callModel: params.callModel as any, spend: { workspaceId } });
 
   if (!llm.ok) {
     // A provider failure must never become a worse answer than we already had.

@@ -29,7 +29,10 @@ export type RuntimeEventType =
   // PUSH 2B — development-loop state changes. Additive: every existing
   // producer still emits only its original types. This is what a live
   // Development surface observes, so a UI never has to invent progress.
-  | 'DEVELOPMENT_TASK';
+  | 'DEVELOPMENT_TASK'
+  // SPEND GUARD — every refused or non-successful paid call, and budget threshold alerts.
+  | 'SPEND_GUARD'
+  | 'SPEND_ALERT';
 
 export type RuntimeEventTargetType = 'skill' | 'mcp_server' | 'hermes_runtime' | 'provider' | 'external_execution' | 'capability' | 'development_task';
 

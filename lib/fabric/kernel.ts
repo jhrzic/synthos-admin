@@ -248,6 +248,7 @@ export async function executeAgentTask(
       assignedModel = "gemini-3.6-flash",
       inputs = "",
       sourceUrl = "",
+      spendIdempotencyKey,
     } = (rawBody || {}) as ExecuteAgentTaskInput;
 
     console.log(`[Agent Execution] Starting execution for Task "${taskTitle}" (${taskId}) via ${assignedAgent} / ${assignedModel}...`);
@@ -437,9 +438,16 @@ export async function executeAgentTask(
       // queue is guaranteed to belong to it.
       const modelsToTry = [normalizedAssignedModel, ...candidateModels].filter((v, i, a) => a.indexOf(v) === i);
       const providerStartedAt = Date.now();
+      const spend = {
+        callSite: 'kernel.model_task',
+        workspaceId: resolvedWorkspaceId,
+        taskId,
+        correlationId: spendIdempotencyKey ?? taskId,
+        idempotencyKey: spendIdempotencyKey || `kernel:${taskId}:${crypto.randomUUID()}`,
+      };
       const genResult = provider === "OPENAI"
-        ? await generateViaOpenAI({ apiKey, contents: rolePrompt, candidateModels: modelsToTry })
-        : await generateViaGemini({ apiKey, contents: rolePrompt, candidateModels: modelsToTry });
+        ? await generateViaOpenAI({ apiKey, contents: rolePrompt, candidateModels: modelsToTry, spend })
+        : await generateViaGemini({ apiKey, contents: rolePrompt, candidateModels: modelsToTry, spend });
       executionOutput = genResult.output;
       if (genResult.modelUsed) modelUsed = genResult.modelUsed;
       if (genResult.providerUsageMetadata) providerUsageMetadata = genResult.providerUsageMetadata;
@@ -475,7 +483,10 @@ export async function executeAgentTask(
       // itself non-throwing.
       // ---------------------------------------------------------------------
       const providerOk = !!genResult.output.trim() && !genResult.hadProviderError;
-      recordProviderAttempt({
+      // A spend-guard refusal sent nothing to the provider, so it is not a
+      // provider attempt and must not move the provider's health state.
+      const spendBlocked = /^BLOCKED_BUDGET \(/.test(String(genResult.lastProviderError || ''));
+      if (!spendBlocked) recordProviderAttempt({
         // lib/provider-state.ts keys on the lowercase provider id, the same
         // one lib/model-credentials.ts uses, so probe and real work land in
         // one ledger rather than two spellings of it.

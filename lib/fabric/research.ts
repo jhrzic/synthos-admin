@@ -305,7 +305,7 @@ ${evidenceBlock}
 Write a concise synthesis (3-5 sentences) comparing these repositories and explaining their relevance to a company building an agentic marketing operating system. Use ONLY the facts given above — no invented stars, dates, or claims.`;
 
   const synthesisResult = await ctx.invoke('model.gemini', () =>
-    generateViaGemini({ apiKey: params.apiKey, contents: synthesisPrompt, candidateModels: [SYNTHESIS_MODEL] })
+    generateViaGemini({ apiKey: params.apiKey, contents: synthesisPrompt, candidateModels: [SYNTHESIS_MODEL], spend: { callSite: 'research.synthesis' } })
   );
   if (!synthesisResult.output) {
     throw new Error(synthesisResult.lastProviderError || 'Gemini synthesis returned an empty response.');

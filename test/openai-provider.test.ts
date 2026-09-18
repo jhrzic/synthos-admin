@@ -15,6 +15,10 @@ import { getModelCredentialStatus, saveModelCredential, deleteModelCredential } 
 import { listCapabilities } from '../lib/fabric/registry';
 import { getRuntimeStatus } from '../lib/runtime-status';
 import { getDatabase } from '../lib/persistence';
+import { allowPaidExecutionForTest } from './helpers/spend';
+let spendSeq = 0;
+/** One logical execution per call — each test call is its own request. */
+const testSpend = () => ({ callSite: 'test.openai-provider', idempotencyKey: `test-openai-${Date.now()}-${spendSeq++}` });
 
 // ---------------------------------------------------------------------------
 // PUSH 1 — OpenAI as a real execution provider.
@@ -47,6 +51,8 @@ let behaviour: StubBehaviour;
 let lastSeen: StubBehaviour['seen'];
 
 beforeAll(async () => {
+  // Explicit opt-in: this file exercises SUCCESSFUL paid calls against a local double.
+  allowPaidExecutionForTest([['openai', 'gpt-5.6-terra'], ['openai', 'gpt-5.6-luna'], ['openai', 'gpt-5.6-sol'], ['openai', 'gpt-6-astra'], ['openai', 'gpt-4o'], ['gemini', 'gemini-3.6-flash'], ['gemini', 'gemini-3.1-flash-lite']]);
   getDatabase();
 
   server = http.createServer((req, res) => {
@@ -218,8 +224,7 @@ describe('3. REAL EXECUTION against the real Responses API contract', () => {
     const result = await generateViaOpenAI({
       apiKey: 'sk-live-looking-key',
       contents: 'Produce findings.',
-      candidateModels: ['gpt-5.6-terra'],
-    });
+      candidateModels: ['gpt-5.6-terra'], spend: testSpend() });
 
     expect(result.output).toBe('Structured intelligence findings.');
     expect(result.modelUsed).toBe('gpt-5.6-terra-2026-08-01');
@@ -230,19 +235,19 @@ describe('3. REAL EXECUTION against the real Responses API contract', () => {
 
   it('real provider usage is captured verbatim and never estimated', async () => {
     behaviour = { status: 200, body: { model: 'gpt-5.6-terra', output_text: 'ok', usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 } } };
-    const result = await generateViaOpenAI({ apiKey: 'sk-k', contents: 'hi', candidateModels: ['gpt-5.6-terra'] });
+    const result = await generateViaOpenAI({ apiKey: 'sk-k', contents: 'hi', candidateModels: ['gpt-5.6-terra'], spend: testSpend() });
     expect(result.providerUsageMetadata).toEqual({ input_tokens: 7, output_tokens: 3, total_tokens: 10 });
   });
 
   it('a response with no usage block reports null usage rather than a fabricated token count', async () => {
     behaviour = { status: 200, body: { model: 'gpt-5.6-terra', output_text: 'ok' } };
-    const result = await generateViaOpenAI({ apiKey: 'sk-k', contents: 'hi', candidateModels: ['gpt-5.6-terra'] });
+    const result = await generateViaOpenAI({ apiKey: 'sk-k', contents: 'hi', candidateModels: ['gpt-5.6-terra'], spend: testSpend() });
     expect(result.providerUsageMetadata).toBeNull();
   });
 
   it('the credential is sent as a real bearer header, and no sampling parameter is sent (GPT-6 Astra rejects custom temperature)', async () => {
     behaviour = { status: 200, body: { model: 'gpt-6-astra', output_text: 'ok' } };
-    await generateViaOpenAI({ apiKey: 'sk-header-check', contents: 'prompt body', candidateModels: ['gpt-6-astra'] });
+    await generateViaOpenAI({ apiKey: 'sk-header-check', contents: 'prompt body', candidateModels: ['gpt-6-astra'], spend: testSpend() });
     expect(lastSeen?.auth).toBe('Bearer sk-header-check');
     expect(lastSeen?.model).toBe('gpt-6-astra');
     expect(lastSeen?.input).toBe('prompt body');
@@ -260,7 +265,7 @@ describe('3. REAL EXECUTION against the real Responses API contract', () => {
 describe('4. TRUTHFUL FAILURE — an invalid credential fails as a failure, never as empty success', () => {
   it('a 401 is reported with the provider\'s own message and produces no output', async () => {
     behaviour = { status: 401, body: { error: { message: 'Incorrect API key provided.' } } };
-    const result = await generateViaOpenAI({ apiKey: 'sk-wrong', contents: 'hi', candidateModels: ['gpt-5.6-terra'] });
+    const result = await generateViaOpenAI({ apiKey: 'sk-wrong', contents: 'hi', candidateModels: ['gpt-5.6-terra'], spend: testSpend() });
 
     expect(result.output).toBe('');
     expect(result.modelUsed).toBeNull();
@@ -271,7 +276,7 @@ describe('4. TRUTHFUL FAILURE — an invalid credential fails as a failure, neve
 
   it('a 200 containing no text is an error, not a silent success', async () => {
     behaviour = { status: 200, body: { model: 'gpt-5.6-terra', output_text: '' } };
-    const result = await generateViaOpenAI({ apiKey: 'sk-k', contents: 'hi', candidateModels: ['gpt-5.6-terra'] });
+    const result = await generateViaOpenAI({ apiKey: 'sk-k', contents: 'hi', candidateModels: ['gpt-5.6-terra'], spend: testSpend() });
     expect(result.output).toBe('');
     expect(result.hadProviderError).toBe(true);
     expect(result.lastProviderError).toContain('no text');
@@ -279,7 +284,7 @@ describe('4. TRUTHFUL FAILURE — an invalid credential fails as a failure, neve
 
   it('a non-JSON body is reported honestly rather than crashing the caller', async () => {
     behaviour = { status: 200, body: '<html>gateway error</html>' };
-    const result = await generateViaOpenAI({ apiKey: 'sk-k', contents: 'hi', candidateModels: ['gpt-5.6-terra'] });
+    const result = await generateViaOpenAI({ apiKey: 'sk-k', contents: 'hi', candidateModels: ['gpt-5.6-terra'], spend: testSpend() });
     expect(result.hadProviderError).toBe(true);
     expect(result.lastProviderError).toContain('not valid JSON');
   });
@@ -288,7 +293,7 @@ describe('4. TRUTHFUL FAILURE — an invalid credential fails as a failure, neve
     const saved = process.env.OPENAI_BASE_URL;
     process.env.OPENAI_BASE_URL = 'http://127.0.0.1:1/v1';
     try {
-      const result = await generateViaOpenAI({ apiKey: 'sk-k', contents: 'hi', candidateModels: ['gpt-5.6-terra'], timeoutMs: 2000 });
+      const result = await generateViaOpenAI({ apiKey: 'sk-k', contents: 'hi', candidateModels: ['gpt-5.6-terra'], timeoutMs: 2000, spend: testSpend() });
       expect(result.output).toBe('');
       expect(result.hadProviderError).toBe(true);
       expect(result.lastProviderError).toBeTruthy();
@@ -304,7 +309,7 @@ describe('5. NO CREDENTIAL LEAKAGE — a key must never survive into a log, a me
       status: 400,
       body: { error: { message: 'Bad request for key sk-proj-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH' } },
     };
-    const result = await generateViaOpenAI({ apiKey: 'sk-proj-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH', contents: 'hi', candidateModels: ['gpt-5.6-terra'] });
+    const result = await generateViaOpenAI({ apiKey: 'sk-proj-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH', contents: 'hi', candidateModels: ['gpt-5.6-terra'], spend: testSpend() });
     expect(result.lastProviderError).not.toContain('AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH');
     expect(result.lastProviderError).toContain('REDACTED');
   });
@@ -316,7 +321,7 @@ describe('5. NO CREDENTIAL LEAKAGE — a key must never survive into a log, a me
 
   it('no successful result object carries the key in any field', async () => {
     behaviour = { status: 200, body: { model: 'gpt-5.6-terra', output_text: 'ok' } };
-    const result = await generateViaOpenAI({ apiKey: 'sk-secret-never-returned', contents: 'hi', candidateModels: ['gpt-5.6-terra'] });
+    const result = await generateViaOpenAI({ apiKey: 'sk-secret-never-returned', contents: 'hi', candidateModels: ['gpt-5.6-terra'], spend: testSpend() });
     expect(JSON.stringify(result)).not.toContain('sk-secret-never-returned');
   });
 

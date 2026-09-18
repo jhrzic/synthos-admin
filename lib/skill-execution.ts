@@ -18,6 +18,7 @@
 // so nothing is untracked — see docs/adr-005-runtime-provider-boundaries.md.
 // ---------------------------------------------------------------------------
 
+import { guardedGeminiGenerate } from './spend/adapters';
 import { GoogleGenAI } from '@google/genai';
 import { getWorkspaceSkill, classifySkillExecutability, getRawCredentialCiphertext, DeterministicAction } from './skills';
 import { classifyModelRequest, explainUnroutableModel } from './model-router';
@@ -196,7 +197,7 @@ async function runModelAction(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), EXECUTE_TIMEOUT_MS);
     try {
-      const response = await ai.models.generateContent({ model, contents: prompt });
+      const response = await guardedGeminiGenerate(ai, { model, contents: prompt }, { callSite: 'skill.model', workspaceId });
       return response.text || '';
     } finally {
       clearTimeout(timer);

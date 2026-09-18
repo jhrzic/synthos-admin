@@ -15,6 +15,7 @@ import {
 import { DEFAULT_OPENAI_REVIEW_MODEL, resolveReviewSeatModel } from '../lib/model-router';
 import { advanceDueExternalExecutions, getWorkspaceExternalExecution } from '../lib/external-executions';
 import { getDatabase, getTaskArtifacts, getTaskReceipts, getTaskQualityReviews, verifyReceipt } from '../lib/persistence';
+import { allowPaidExecutionForTest } from './helpers/spend';
 
 // ---------------------------------------------------------------------------
 // PUSH 2A — the development-loop backend contract.
@@ -61,6 +62,8 @@ const REAL_REVIEW = [
 ].join('\n');
 
 beforeAll(async () => {
+  // Explicit opt-in: this file exercises SUCCESSFUL paid calls against a local double.
+  allowPaidExecutionForTest([['openai', 'gpt-5.6-terra'], ['openai', 'gpt-5.6-luna'], ['openai', 'gpt-5.6-sol'], ['openai', 'gpt-6-astra'], ['openai', 'gpt-4o'], ['gemini', 'gemini-3.6-flash'], ['gemini', 'gemini-3.1-flash-lite']]);
   getDatabase();
 
   agServer = http.createServer((req, res) => {

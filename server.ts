@@ -1,3 +1,4 @@
+import './lib/spend/network-guard';
 import express from "express";
 import path from "path";
 import os from "os";
@@ -187,6 +188,10 @@ import { resolveProviderState } from "./lib/provider-state";
 import { resolvePublicBaseUrl } from "./lib/public-url";
 import { requireAuth, requireWorkspaceMember, requireWorkspaceAdmin, requirePlatformAdmin, requireSameOrigin, getRequestUser, fromBody, fromQuery, fromBodyOrQuery, authorizedWorkspaceId, AuthedRequest } from "./lib/authorization";
 import { recordAdminAuditEvent, listRecentAdminAuditEvents } from "./lib/audit";
+import { guardedGeminiGenerate, guardedSpeech, requestKey } from "./lib/spend/adapters";
+import { getSpendStatus } from "./lib/spend/status";
+import { getSpendPolicy, saveSpendPolicy, savePricingTable, PAID_PROVIDERS, type PaidProvider } from "./lib/spend/policy";
+import { clearAmbiguousUsage } from "./lib/spend/guard";
 import { executeAgentTask, buildAgentRolePrompt } from "./lib/fabric/kernel";
 import { createExecutionContext } from "./lib/fabric/context";
 import { generateViaGemini } from "./lib/fabric/model-gemini";
@@ -575,14 +580,16 @@ async function startServer() {
       const candidateModels = [targetModel, ...DEFAULT_CANDIDATE_MODELS].filter((v, i, a) => a.indexOf(v) === i);
       let usageMetadata: any = null;
 
+      // One HTTP request = one logical execution: every retry/candidate below shares this key, so none can pay twice (lib/spend/guard.ts).
+      const generateSpendKey = requestKey('api.generate');
       const failoverResult = await generateWithFailover(candidateModels, async (candidate) => {
-        const response = await ai.models.generateContent({
+        const response = await guardedGeminiGenerate(ai, {
           model: candidate,
           contents: enhancedPrompt,
           config: {
             temperature: Number(temperature),
           },
-        });
+        }, { callSite: 'api.generate', idempotencyKey: generateSpendKey });
         if (!response.text) {
           throw new Error("Model returned an empty response.");
         }
@@ -902,6 +909,7 @@ async function startServer() {
       });
 
       async function generateContentWithFailover(prompt: string, options: any = {}) {
+        const auditSpendKey = requestKey('youtube.audit');
         const candidateModels = DEFAULT_CANDIDATE_MODELS;
         let lastError: any = null;
 
@@ -909,11 +917,11 @@ async function startServer() {
           const modelName = candidateModels[attempt];
           try {
             console.log(`[Model Router] Executing prompt with model '${modelName}' (Attempt ${attempt + 1}/${candidateModels.length})...`);
-            const response = await ai.models.generateContent({
+            const response = await guardedGeminiGenerate(ai, {
               model: modelName,
               contents: prompt,
               config: options.config || { temperature: 0.2 }
-            });
+            }, { callSite: 'youtube.audit', idempotencyKey: auditSpendKey });
 
             if (response && response.text) {
               console.log(`[Model Router] Model '${modelName}' succeeded on attempt ${attempt + 1}.`);
@@ -1212,10 +1220,10 @@ Video ID: "${videoId}"
 
 Analyze this video topic for technical intelligence, agent workflow implications, and architectural takeaways in concise Markdown.`;
 
-        const modelRes = await ai.models.generateContent({
+        const modelRes = await guardedGeminiGenerate(ai, {
           model: ingestClassification.resolvedModel,
           contents: prompt
-        });
+        }, { callSite: 'youtube.ingest' });
         analysis = modelRes.text || "";
       } else if (apiKey && ingestClassification.provider === "UNSUPPORTED") {
         // Never silently substitute Gemini for a non-Gemini model request — skip
@@ -1299,14 +1307,15 @@ Return JSON matching this exact structure:
 }
 Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis, Engineering/Strategy, Synthesis, and Verification. The root task MUST have empty prerequisiteKeys.`;
 
+          const decomposeSpendKey = requestKey('orchestrator.decompose');
           const candidateModels = DEFAULT_CANDIDATE_MODELS;
           for (const m of candidateModels) {
             try {
-              const resp = await ai.models.generateContent({
+              const resp = await guardedGeminiGenerate(ai, {
                 model: m,
                 contents: decomposePrompt,
                 config: { responseMimeType: "application/json", temperature: 0.2 }
-              });
+              }, { callSite: 'orchestrator.decompose', idempotencyKey: decomposeSpendKey });
               if (resp?.text) {
                 aiDecomposition = JSON.parse(resp.text);
                 break;
@@ -2518,10 +2527,12 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
               };
             } else {
               const normalizedModel = modelClassification.resolvedModel;
-              const candidateModels = [normalizedModel, ...DEFAULT_CANDIDATE_MODELS].filter((v, idx, a) => a.indexOf(v) === idx);
+              // NO_PAID_FALLBACK — one model per node.
+              const candidateModels = [normalizedModel];
               const genResult = await graphRunCtx.invoke("model.gemini", async () => {
                 const rolePrompt = buildAgentRolePrompt({ assignedAgent: nodeAgent, taskTitle, description: nodeDescription, inputs: previousOutput });
-                return generateViaGemini({ apiKey, contents: rolePrompt, candidateModels });
+                // Keyed per run+node, so a graph resume cannot pay for the same node twice.
+                return generateViaGemini({ apiKey, contents: rolePrompt, candidateModels, spend: { callSite: 'graph.node', workspaceId, idempotencyKey: `graph:${runId}:${currentNode.id}` } });
               });
               if (!genResult.output) {
                 nodeExecData = {
@@ -3939,7 +3950,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
           });
         }
 
-        const oaRes = await fetch("https://api.openai.com/v1/audio/speech", {
+        const oaRes = await guardedSpeech("openai_tts", "tts-1", String(text || ""), { callSite: "voice.tts.openai" }, () => fetch("https://api.openai.com/v1/audio/speech", {
           method: "POST",
           headers: {
             Authorization: `Bearer ${oaKey}`,
@@ -3951,7 +3962,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
             voice: voiceId || "alloy",
             speed: Number(speed) || 1.0,
           }),
-        });
+        }));
 
         if (!oaRes.ok) {
           const errText = sanitizeProviderError(await oaRes.text());
@@ -3981,7 +3992,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         }
 
         const elVoiceId = voiceId || "21m00Tcm4TlvDq8ikWAM";
-        const elRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${elVoiceId}`, {
+        const elRes = await guardedSpeech("elevenlabs", "eleven_turbo_v2", String(text || ""), { callSite: "voice.tts.elevenlabs" }, () => fetch(`https://api.elevenlabs.io/v1/text-to-speech/${elVoiceId}`, {
           method: "POST",
           headers: {
             "xi-api-key": elKey,
@@ -3995,7 +4006,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
               similarity_boost: 0.75,
             },
           }),
-        });
+        }));
 
         if (!elRes.ok) {
           const errText = sanitizeProviderError(await elRes.text());
@@ -4368,12 +4379,13 @@ Rules for spokenSummary specifically:
             { role: "user", parts: [{ text: trimmed }] },
           ];
 
+          const jarvisSpendKey = requestKey('jarvis.command');
           jarvisFailover = await generateWithFailover(candidateModels, async (candidateModel) => {
-            const response = await ai.models.generateContent({
+            const response = await guardedGeminiGenerate(ai, {
               model: candidateModel,
               contents: conversationContents,
               config: { systemInstruction: jarvisSystemInstruction, responseMimeType: "application/json" },
-            });
+            }, { callSite: 'jarvis.command', workspaceId: (req as AuthedRequest).authWorkspaceId ?? null, idempotencyKey: jarvisSpendKey });
             if (!response.text) {
               // A real failure of this candidate, not a fabricated success — lets
               // failover try the next candidate model instead of faking a reply.
@@ -6075,6 +6087,7 @@ Rules for spokenSummary specifically:
       const code =
         err?.code === "TARGET_NOT_ALLOWED" ? 403
         : err?.code === "GUARDIAN_BLOCKED" ? 403
+        : err?.code === "APPROVAL_REQUIRED" ? 403
         : err?.code === "RUNTIME_NOT_CONFIGURED" ? 409
         : err?.code === "INVALID_INPUT" || err?.code === "INPUT_TOO_LARGE" ? 400
         : 500;
@@ -6943,6 +6956,76 @@ Rules for spokenSummary specifically:
   // "changed" by a toggle that cannot win (lib/platform-settings.ts).
   // No route here makes a call to Antigravity.
   // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // SPEND CONTROL — platform_admin only, every change audited, no CLI.
+  // Policy and pricing changes apply to the very next paid call (read per
+  // call). Kill switches stop NEW dispatches immediately; an in-flight call is
+  // never terminated in a way that could cause a replay.
+  // -------------------------------------------------------------------------
+  app.get("/api/master-admin/spend", requirePlatformAdmin, (_req, res) => {
+    try {
+      return res.json({ success: true, status: getSpendStatus() });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: String(err?.message || "Failed to read spend status").slice(0, 200) });
+    }
+  });
+
+  app.post("/api/master-admin/spend/policy", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "spend-policy"), (req, res) => {
+    try {
+      const actor = (req as AuthedRequest).authUser!.user_id;
+      const before = getSpendPolicy();
+      const result = saveSpendPolicy(req.body?.policy ?? {}, actor);
+      if (!result.ok) return res.status(400).json({ success: false, error: "Invalid spend policy.", errors: result.errors });
+      recordAdminAuditEvent({ actorUserId: actor, eventType: "SPEND_POLICY_CHANGED", targetType: "platform_setting", targetId: "spend.policy",
+        detail: { paidExecutionEnabled: { from: before.paidExecutionEnabled, to: result.policy.paidExecutionEnabled }, changed: req.body?.policy ?? {} } });
+      return res.json({ success: true, status: getSpendStatus() });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: String(err?.message || "Failed to save the spend policy").slice(0, 200) });
+    }
+  });
+
+  app.post("/api/master-admin/spend/kill", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "spend-kill"), (req, res) => {
+    try {
+      const actor = (req as AuthedRequest).authUser!.user_id;
+      const scope = String(req.body?.scope || "");
+      if (typeof req.body?.enabled !== "boolean") return res.status(400).json({ success: false, error: "enabled must be true or false." });
+      const enabled = req.body.enabled as boolean;
+      let partial: any;
+      if (scope === "all") partial = { paidExecutionEnabled: enabled };
+      else if ((PAID_PROVIDERS as readonly string[]).includes(scope)) partial = { providers: { [scope]: { ...getSpendPolicy().providers[scope as PaidProvider], enabled } } };
+      else return res.status(400).json({ success: false, error: `scope must be "all" or one of ${PAID_PROVIDERS.join(", ")}.` });
+      const result = saveSpendPolicy(partial, actor);
+      if (!result.ok) return res.status(400).json({ success: false, error: "Invalid change.", errors: result.errors });
+      recordAdminAuditEvent({ actorUserId: actor, eventType: "SPEND_POLICY_CHANGED", targetType: "spend_switch", targetId: scope, detail: { enabled } });
+      return res.json({ success: true, status: getSpendStatus() });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: String(err?.message || "Failed to change the switch").slice(0, 200) });
+    }
+  });
+
+  app.post("/api/master-admin/spend/pricing", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "spend-pricing"), (req, res) => {
+    try {
+      const actor = (req as AuthedRequest).authUser!.user_id;
+      const result = savePricingTable(req.body?.pricing ?? {}, actor);
+      if (!result.ok) return res.status(400).json({ success: false, error: "Invalid pricing.", errors: result.errors });
+      recordAdminAuditEvent({ actorUserId: actor, eventType: "SPEND_PRICING_CHANGED", targetType: "platform_setting", targetId: "spend.pricing", detail: { pricing: req.body?.pricing ?? {} } });
+      return res.json({ success: true, status: getSpendStatus() });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: String(err?.message || "Failed to save pricing").slice(0, 200) });
+    }
+  });
+
+  // Operator decision on an ambiguous paid call (timeout after dispatch /
+  // unknown). Its cost keeps counting; clearing only permits a NEW attempt.
+  app.post("/api/master-admin/spend/usage/:id/clear", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "spend-clear"), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const note = String(req.body?.note || "").trim();
+    if (!note) return res.status(400).json({ success: false, error: "A note explaining the decision is required." });
+    if (!clearAmbiguousUsage(req.params.id, note)) return res.status(409).json({ success: false, error: "Only a TIMEOUT_AFTER_DISPATCH or UNKNOWN row can be cleared." });
+    recordAdminAuditEvent({ actorUserId: actor, eventType: "SPEND_USAGE_CLEARED", targetType: "provider_usage", targetId: req.params.id, detail: { note } });
+    return res.json({ success: true, status: getSpendStatus() });
+  });
+
   app.get("/api/master-admin/antigravity", requirePlatformAdmin, (_req, res) => {
     try {
       return res.json({ success: true, status: getAntigravityControlStatus() });
@@ -7137,10 +7220,10 @@ Rules for spokenSummary specifically:
 
       try {
         const ai = new GoogleGenAI({ apiKey });
-        const response = await ai.models.generateContent({
+        const response = await guardedGeminiGenerate(ai, {
           model: "gemini-3.1-flash-lite",
           contents: "ping: respond with 'pong' only",
-        });
+        }, { callSite: 'admin.provider_test', maxOutputTokens: 16 });
 
         const latencyMs = Date.now() - startTime;
         return res.json({
@@ -7298,10 +7381,10 @@ Rules for spokenSummary specifically:
     if (process.env.GEMINI_API_KEY) {
       try {
         const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        const probeRes = await ai.models.generateContent({
+        const probeRes = await guardedGeminiGenerate(ai, {
           model: "gemini-3.1-flash-lite",
           contents: "ping",
-        });
+        }, { callSite: 'admin.e2e_test', maxOutputTokens: 16 });
         if (probeRes.text) {
           results.push({
             step: 4,

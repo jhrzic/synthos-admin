@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { synthosControl } from '../services/synthosControlService';
 import { AntigravityControlPanel } from './AntigravityControlPanel';
+import { SpendControlPanel } from './SpendControlPanel';
 import { speakText } from '../services/voiceEngine';
 
 interface MasterAdminViewProps {
@@ -37,6 +38,7 @@ export type MasterAdminSection =
   | 'auth'
   | 'models'
   | 'antigravity'
+  | 'spend'
   | 'hermes'
   | 'voice'
   | 'mcps'
@@ -1117,6 +1119,7 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
           { id: 'auth' as MasterAdminSection, label: 'Auth & HITL', icon: Lock },
           { id: 'models' as MasterAdminSection, label: 'Providers & Models', icon: Zap },
           { id: 'antigravity' as MasterAdminSection, label: 'Antigravity & Autonomy', icon: Sliders },
+          { id: 'spend' as MasterAdminSection, label: 'Spend Control', icon: BarChart3 },
           { id: 'hermes' as MasterAdminSection, label: 'Hermes Admin', icon: Cpu },
           { id: 'voice' as MasterAdminSection, label: 'Voice & Apollo', icon: Radio },
           { id: 'mcps' as MasterAdminSection, label: 'MCP & Tools', icon: Terminal },
@@ -1748,6 +1751,19 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
       )}
 
       {/* SECTION 7: HERMES ADMIN */}
+      {activeSection === 'spend' && (
+        <div className="bg-[#090A16] border border-[#1C203E] p-6 rounded-2xl space-y-6 shadow-xl">
+          <div className="border-b border-[#181B34] pb-4">
+            <h2 className="text-lg font-bold text-white font-mono flex items-center gap-2">
+              <BarChart3 className="w-5 h-5 text-[#38BDF8]" />
+              Spend Control
+            </h2>
+            <p className="text-xs text-[#8E94B8] mt-1">Hard ceilings on every paid provider call. Enforced before any request leaves the process; audited; no restart.</p>
+          </div>
+          <SpendControlPanel />
+        </div>
+      )}
+
       {activeSection === 'antigravity' && (
         <div className="bg-[#090A16] border border-[#1C203E] p-6 rounded-2xl space-y-6 shadow-xl">
           <div className="border-b border-[#181B34] pb-4">

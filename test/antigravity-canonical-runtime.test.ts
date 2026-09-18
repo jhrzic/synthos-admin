@@ -37,6 +37,7 @@ import { runExternalExecutionReconciliation } from '../lib/fabric/scheduler';
 import { listWorkspaceExternalExecutions, MAX_POLL_ATTEMPTS } from '../lib/external-executions';
 import { resolveAntigravityBinding, antigravityApprovalDigest, executeEnvelope } from '../lib/fabric/envelope';
 import { searchWorkspaceMemory } from '../lib/memory-index';
+import { allowPaidExecutionForTest } from './helpers/spend';
 
 const WS = 'ws-ag-canonical';
 const OUTPUT = [
@@ -96,6 +97,8 @@ beforeAll(async () => {
   process.env.ANTIGRAVITY_ENABLED = 'true';
   process.env.SYNTHOS_AUTONOMY_LEVEL = 'APPROVAL_GATED_EXTERNAL';
   ensureWorkspace(WS, 'Antigravity contract');
+  // Explicit opt-in: paid execution against the local double, bounded by the per-run ceiling.
+  allowPaidExecutionForTest([]);
 });
 
 afterAll(async () => {

@@ -19,6 +19,7 @@ import { createExecutionContext } from '../lib/fabric/context';
 import { resolveProviderState } from '../lib/provider-state';
 import { listRecentRuntimeEvents } from '../lib/runtime-events';
 import { getDatabase } from '../lib/persistence';
+import { allowPaidExecutionForTest } from './helpers/spend';
 
 // ---------------------------------------------------------------------------
 // PROVIDER LEDGER TRUTH — regression tests for a real gap.
@@ -46,6 +47,8 @@ let BEHAVIOUR: 'ok' | 'error' | 'empty' = 'ok';
 let requestsReceived = 0;
 
 beforeAll(async () => {
+  // Explicit opt-in: this file exercises SUCCESSFUL paid calls against a local double.
+  allowPaidExecutionForTest([['openai', 'gpt-5.6-terra'], ['openai', 'gpt-5.6-luna'], ['openai', 'gpt-5.6-sol'], ['openai', 'gpt-6-astra'], ['openai', 'gpt-4o'], ['gemini', 'gemini-3.6-flash'], ['gemini', 'gemini-3.1-flash-lite']]);
   doubleServer = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => { body += c; });

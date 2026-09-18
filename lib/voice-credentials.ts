@@ -36,6 +36,7 @@
 // is called only by the server-side Fish Audio fetch in server.ts.
 // ---------------------------------------------------------------------------
 
+import { guardedSpeech, requestKey } from './spend/adapters';
 import crypto from 'node:crypto';
 import fs from 'fs';
 import path from 'path';
@@ -453,8 +454,11 @@ export async function synthesizeFishAudio(params: {
 
   let usedModel = resolved.model;
   let response: Response;
+  // SPEND GUARD: one logical synthesis per request; the free-tier retry below
+  // is its own guarded call (a cheaper model, taken only after a 402).
+  const speechKey = requestKey('voice.fish');
   try {
-    response = await call(usedModel);
+    response = await guardedSpeech('fish_audio', usedModel, String(params.text || ''), { callSite: 'voice.fish', idempotencyKey: speechKey }, () => call(usedModel));
   } catch (err: any) {
     return { ok: false, reason: 'REQUEST_FAILED', providerError: sanitizeProviderError(err?.message || 'network error') };
   }
@@ -466,7 +470,7 @@ export async function synthesizeFishAudio(params: {
   if (response.status === 402 && usedModel !== FISH_AUDIO_FREE_MODEL) {
     const original = sanitizeProviderError(await response.text());
     try {
-      const retry = await call(FISH_AUDIO_FREE_MODEL);
+      const retry = await guardedSpeech('fish_audio', FISH_AUDIO_FREE_MODEL, String(params.text || ''), { callSite: 'voice.fish.free_tier', idempotencyKey: `${speechKey}:free-tier` }, () => call(FISH_AUDIO_FREE_MODEL));
       if (retry.ok) {
         usedModel = FISH_AUDIO_FREE_MODEL;
         response = retry;

@@ -80,3 +80,12 @@ function cleanup(): void {
 }
 
 process.on('exit', cleanup);
+
+
+// ---------------------------------------------------------------------------
+// FREE TEST SUITE. Installs the paid-endpoint guard in every worker before any
+// test module loads: real provider hosts are unreachable under test unless
+// SYNTHOS_LIVE_PROVIDER_TESTS=true and SYNTHOS_LIVE_TEST_BUDGET_USD are both
+// set (lib/spend/network-guard.ts). It touches no database.
+// ---------------------------------------------------------------------------
+import '../../lib/spend/network-guard';
