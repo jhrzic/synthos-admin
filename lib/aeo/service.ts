@@ -17,6 +17,9 @@
 // ---------------------------------------------------------------------------
 
 import crypto from 'node:crypto';
+import { GoogleGenAI } from '@google/genai';
+import { guardedGeminiGenerate } from '../spend/adapters';
+import { GEO_ENGINE, GEO_MODEL, runGeoProbe, type GroundingChunk } from './geo-probe';
 import {
   createInitialTask,
   updateTaskStatus,
@@ -32,7 +35,7 @@ import { writeWorkspaceArtifact } from '../vault';
 import { indexVaultArtifact } from '../memory-index';
 import { runScopedAegis, receiptOutcomeFields, commitContentFailure, isContentFailure, DETERMINISTIC_COMPLETION } from '../fabric/scoped-verification';
 import { crawlSite } from './crawler';
-import { analyze, renderReport, type AuditAnalysis } from './analyzer';
+import { analyze, renderReport, type AuditAnalysis, type GeoEvidence } from './analyzer';
 
 export interface AeoAuditParams {
   workspaceId: string;
@@ -76,10 +79,45 @@ export function resolveGeoProvider(): { providerStatus: 'USED' | 'NOT_CONFIGURED
         'No AI/search visibility provider is configured (checked GEMINI_API_KEY, SERPAPI_KEY, DATAFORSEO_LOGIN, BRIGHTDATA_API_KEY, OPENSEO_API_KEY).',
     };
   }
+  if (process.env.GEMINI_API_KEY?.trim()) {
+    return {
+      providerStatus: 'USED',
+      providerDetail: `GEMINI_API_KEY present: audits ask a disclosed panel of local questions via ${GEO_ENGINE} (${GEO_MODEL}), each call spend-guarded.`,
+    };
+  }
   return {
     providerStatus: 'UNAVAILABLE',
-    providerDetail: `Credential present (${present.map(([k]) => k).join(', ')}) but no visibility query adapter is wired in this build, so no AI query was executed.`,
+    providerDetail: `Credential present (${present.map(([k]) => k).join(', ')}) but no visibility query adapter is wired for it in this build, so no AI query was executed. Set GEMINI_API_KEY to enable the Gemini + Google Search probe.`,
   };
+}
+
+/**
+ * Real AI-visibility evidence for one audit, or the honest reason there is none.
+ * Each question is one guarded, Google-Search-grounded Gemini call.
+ */
+async function gatherGeoEvidence(params: AeoAuditParams): Promise<GeoEvidence> {
+  const provider = resolveGeoProvider();
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (provider.providerStatus !== 'USED' || !apiKey) return { queries: [], ...provider };
+  const ai = new GoogleGenAI({ apiKey });
+  return runGeoProbe(
+    {
+      businessName: params.businessName,
+      domain: String(params.domain || ''),
+      location: params.location,
+      targetService: params.targetService,
+      targetKeywords: params.targetKeywords,
+    },
+    async (query) => {
+      const response = await guardedGeminiGenerate(
+        ai,
+        { model: GEO_MODEL, contents: query, config: { tools: [{ googleSearch: {} }], maxOutputTokens: 1200 } },
+        { callSite: 'aeo.geo_probe', workspaceId: params.workspaceId, maxOutputTokens: 1200 },
+      );
+      const chunks: GroundingChunk[] = response?.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
+      return { text: typeof response?.text === 'string' ? response.text : '', chunks };
+    },
+  );
 }
 
 export async function runAeoAudit(params: AeoAuditParams): Promise<AeoAuditResult> {
@@ -111,7 +149,7 @@ export async function runAeoAudit(params: AeoAuditParams): Promise<AeoAuditResul
     location: params.location,
     targetService: params.targetService,
     targetKeywords: params.targetKeywords,
-    geo: { queries: [], ...resolveGeoProvider() },
+    geo: await gatherGeoEvidence(params),
   });
 
   const report = renderReport(analysis, {
