@@ -18,6 +18,7 @@ import {
   checkpointDueWorkspaces,
 } from '../lib/authority-ledger';
 import { verifyBundle } from '../tools/verify-authority-record.mjs';
+import { claimGmailSend, resolveGmailSendSent, resolveGmailSendFailure } from '../lib/gmail-send-ledger';
 
 // ---------------------------------------------------------------------------
 // The authority record is only worth anything if tampering is caught. Every
@@ -223,5 +224,28 @@ describe('outcomes and routine checkpoints', () => {
     receipt(w, 't2');
     checkpointDueWorkspaces(24 * 3600_000, now + 1000);
     expect(summarizeAuthority(w).lastCheckpoint?.seq).toBe(1);
+  });
+});
+
+describe('email sends are on the record', () => {
+  it('a delivered send is a signed receipt chained with its approver; an ambiguous one is recorded too', () => {
+    const w = ws();
+    approve(w, 'send1', 'alice', 'bob');
+    approve(w, 'send2', 'alice', 'alice');
+    const ok = claimGmailSend({ workspaceId: w, approvalId: `apr-${w}-send1`, connectionId: 'c', correlationId: 'k1', contentDigest: 'a'.repeat(64) });
+    const amb = claimGmailSend({ workspaceId: w, approvalId: `apr-${w}-send2`, connectionId: 'c', correlationId: 'k2', contentDigest: 'b'.repeat(64) });
+    if (!ok.ok || !amb.ok) throw new Error('claim failed');
+    resolveGmailSendSent(ok.attempt.attempt_id, 'msg-1', null);
+    resolveGmailSendFailure(amb.attempt.attempt_id, 'NETWORK', 'socket hang up', true);
+
+    const e = ledgerEntries(w);
+    expect(e).toHaveLength(2);
+    expect(e[0]).toMatchObject({ approvalId: `apr-${w}-send1`, requestedBy: 'alice', decidedBy: 'bob', selfApproved: false });
+    expect(e[1]).toMatchObject({ approvalId: `apr-${w}-send2`, selfApproved: true });
+    const b = exportAuthorityRecord(w);
+    expect(JSON.parse(b.receipts[1]!.payloadJson)).toMatchObject({ kind: 'gmail.send', status: 'UNKNOWN', outcome: 'INCOMPLETE' });
+    // Only ids and digests are signed — never the message itself.
+    expect(b.receipts[0]!.payloadJson).not.toMatch(/subject|body|@/i);
+    expect(verifyBundle(JSON.parse(JSON.stringify(b))).ok).toBe(true);
   });
 });

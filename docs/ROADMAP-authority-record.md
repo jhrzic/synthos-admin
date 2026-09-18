@@ -15,12 +15,12 @@
 - Authority is attached where an approval row exists. Actions that ran with no approval are recorded as "no approval on record", which is the truth, not a gap to hide.
 - The operator holds the signing key. Checkpoints only protect against tampering *after* the customer received them. Phase 2 removes that trust.
 
-## Phase 1 — Make it visible and routine · 3 of 4 Built
+## Phase 1 — Make it visible and routine · Built (delivery to customers still open)
 
 1. **Daily checkpoint job** · **Built**: `authorityTickForScheduler()` runs on the one scheduler timer (hourly sweep, ≤1 checkpoint per workspace per day, only when the chain moved). Still to do: deliver checkpoints to the customer (email/download) so they hold them.
 2. **"Authority record" panel** · **Built** (`src/components/AuthorityRecordPanel.tsx`, top of Execution Receipts): actions, % with human approval, self-approvals, open problems from `auditWorkspace`, one-click export. Reuses the existing receipts UX (Product Preservation rule applies).
 3. **Outcome events** · **Built** (`recordOutcome`, `POST /api/authority/outcome`; chained, verified offline): attach later outcomes (sale closed, email replied, refund) to the original receipt as new chained entries. This is what turns the record from "what happened" into "what worked", the input the Brain needs.
-4. **Receipts on every consequential path** · Planned: audit which EXTERNAL_ACTION paths still finish without `recordReceipt` and close them.
+4. **Receipts on every consequential path** · **Built for known paths**: audit (2026-09-18) found every receipt-signing path already saves through `recordReceipt` except two self-test probes (correct). The gap was **Gmail sends**, which were logged only in `gmail_send_attempts`; every resolved send (SENT / FAILED / UNKNOWN) now issues a signed receipt chained with its approval. Re-run this audit whenever a new EXTERNAL_ACTION capability is added.
 
 ## Phase 2 — Remove trust in SynthOS · Planned (3–6 weeks)
 

@@ -32,7 +32,7 @@
 // ---------------------------------------------------------------------------
 
 import crypto from 'node:crypto';
-import { getDatabase } from './persistence';
+import { canonicalizePayload, getDatabase, recordReceipt, signReceiptPayload } from './persistence';
 import { recordRuntimeEvent } from './runtime-events';
 import { scrubSecrets } from './redact';
 import type { GmailSendClaim, GmailErrorCategory } from './gmail-client';
@@ -172,6 +172,42 @@ function recordSendEvent(row: any, status: 'SUCCESS' | 'BLOCKED' | 'FAILED', not
   }
 }
 
+/**
+ * A signed receipt for every resolved send, chained into the workspace's
+ * authority record with the approval that permitted it. The payload carries
+ * ids and digests only — never recipients, subject or body.
+ */
+function issueSendReceipt(row: GmailSendAttemptRecord): void {
+  try {
+    const createdAt = row.resolved_at || new Date().toISOString();
+    const payloadJson = canonicalizePayload({
+      kind: 'gmail.send',
+      workspaceId: row.workspace_id,
+      attemptId: row.attempt_id,
+      approvalId: row.approval_id,
+      contentDigest: row.content_digest,
+      status: row.status,
+      providerMessageId: row.provider_message_id,
+      outcome: row.status === 'SENT' ? 'COMPLETED' : 'INCOMPLETE',
+      createdAt,
+    });
+    const s = signReceiptPayload(payloadJson);
+    recordReceipt({
+      receiptId: `rcpt-gmail-${row.attempt_id}`,
+      taskId: row.task_id || `gmail:${row.attempt_id}`,
+      reviewId: `gmail-send:${row.attempt_id}`,
+      algorithm: s.algorithm,
+      publicKey: s.publicKeyPem,
+      payloadJson,
+      signature: s.signature,
+      createdAt,
+      approvalId: row.approval_id,
+    });
+  } catch {
+    /* evidence must never fail the action */
+  }
+}
+
 /** Resolve a claimed send as delivered, recording the provider's identifiers. */
 export function resolveGmailSendSent(attemptId: string, messageId: string, threadId: string | null): void {
   const db = getDatabase();
@@ -182,7 +218,10 @@ export function resolveGmailSendSent(attemptId: string, messageId: string, threa
       WHERE attempt_id = ? AND status = 'DISPATCHED'`,
   ).run(messageId, threadId, now, attemptId);
   const row: any = db.prepare('SELECT * FROM gmail_send_attempts WHERE attempt_id = ?').get(attemptId);
-  if (row) recordSendEvent(row, 'SUCCESS', 'Gmail accepted the message and returned a message id.');
+  if (row) {
+    recordSendEvent(row, 'SUCCESS', 'Gmail accepted the message and returned a message id.');
+    issueSendReceipt(row as GmailSendAttemptRecord);
+  }
 }
 
 /**
@@ -215,6 +254,7 @@ export function resolveGmailSendFailure(
         ? 'Gmail send outcome is UNKNOWN — the message may have been delivered. Will not be retried automatically.'
         : 'Gmail refused the message before delivery.',
     );
+    issueSendReceipt(row as GmailSendAttemptRecord);
   }
 }
 

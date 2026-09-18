@@ -141,22 +141,28 @@ export function ensureLedgerTables(): void {
   ensured = true;
 }
 
-/** Authority behind a task: the approval it consumed, looked up — never inferred. */
-function authorityFor(taskId: string | null | undefined, workspaceId: string): LedgerAuthority {
+/**
+ * Authority behind an action: the approval named explicitly, else the one its
+ * task consumed. Looked up — never inferred.
+ */
+function authorityFor(taskId: string | null | undefined, workspaceId: string, approvalId?: string | null): LedgerAuthority {
   const none: LedgerAuthority = {
     approvalId: null, requestedBy: null, decidedBy: null, guardianDecision: null, inputDigest: null, selfApproved: null,
   };
-  if (!taskId) return none;
+  if (!taskId && !approvalId) return none;
   let row: any;
   try {
-    row = getDatabase()
-      .prepare(
-        `SELECT approval_id, requested_by_user_id, decided_by_user_id, guardian_decision, input_digest
-           FROM approvals
-          WHERE workspace_id = ? AND (consumed_by_task_id = ? OR task_id = ?) AND status IN ('APPROVED','CONSUMED')
-          ORDER BY decided_at DESC LIMIT 1`,
-      )
-      .get(workspaceId, taskId, taskId);
+    const cols = 'SELECT approval_id, requested_by_user_id, decided_by_user_id, guardian_decision, input_digest FROM approvals';
+    row = approvalId
+      ? getDatabase()
+          .prepare(`${cols} WHERE workspace_id = ? AND approval_id = ? AND status IN ('APPROVED','CONSUMED')`)
+          .get(workspaceId, approvalId)
+      : getDatabase()
+          .prepare(
+            `${cols} WHERE workspace_id = ? AND (consumed_by_task_id = ? OR task_id = ?) AND status IN ('APPROVED','CONSUMED')
+              ORDER BY decided_at DESC LIMIT 1`,
+          )
+          .get(workspaceId, taskId, taskId);
   } catch {
     return none; // approvals table absent in minimal test databases
   }
@@ -223,6 +229,8 @@ function insertEntry(entry: LedgerEntry): void {
 export function appendReceiptToLedger(receipt: {
   receiptId: string;
   taskId?: string | null;
+  /** The approval that authorized this action, when the caller knows it directly. */
+  approvalId?: string | null;
   payloadJson: string;
   signature: string;
   recordedAt?: string;
@@ -243,7 +251,7 @@ export function appendReceiptToLedger(receipt: {
       seq: head ? head.seq + 1 : 1,
       receiptId: receipt.receiptId,
       receiptDigest: receiptDigest(receipt.payloadJson, receipt.signature),
-      ...authorityFor(receipt.taskId, workspaceId),
+      ...authorityFor(receipt.taskId, workspaceId, receipt.approvalId),
       recordedAt: receipt.recordedAt || new Date().toISOString(),
       prevHash: head ? head.entry_hash : GENESIS_HASH,
     };

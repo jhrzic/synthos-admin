@@ -2902,6 +2902,8 @@ export function recordReceipt(params: {
   payloadJson: string;
   signature: string;
   createdAt?: string;
+  /** The approval behind this action, for the authority record. */
+  approvalId?: string | null;
 }): ReceiptRecord {
   const db = getDatabase();
   const receiptId = params.receiptId || `rcpt-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
@@ -2928,6 +2930,7 @@ export function recordReceipt(params: {
     payloadJson: params.payloadJson,
     signature: params.signature,
     recordedAt: nowIso,
+    approvalId: params.approvalId ?? null,
   });
 
   return {
