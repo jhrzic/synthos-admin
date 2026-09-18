@@ -118,8 +118,57 @@ export interface GraphRunRecord {
   updated_at: string;
 }
 
+/** The one production database path, relative to the repository root. */
+const PRODUCTION_DB_RELATIVE = path.join('data', 'synthos-admin.db');
+
+/**
+ * Explicit, deliberately awkward opt-in for the rare integration test that
+ * genuinely must touch the production database. Nothing sets this today.
+ */
+export const PRODUCTION_DB_TEST_OVERRIDE = 'SYNTHOS_ALLOW_PRODUCTION_DB_IN_TEST';
+
+function isTestRuntime(): boolean {
+  return !!process.env.VITEST || process.env.NODE_ENV === 'test';
+}
+
+/**
+ * Resolve the database path, refusing the production database under test.
+ *
+ * WHY THIS GUARD EXISTS
+ * The fallback branch below is a development convenience, not a sandbox. A test
+ * that touches persistence without setting SYNTHOS_DB_PATH resolved straight to
+ * the operator's real database — and that is not hypothetical: a pre-isolation
+ * run of the concierge acceptance tests left three fixture workspaces
+ * ("Alder Dental", "Brightwater Plumbing", "Isolation Test Workspace") with 78
+ * dependent rows in the live database, where they rendered in the production
+ * sidebar as real client workspaces.
+ *
+ * The vault had the same class of leak and got a guard (test/helpers/
+ * isolated-vault.ts). This is the database equivalent, and it is enforced HERE
+ * rather than in each test, because 49 of 112 test files did not set the
+ * variable and relying on every future test to remember is how this happened.
+ *
+ * Throwing is deliberate. A test that trips this fails loudly with the reason,
+ * instead of silently writing rows a human later has to identify and prove.
+ */
 export function getDatabasePath(): string {
-  return process.env.SYNTHOS_DB_PATH || path.join(process.cwd(), 'data', 'synthos-admin.db');
+  const resolved = process.env.SYNTHOS_DB_PATH || path.join(process.cwd(), PRODUCTION_DB_RELATIVE);
+
+  if (isTestRuntime() && !process.env[PRODUCTION_DB_TEST_OVERRIDE]) {
+    const absolute = path.resolve(resolved);
+    const production = path.resolve(process.cwd(), PRODUCTION_DB_RELATIVE);
+    if (absolute === production) {
+      throw new Error(
+        'Refusing to open the production database from a test run. '
+        + `Resolved "${absolute}", which is the production database. `
+        + 'Set SYNTHOS_DB_PATH to an isolated temporary file (test/setup/isolate-database.ts '
+        + `does this automatically), or set ${PRODUCTION_DB_TEST_OVERRIDE}=1 for a test that `
+        + 'genuinely intends to touch production data.',
+      );
+    }
+  }
+
+  return resolved;
 }
 
 let dbInstance: any = null;

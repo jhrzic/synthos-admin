@@ -24,18 +24,18 @@ export const FrontendDemosView: React.FC<FrontendDemosViewProps> = ({ onSelectTa
     {
       id: 'startup-generator',
       name: 'Startup Idea Generator',
-      purpose: 'Deep research thesis scraper combining Scout Web Crawling with Analytics TAM calculations and Product Hunt trend harvesting.',
+      purpose: 'Drafts a startup thesis from a real model call. Scores, TAM/SAM/SOM and unit economics are illustrative template placeholders — no crawling or market data source is connected.',
       category: 'Research & Ideation',
-      status: 'LIVE',
+      status: 'PROTOTYPE',
       icon: Rocket,
       color: '#FF5E8E'
     },
     {
       id: 'auto-content',
       name: 'Auto-Content & News Harvester',
-      purpose: 'Automated Substack, RSS, ArXiv, and social trend monitoring feed with auto-synthesis into Obsidian notes.',
+      purpose: 'Synthesises a draft from a selected signal. No RSS, arXiv, Product Hunt or HackerNews feed is connected, so no signals are harvested.',
       category: 'Publishing',
-      status: 'LIVE',
+      status: 'PROTOTYPE',
       icon: Newspaper,
       color: '#38BDF8'
     },
@@ -51,16 +51,16 @@ export const FrontendDemosView: React.FC<FrontendDemosViewProps> = ({ onSelectTa
     {
       id: 'lead-scraper',
       name: 'Lead Scraper & Ecosystem Repos',
-      purpose: 'Scrapes developer pain points across 200+ GitHub trending repositories and tech research preprints.',
+      purpose: 'Directory lead capture and enrichment surface. No crawler, directory API or enrichment provider is connected, so nothing is harvested.',
       category: 'Scout Intelligence',
-      status: 'LIVE',
+      status: 'PROTOTYPE',
       icon: Search,
       color: '#00D26A'
     },
     {
       id: 'model-stacking',
       name: 'Multi-Model Stacking Chain',
-      purpose: 'Sequential multi-LLM pipeline chaining Perplexity research -> DeepSeek reasoning -> Claude synthesis.',
+      purpose: 'Sequential multi-step model pipeline; each step dispatches through the canonical model router using whichever provider is configured.',
       category: 'Pipeline Engineering',
       status: 'LIVE',
       icon: Layers,

@@ -59,6 +59,13 @@ export default defineConfig(() => {
     test: {
       testTimeout: 20000,
       hookTimeout: 20000,
+      // Runs before each test file's module graph is imported, which is the
+      // only point early enough to set SYNTHOS_DB_PATH before lib/persistence
+      // resolves it. Gives every test an isolated temporary SQLite file so no
+      // test can reach the production database through the development
+      // fallback. See test/setup/isolate-database.ts for why this is central
+      // rather than repeated in each file.
+      setupFiles: ['./test/setup/isolate-database.ts'],
     },
     preview: {
       port: 3000,
