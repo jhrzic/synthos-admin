@@ -1058,7 +1058,7 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
                                 {task.executedModel?.modelId
                                   ? `Ran: ${task.executedModel.providerId}/${task.executedModel.modelId}`
                                   : task.assignedModel
-                                    ? `Model: ${models[task.assignedModel]?.name ?? task.assignedModel}`
+                                    ? (models[task.assignedModel] ? `Model: ${models[task.assignedModel].name}` : `Model: ${task.assignedModel} — not in the model registry; select one to run`)
                                     : 'Model: not selected'}
                               </div>
 
