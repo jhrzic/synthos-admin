@@ -18,6 +18,7 @@ import {
   checkpointDueWorkspaces,
 } from '../lib/authority-ledger';
 import { verifyBundle } from '../tools/verify-authority-record.mjs';
+import { buildPeriodReport, renderPeriodReportHtml } from '../lib/authority-report';
 import { claimGmailSend, resolveGmailSendSent, resolveGmailSendFailure } from '../lib/gmail-send-ledger';
 
 // ---------------------------------------------------------------------------
@@ -247,5 +248,25 @@ describe('email sends are on the record', () => {
     // Only ids and digests are signed — never the message itself.
     expect(b.receipts[0]!.payloadJson).not.toMatch(/subject|body|@/i);
     expect(verifyBundle(JSON.parse(JSON.stringify(b))).ok).toBe(true);
+  });
+});
+
+describe('owner report', () => {
+  it('counts only the period, in plain language, and says when the record is intact', () => {
+    const w = ws();
+    approve(w, 't1', 'alice', 'bob');
+    const r = receipt(w, 't1');
+    receipt(w, 't2');
+    recordOutcome({ workspaceId: w, receiptId: r.receipt_id, label: 'visit_booked', recordedBy: 'alice' });
+    const from = new Date(Date.now() - 3600_000).toISOString();
+    const to = new Date(Date.now() + 3600_000).toISOString();
+    const rep = buildPeriodReport(w, from, to);
+    expect(rep).toMatchObject({ actions: 2, withApproval: 1, noApproval: 1, results: { visit_booked: 1 }, integrityOk: true });
+    const html = renderPeriodReportHtml(rep, 'Milford Mattress <b>');
+    expect(html).toContain('visit booked');
+    expect(html).toContain('Nothing has been removed or edited');
+    expect(html).toContain('Milford Mattress &#60;b&#62;');
+    expect(html).not.toContain('Milford Mattress <b>');
+    expect(buildPeriodReport(w, '2000-01-01T00:00:00Z', '2000-02-01T00:00:00Z').actions).toBe(0);
   });
 });

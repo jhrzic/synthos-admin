@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Download, Link2, Loader2, RefreshCw, ShieldAlert, ShieldCheck, Stamp } from 'lucide-react';
+import { Download, FileText, Link2, Loader2, RefreshCw, ShieldAlert, ShieldCheck, Stamp } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
 // AUTHORITY RECORD — who authorized what the agents did, and what came of it.
@@ -88,6 +88,14 @@ export const AuthorityRecordPanel: React.FC<{ workspaceId: string }> = ({ worksp
             className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#05060C] border border-[#1F2442] text-xs text-[#C9CDE8] hover:text-white"
           >
             <Download className="w-3.5 h-3.5" /> Export
+          </a>
+          <a
+            href={`/api/authority/report?workspaceId=${encodeURIComponent(workspaceId)}&month=${new Date().toISOString().slice(0, 7)}`}
+            target="_blank"
+            rel="noopener"
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#05060C] border border-[#1F2442] text-xs text-[#C9CDE8] hover:text-white"
+          >
+            <FileText className="w-3.5 h-3.5" /> Monthly report
           </a>
           <button
             onClick={checkpoint}

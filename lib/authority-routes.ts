@@ -7,6 +7,7 @@
 //   POST /api/authority/checkpoint {workspaceId} → sign the chain head (admins)
 //   POST /api/authority/outcome {workspaceId, receiptId, label, detail?} → attach a result
 //   GET  /api/authority/summary?workspaceId=…    → what the Admin panel shows
+//   GET  /api/authority/report?workspaceId=…&month=YYYY-MM[&name=…] → printable owner report
 // Daily checkpoints are signed by authorityTickForScheduler() on the scheduler's timer.
 
 import type { Express } from 'express';
@@ -14,11 +15,24 @@ import { authorizedWorkspaceId, fromBody, fromQuery, requireWorkspaceAdmin, requ
 import {
   auditWorkspace, backfillLedger, exportAuthorityRecord, recordOutcome, signCheckpoint, summarizeAuthority,
 } from './authority-ledger';
+import { buildPeriodReport, renderPeriodReportHtml } from './authority-report';
 
 export function registerAuthorityRoutes(app: Express): void {
   app.get('/api/authority/summary', requireWorkspaceMember(fromQuery), (req, res) => {
     backfillLedger();
     res.json({ success: true, summary: summarizeAuthority(authorizedWorkspaceId(req)!) });
+  });
+
+  app.get('/api/authority/report', requireWorkspaceMember(fromQuery), (req, res) => {
+    const m = /^(\d{4})-(\d{2})$/.exec(String(req.query.month || ''));
+    const now = new Date();
+    const y = m ? Number(m[1]) : now.getUTCFullYear();
+    const mo = m ? Number(m[2]) - 1 : now.getUTCMonth();
+    const from = new Date(Date.UTC(y, mo, 1)).toISOString();
+    const to = new Date(Date.UTC(y, mo + 1, 1)).toISOString();
+    backfillLedger();
+    const name = typeof req.query.name === 'string' ? req.query.name.slice(0, 80) : undefined;
+    res.type('html').send(renderPeriodReportHtml(buildPeriodReport(authorizedWorkspaceId(req)!, from, to), name));
   });
 
   app.post('/api/authority/outcome', requireWorkspaceMember(fromBody), (req, res) => {
