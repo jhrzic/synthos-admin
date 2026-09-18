@@ -242,6 +242,21 @@ const FINDING_STATUS: Record<ReconciliationFinding, string> = {
   EVIDENCE_INCONCLUSIVE: 'RECONCILING_UNKNOWN_EXECUTION',
 };
 const RECONCILED_STATUSES = new Set(['INCOMPLETE', 'FAILED', 'CANCELLED']);
+
+/**
+ * Provider truth and SynthOS execution truth are recorded SEPARATELY. A
+ * provider that completed a response does not mean SynthOS completed the
+ * task: the response never reached the runtime, was never persisted, and
+ * never passed the completion and durable-evidence stages (Aegis, receipt).
+ * So PROVIDER_CONFIRMED_COMPLETED leads to INCOMPLETE — never to DONE.
+ */
+export const RECONCILIATION_SEMANTICS: Record<ReconciliationFinding, { executionTruth: string; reasonCode: string; transition: string[] }> = {
+  PROVIDER_CONFIRMED_COMPLETED: { executionTruth: 'RESPONSE_NOT_RECEIVED', reasonCode: 'RESPONSE_NOT_RECEIVED', transition: ['DISPATCHED/UNKNOWN', 'PROVIDER_CONFIRMED_COMPLETED', 'RESPONSE_NOT_RECEIVED', 'INCOMPLETE'] },
+  PROVIDER_USAGE_FOUND_RESPONSE_UNAVAILABLE: { executionTruth: 'RESPONSE_NOT_RECEIVED', reasonCode: 'RESPONSE_NOT_RECEIVED', transition: ['DISPATCHED/UNKNOWN', 'PROVIDER_USAGE_FOUND_RESPONSE_UNAVAILABLE', 'RESPONSE_NOT_RECEIVED', 'INCOMPLETE'] },
+  PROVIDER_CONFIRMED_FAILED: { executionTruth: 'PROVIDER_FAILED', reasonCode: 'PROVIDER_FAILED', transition: ['DISPATCHED/UNKNOWN', 'PROVIDER_CONFIRMED_FAILED', 'FAILED'] },
+  PROVIDER_CONFIRMED_NO_REQUEST: { executionTruth: 'NOT_DISPATCHED', reasonCode: 'NOT_DISPATCHED', transition: ['DISPATCHED/UNKNOWN', 'PROVIDER_CONFIRMED_NO_REQUEST', 'CANCELLED'] },
+  EVIDENCE_INCONCLUSIVE: { executionTruth: 'OUTCOME_UNKNOWN', reasonCode: 'EVIDENCE_INCONCLUSIVE', transition: ['DISPATCHED/UNKNOWN', 'EVIDENCE_INCONCLUSIVE', 'RECONCILING_UNKNOWN_EXECUTION'] },
+};
 const RECONCILIATION_EVENTS = ['EXECUTION_RECONCILED', 'EXECUTION_RECONCILIATION_EVIDENCE', 'EXECUTION_RECONCILIATION_CORRECTED'];
 
 export interface ReconciliationSubmission {
@@ -272,6 +287,10 @@ export interface ReconciliationTrailEntry {
   submissionHash: string;
   evidence: Record<string, unknown>;
   correctsEventId: string | null;
+  /** SynthOS execution truth, separate from the provider finding (null on events recorded before it existed). */
+  executionTruth: string | null;
+  reasonCode: string | null;
+  transition: string[] | null;
 }
 
 const UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
@@ -282,7 +301,8 @@ export function reconciliationTrail(taskId: string): ReconciliationTrailEntry[] 
   return rows.map((r) => {
     let p: any = {};
     try { p = JSON.parse(r.payload_json || '{}'); } catch { /* unreadable payload stays empty */ }
-    return { eventId: r.event_id, eventType: r.event_type, actor: r.agent_id, at: r.created_at, finding: p.finding, resultingStatus: p.resultingStatus, submissionHash: p.submissionHash, evidence: p.evidence ?? {}, correctsEventId: p.correctsEventId ?? null };
+    return { eventId: r.event_id, eventType: r.event_type, actor: r.agent_id, at: r.created_at, finding: p.finding, resultingStatus: p.resultingStatus, submissionHash: p.submissionHash, evidence: p.evidence ?? {}, correctsEventId: p.correctsEventId ?? null,
+      executionTruth: p.executionTruth ?? null, reasonCode: p.reasonCode ?? null, transition: Array.isArray(p.transition) ? p.transition : null };
   });
 }
 
@@ -411,6 +431,10 @@ export function reconcileAmbiguousExecution(s: ReconciliationSubmission): { ok: 
     taskId: s.taskId, expectedWorkspaceId: s.workspaceId, eventType, agentId: s.actor,
     payload: {
       finding, resultingStatus, fromStatus: t.status, submissionHash, correctsEventId, evidence,
+      providerTruth: finding,
+      executionTruth: RECONCILIATION_SEMANTICS[finding].executionTruth,
+      reasonCode: RECONCILIATION_SEMANTICS[finding].reasonCode,
+      transition: RECONCILIATION_SEMANTICS[finding].transition,
       provenance: 'OPERATOR_REPORTED — recorded as submitted; not verified against the provider by SynthOS',
       fabricated: { output: false, tokens: false, responseId: false, artifact: false, review: false, receipt: false, ledgerRow: false },
       retried: false,
@@ -430,6 +454,6 @@ export function reconcileAmbiguousExecution(s: ReconciliationSubmission): { ok: 
   } else if (resultingStatus !== t.status) {
     updateTaskStatus(s.taskId, resultingStatus, undefined, s.workspaceId);
   }
-  recordAdminAuditEvent({ actorUserId: s.actor, eventType: 'EXECUTION_RECONCILED', targetType: 'task', targetId: s.taskId, detail: { workspaceId: s.workspaceId, activityEventId: recordedId, eventType, finding, fromStatus: t.status, resultingStatus, submissionHash, correctsEventId } });
+  recordAdminAuditEvent({ actorUserId: s.actor, eventType: 'EXECUTION_RECONCILED', targetType: 'task', targetId: s.taskId, detail: { workspaceId: s.workspaceId, activityEventId: recordedId, eventType, finding, executionTruth: RECONCILIATION_SEMANTICS[finding].executionTruth, reasonCode: RECONCILIATION_SEMANTICS[finding].reasonCode, fromStatus: t.status, resultingStatus, submissionHash, correctsEventId } });
   return { ok: true, changed: true, status: resultingStatus, eventId: recordedId, finding };
 }

@@ -17,7 +17,7 @@ isolateVaultForTest('recon');
 
 import { getDatabase } from '../lib/persistence';
 import { ensureWorkspace } from '../lib/workspaces';
-import { reconcileAmbiguousExecution, reconciliationTrail, reconciliationGuide, RECONCILIATION_FINDINGS } from '../lib/continuity/orphans';
+import { reconcileAmbiguousExecution, reconciliationTrail, reconciliationGuide, RECONCILIATION_FINDINGS, RECONCILIATION_SEMANTICS } from '../lib/continuity/orphans';
 
 let fetchCalls = 0;
 const WS = 'ws-recon';
@@ -49,7 +49,7 @@ const base = (taskId: string, extra: Record<string, unknown> = {}) => ({
 beforeAll(() => {
   (globalThis as any).fetch = () => { fetchCalls += 1; throw new Error('network forbidden'); };
   getDatabase(); ensureWorkspace(WS, 'Recon'); ensureWorkspace(OTHER, 'Other');
-  for (const id of ['t-valid', 't-noreq', 't-complete', 't-usage', 't-failed', 't-incon', 't-idem', 't-correct', 't-scope']) seed(id);
+  for (const id of ['t-valid', 't-noreq', 't-complete', 't-usage', 't-failed', 't-incon', 't-idem', 't-correct', 't-scope', 't-clarify']) seed(id);
   getDatabase().prepare("INSERT INTO tasks (task_id, workspace_id, title, description, assigned_agent, assigned_model, status, created_at, updated_at) VALUES ('t-done', ?, 'done', 'd', 'scribe', 'gpt-test-model', 'DONE', '2026-09-17T00:00:00Z', '2026-09-17T00:00:00Z')").run(WS);
   // A sibling started a few minutes later on the same model: must be listed for exclusion.
   getDatabase().prepare("INSERT INTO tasks (task_id, workspace_id, title, description, assigned_agent, assigned_model, status, created_at, updated_at) VALUES ('t-sibling', ?, 's', 'd', 'scribe', 'gpt-test-model', 'CANCELLED', '2026-09-17T20:53:37Z', '2026-09-17T20:53:37Z')").run(WS);
@@ -160,6 +160,28 @@ describe('idempotency and corrections', () => {
     ]);
     expect(history('t-correct').map((h) => h.status).slice(-2)).toEqual(['CANCELLED', 'INCOMPLETE']);
     expect(reconcileAmbiguousExecution(base('t-valid', { correctsEventId: 'x' }))).toMatchObject({ ok: false, error: expect.stringMatching(/nothing to correct/) });
+  });
+});
+
+describe('provider truth vs SynthOS execution truth', () => {
+  it('no finding can lead to DONE; provider completion is RESPONSE_NOT_RECEIVED → INCOMPLETE', () => {
+    for (const f of RECONCILIATION_FINDINGS) expect(RECONCILIATION_SEMANTICS[f].transition).not.toContain('DONE');
+    expect(RECONCILIATION_SEMANTICS.PROVIDER_CONFIRMED_COMPLETED).toEqual({ executionTruth: 'RESPONSE_NOT_RECEIVED', reasonCode: 'RESPONSE_NOT_RECEIVED', transition: ['DISPATCHED/UNKNOWN', 'PROVIDER_CONFIRMED_COMPLETED', 'RESPONSE_NOT_RECEIVED', 'INCOMPLETE'] });
+  });
+
+  it('a same-finding clarification is an appended correction naming the event: provider truth kept, task stays INCOMPLETE, earlier event byte-identical', () => {
+    const first = reconcileAmbiguousExecution(base('t-clarify', { finding: 'PROVIDER_CONFIRMED_COMPLETED' })) as any;
+    expect(first).toMatchObject({ ok: true, status: 'INCOMPLETE' });
+    const h0 = history('t-clarify'); const e0 = events('t-clarify');
+    const c = reconcileAmbiguousExecution(base('t-clarify', { finding: 'PROVIDER_CONFIRMED_COMPLETED', correctsEventId: first.eventId, note: `Correction to ${first.eventId}: provider completion confirmed; SynthOS task completion is not.` })) as any;
+    expect(c).toMatchObject({ ok: true, changed: true, status: 'INCOMPLETE', finding: 'PROVIDER_CONFIRMED_COMPLETED' });
+    expect(history('t-clarify')).toEqual(h0); // no status row: INCOMPLETE → INCOMPLETE is not a transition
+    expect(events('t-clarify').slice(0, e0.length)).toEqual(e0);
+    const p = JSON.parse(events('t-clarify').at(-1).payload_json);
+    expect(p).toMatchObject({ finding: 'PROVIDER_CONFIRMED_COMPLETED', providerTruth: 'PROVIDER_CONFIRMED_COMPLETED', executionTruth: 'RESPONSE_NOT_RECEIVED', reasonCode: 'RESPONSE_NOT_RECEIVED', resultingStatus: 'INCOMPLETE', correctsEventId: first.eventId, transition: ['DISPATCHED/UNKNOWN', 'PROVIDER_CONFIRMED_COMPLETED', 'RESPONSE_NOT_RECEIVED', 'INCOMPLETE'] });
+    expect(events('t-clarify').at(-1).event_type).toBe('EXECUTION_RECONCILIATION_CORRECTED');
+    expect(status('t-clarify')).toBe('INCOMPLETE');
+    expect(counts('t-clarify')).toEqual({ artifacts: 0, reviews: 0, receipts: 0, ledger: 0 });
   });
 });
 

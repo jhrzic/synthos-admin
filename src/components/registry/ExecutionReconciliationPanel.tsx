@@ -156,6 +156,10 @@ export const ExecutionReconciliationPanel: React.FC<{ workspaceId: string; taskI
               {t.evidence.providerResponseId ? ` · response ${t.evidence.providerResponseId}` : ''}
               {t.evidence.operatorReportedUsage ? ` · operator-reported usage ${JSON.stringify(t.evidence.operatorReportedUsage)}` : ''}
             </div>
+            <div className="mt-1" data-testid="reconciliation-truths">
+              provider truth <span className="font-mono text-white">{t.finding}</span> · SynthOS execution truth <span className="font-mono text-white">{t.executionTruth ?? 'NOT RECORDED on this event'}</span>{t.reasonCode ? <> · reason <span className="font-mono">{t.reasonCode}</span></> : null}
+              {t.transition ? <div className="font-mono text-[#8E94B8]">{t.transition.join(' → ')}</div> : null}
+            </div>
             <div className="mt-1">{t.evidence.dashboardFinding}</div>
             <div className="mt-1 text-[#8E94B8]">{t.evidence.note}</div>
             <div className="mt-1 font-mono text-[#6A7097]">submission {String(t.submissionHash).slice(0, 16)}…</div>
