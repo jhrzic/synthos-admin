@@ -96,6 +96,8 @@ route → *Run suite*). Approval is refused unless at least one case is a CANARY
 
 > **Executed 2026-09-18** for `qwen2.5-coder:14b` × `literal_transformation`: PASSED 6/6, not approved, not enabled.
 > Evidence and one ledger-cost defect: `docs/qualification/2026-09-18-local-qwen2.5-coder-14b-literal.md`.
+> **Clean rerun 2026-09-18** after remediation (substance binding, explicit $0 cached rate): PASSED 6/6, all six
+> rows calculated $0, not approved, not enabled — `docs/qualification/2026-09-18-local-qwen2.5-coder-14b-literal-rerun.md`.
 > The steps below are what that run followed. Import went through the Admin "Pull once" path, which is gated by
 > manual discovery, on the pinned `127.0.0.1:11434` endpoint.
 
