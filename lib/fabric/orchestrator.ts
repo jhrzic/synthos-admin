@@ -75,6 +75,7 @@ import { scrubSecrets } from '../redact';
 export type OrchestrationOutcome =
   | 'ADVANCED'            // the task ran and reached a terminal state
   | 'WAITING_APPROVAL'    // stopped at the human gate; other tasks continue
+  | 'SUBMITTED'           // handed to an asynchronous runtime; the external-execution sweep completes it
   | 'DEFERRED'            // nothing happened; released for a later tick
   | 'BLOCKED'             // Guardian or policy refused; terminal
   | 'FAILED'              // real execution failure; terminal
@@ -95,6 +96,8 @@ export interface OrchestrationStep {
   aegisDecision?: string | null;
   approvalId?: string | null;
   finalStatus?: string | null;
+  /** Present on SUBMITTED: the external-execution row the sweep will advance. */
+  externalExecutionId?: string | null;
   brainContextNotes?: number;
 }
 
@@ -405,7 +408,14 @@ export async function advanceTask(task: OrchestratorTaskRow): Promise<Orchestrat
   /** Always reached: a claim left CLAIMED forever would block the task permanently. */
   settle = (outcome: OrchestrationOutcome) => {
     try {
-      if (outcome === 'ADVANCED') {
+      if (outcome === 'SUBMITTED') {
+        // Work is in flight remotely. The claim stays CLAIMED on purpose: it is
+        // what stops any later tick re-running a task that may already have
+        // cost money. The external-execution sweep settles it when the remote
+        // job reaches an outcome (lib/external-executions.ts,
+        // syncOrchestratedTaskForExecution).
+        return;
+      } else if (outcome === 'ADVANCED') {
         resolveExecutionClaim(claimId, 'DONE');
       } else if (outcome === 'WAITING_APPROVAL' || outcome === 'DEFERRED') {
         // Nothing ran. Release so a later attempt can claim cleanly.
@@ -464,6 +474,7 @@ export async function advanceTask(task: OrchestratorTaskRow): Promise<Orchestrat
         parameters,
         rawText: [task.title, task.description].filter(Boolean).join('\n'),
         correlationId,
+        taskId: task.task_id,
         // Stable across restarts, so a resumed task replays rather than
         // re-executes.
         idempotencyKey: correlationId,
@@ -476,6 +487,32 @@ export async function advanceTask(task: OrchestratorTaskRow): Promise<Orchestrat
           ...base, outcome: 'WAITING_APPROVAL', reason: result.reason,
           approvalId: result.approval?.approvalId ?? null, finalStatus: 'WAITING_FOR_APPROVAL',
           brainContextNotes: brain.count,
+        });
+      }
+
+      if (result.outcome === 'SUBMITTED') {
+        // Asynchronous runtime (runtime.antigravity). Nothing is complete yet:
+        // no artifact, no Aegis, no receipt. The task stays RUNNING and the
+        // ONE external-execution sweep carries it to DONE or FAILED. This
+        // loop does not wait for it and does not poll it.
+        try {
+          recordActivityEvent({
+            taskId: task.task_id, expectedWorkspaceId: workspaceId, eventType: 'EXTERNAL_EXECUTION_SUBMITTED',
+            agentId: 'orchestrator',
+            payload: {
+              capability: task.capability,
+              executionId: result.externalExecution?.id ?? null,
+              remoteJobId: result.externalExecution?.remoteJobId ?? null,
+              approvalId: result.approval?.approvalId ?? null,
+            },
+          });
+        } catch { /* evidence must not mask the submission */ }
+        return finish({
+          ...base, outcome: 'SUBMITTED', reason: result.reason,
+          providerOrTool: task.capability,
+          approvalId: result.approval?.approvalId ?? null,
+          externalExecutionId: result.externalExecution?.id ?? null,
+          finalStatus: 'RUNNING', brainContextNotes: brain.count,
         });
       }
 

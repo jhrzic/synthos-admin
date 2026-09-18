@@ -65,6 +65,7 @@ export const ModelProviderCredentialsCard: React.FC<ModelProviderCredentialsCard
     setLoading(true);
     try {
       const res = await fetch(`/api/platform/model-credentials?workspaceId=${encodeURIComponent(workspaceId)}`);
+      if (res.status === 403) throw new Error('Model-provider credentials are platform configuration and need the platform administrator role.');
       const json = await res.json();
       if (!json.success) throw new Error(json.error || 'Failed to read credential status');
       setProviders(json.providers || []);

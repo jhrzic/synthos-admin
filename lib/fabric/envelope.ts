@@ -55,7 +55,9 @@ import { verifyTaskAtGate } from '../kil-gate';
 import { indexVaultArtifact, searchWorkspaceMemory } from '../memory-index';
 import { writeWorkspaceArtifact, listWorkspaceVaultEntries } from '../vault';
 import * as windmillClient from '../windmill-client';
-import { listWorkspaceExternalExecutions, guardianCheckInstruction } from '../external-executions';
+import { listWorkspaceExternalExecutions, guardianCheckInstruction, submitExternalExecution } from '../external-executions';
+import { resolveAntigravityAgent } from '../antigravity-client';
+import { scrubSecrets } from '../redact';
 import { recordRuntimeEvent, type RuntimeEventStatus } from '../runtime-events';
 import { runHermesLocalTask, isHermesLocalConfigured, isHermesLocalEnabled, getHermesCliPath } from '../hermes-local-runtime';
 
@@ -138,7 +140,12 @@ import {
   type ApprovalRecord,
 } from '../approvals';
 
-export type EnvelopeOutcome = 'SUCCESS' | 'READ_OK' | 'BLOCKED' | 'NOT_CONFIGURED' | 'APPROVAL_REQUIRED' | 'FAILED' | 'IN_PROGRESS' | 'CONFLICT';
+// SUBMITTED — an asynchronous runtime accepted the work and it is still
+// running remotely. NOT terminal and NOT a success: no artifact, Aegis review
+// or receipt exists yet. Those are produced later, by the one external-
+// execution sweep, when the remote result is ingested. A caller must treat the
+// task as waiting, never as done.
+export type EnvelopeOutcome = 'SUCCESS' | 'READ_OK' | 'BLOCKED' | 'NOT_CONFIGURED' | 'APPROVAL_REQUIRED' | 'FAILED' | 'IN_PROGRESS' | 'CONFLICT' | 'SUBMITTED';
 
 export interface ExecutionEnvelopeInput {
   workspaceId: string;
@@ -185,6 +192,14 @@ export interface ExecutionEnvelopeInput {
    * one that was already proven.
    */
   __consumedApprovalId?: string | null;
+  /**
+   * The canonical task this dispatch belongs to, when the caller owns one (the
+   * orchestrator does). Used by asynchronous runtimes so the result ingested
+   * later completes THIS task instead of a synthetic one, and bound into the
+   * runtime.antigravity approval digest so an approval for one task cannot be
+   * spent on another.
+   */
+  taskId?: string;
 }
 
 export interface ExecutionEnvelopeResult {
@@ -227,6 +242,14 @@ export interface ExecutionEnvelopeResult {
     inputDigest: string;
     expiresAt: string | null;
     decidedBy?: string | null;
+  } | null;
+  /** Present on SUBMITTED: the ledger row the external-execution sweep will advance. */
+  externalExecution?: {
+    id: string;
+    runtime: string;
+    status: string;
+    remoteJobId: string | null;
+    created: boolean;
   } | null;
 }
 
@@ -297,6 +320,7 @@ function attemptStatus(outcome: EnvelopeOutcome): RuntimeEventStatus {
     case 'NOT_CONFIGURED':
       return 'NOT_CONFIGURED';
     case 'IN_PROGRESS':
+    case 'SUBMITTED':
       return 'RUNNING';
     case 'CONFLICT':
       // A claim collision: another attempt owns this work. Not a failure of
@@ -592,6 +616,10 @@ async function dispatchToExecutor(
       return executeGmailCreateDraft(input);
     case 'gmail.send':
       return executeGmailSend(input);
+
+    // --- Asynchronous managed-agent runtime -----------------------------
+    case 'runtime.antigravity':
+      return executeAntigravityRuntime(input);
 
     default:
       // A registered, AVAILABLE capability with no wired executor here —
@@ -2076,7 +2104,25 @@ async function enforceHumanApproval(
   let inputDigest: string;
   let summaryOverride: string | null = null;
 
-  if (capabilityKey === 'gmail.send') {
+  if (capabilityKey === 'runtime.antigravity') {
+    // A PAID REMOTE AGENT. The approval binds everything that decides what the
+    // remote agent will be asked to do and with what: the task, the runtime,
+    // the managed agent id, the exact bounded instruction (by digest), the
+    // allowed paths and the tool types. Any material change is a new digest,
+    // so an approval for the old task cannot be spent on the new one.
+    const binding = resolveAntigravityBinding(input);
+    if (!binding.instruction.trim()) {
+      return { refusal: { outcome: 'FAILED', capability: capabilityKey, reason: 'An instruction is required for runtime.antigravity (parameters.instruction, or the task text).', approval: null } };
+    }
+    // Guardian sees the FULL bounded instruction, not the truncated summary,
+    // before any approval is even requested.
+    const full = guardianCheckInstruction(binding.boundedInstruction);
+    if (!full.allowed) {
+      return { refusal: { outcome: 'BLOCKED', capability: capabilityKey, reason: full.error || 'Guardian refused this instruction.', approval: null } };
+    }
+    inputDigest = antigravityApprovalDigest(binding);
+    summaryOverride = summarizeAntigravityForApproval(binding);
+  } else if (capabilityKey === 'gmail.send') {
     const conn = resolveGmailConnection(input.workspaceId, toolParam(input, 'account') || null);
     if (!conn.ok) {
       return {
@@ -2904,5 +2950,191 @@ async function executeBrainReadSource(input: ExecutionEnvelopeInput): Promise<Ex
       return { outcome: blocked ? 'BLOCKED' : 'FAILED', capability: 'brain.read_source', reason: err.message };
     }
     return { outcome: 'FAILED', capability: 'brain.read_source', reason: err?.message || String(err) };
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+// runtime.antigravity — the managed Antigravity agent as a canonical runtime.
+//
+// This executor adds NO execution machinery of its own. It submits through
+// the one external-execution ledger (lib/external-executions.ts), which runs
+// Guardian again on the exact instruction, refuses when the runtime is not
+// configured or ANTIGRAVITY_ENABLED is not "true", and arms the row for the
+// ONE scheduler sweep. That sweep polls, ingests, runs Aegis, signs the
+// receipt, indexes the artifact into the Brain and completes the linked task.
+//
+// It returns SUBMITTED and never waits: a remote agent can run for minutes,
+// and holding a request (or a scheduler tick) open for that is how a
+// submission becomes an outage.
+//
+// It is only reachable after the human gate in dispatchEnvelope has consumed
+// an approval bound to resolveAntigravityBinding() — this is a paid remote
+// execution and there is deliberately no unattended path to it.
+// ---------------------------------------------------------------------------
+
+export interface AntigravityBinding {
+  workspaceId: string;
+  capability: 'runtime.antigravity';
+  runtime: 'antigravity';
+  agent: string;
+  taskId: string | null;
+  /** The instruction as supplied. */
+  instruction: string;
+  /** What is actually sent: the instruction plus its declared scope. */
+  boundedInstruction: string;
+  instructionDigest: string;
+  allowedPaths: string[];
+  tools: string[];
+  maxTotalTokens: number | null;
+}
+
+function stringList(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out = v
+    .map((x) => (typeof x === 'string' ? x : (x && typeof (x as any).type === 'string' ? (x as any).type : '')))
+    .map((x) => String(x).trim())
+    .filter((x) => x.length > 0);
+  return Array.from(new Set(out)).sort();
+}
+
+/**
+ * Everything the approval for a runtime.antigravity dispatch binds to, derived
+ * the same way by the gate and by the executor so they can never disagree.
+ */
+export function resolveAntigravityBinding(input: ExecutionEnvelopeInput): AntigravityBinding {
+  const params = (input.parameters || {}) as Record<string, unknown>;
+  const instruction = typeof params.instruction === 'string' && params.instruction.trim()
+    ? params.instruction
+    : String(input.rawText || '');
+  const allowedPaths = stringList(params.allowedPaths);
+  const tools = stringList(params.tools);
+  const maxTotalTokens = typeof params.maxTotalTokens === 'number' && Number.isFinite(params.maxTotalTokens)
+    ? Math.floor(params.maxTotalTokens)
+    : null;
+
+  // The scope is stated IN the instruction because that is the only channel
+  // the managed agent API offers. It binds the approval and tells the agent;
+  // it is not a sandbox SynthOS enforces, and nothing here claims it is.
+  const scopeLines: string[] = [];
+  if (allowedPaths.length > 0) {
+    scopeLines.push('', 'SCOPE (approved by a human; do not act outside it):', ...allowedPaths.map((p) => `- ${p}`));
+  }
+  const boundedInstruction = `${instruction}${scopeLines.length ? `\n${scopeLines.join('\n')}` : ''}`;
+
+  return {
+    workspaceId: input.workspaceId,
+    capability: 'runtime.antigravity',
+    runtime: 'antigravity',
+    agent: resolveAntigravityAgent(),
+    taskId: input.taskId ?? null,
+    instruction,
+    boundedInstruction,
+    instructionDigest: crypto.createHash('sha256').update(boundedInstruction).digest('hex'),
+    allowedPaths,
+    tools,
+    maxTotalTokens,
+  };
+}
+
+/** The approval digest for a runtime.antigravity dispatch. Built on the canonical computeInputDigest. */
+export function antigravityApprovalDigest(binding: AntigravityBinding): string {
+  return computeInputDigest({
+    workspaceId: binding.workspaceId,
+    capability: binding.capability,
+    action: 'execute',
+    parameters: {
+      runtime: binding.runtime,
+      agent: binding.agent,
+      taskId: binding.taskId,
+      instructionDigest: binding.instructionDigest,
+      allowedPaths: binding.allowedPaths,
+      tools: binding.tools,
+      maxTotalTokens: binding.maxTotalTokens,
+    },
+    rawText: '',
+  });
+}
+
+function summarizeAntigravityForApproval(b: AntigravityBinding): string {
+  const text = b.boundedInstruction.trim();
+  return [
+    'PAID REMOTE EXECUTION — Antigravity managed agent',
+    `Agent: ${b.agent}`,
+    `Task: ${b.taskId ?? '(no canonical task)'}`,
+    `Allowed paths: ${b.allowedPaths.length ? b.allowedPaths.join(', ') : '(none declared)'}`,
+    `Tools: ${b.tools.length ? b.tools.join(', ') : '(agent defaults)'}`,
+    `Token cap: ${b.maxTotalTokens ?? '(provider default)'}`,
+    `Instruction digest: sha256:${b.instructionDigest.slice(0, 16)}…`,
+    `Instruction: ${text.length > 600 ? `${text.slice(0, 600)}… (${text.length} chars)` : text}`,
+  ].join('\n');
+}
+
+async function executeAntigravityRuntime(input: ExecutionEnvelopeInput): Promise<ExecutionEnvelopeResult> {
+  const capability = 'runtime.antigravity';
+
+  // Defence in depth. dispatchEnvelope only reaches here after the human gate
+  // consumed an approval; a caller cannot set this field (executeEnvelope
+  // clears it). If it is absent something is wired wrong, and a paid remote
+  // call is the wrong way to find out.
+  if (!input.__consumedApprovalId) {
+    return { outcome: 'BLOCKED', capability, reason: 'runtime.antigravity requires a consumed human approval; none was carried to the executor.' };
+  }
+
+  const binding = resolveAntigravityBinding(input);
+  const correlationId = approvalCorrelationId(input);
+
+  try {
+    const { execution, created } = await submitExternalExecution({
+      workspaceId: input.workspaceId,
+      createdByUserId: input.actorUserId,
+      runtime: 'antigravity',
+      agent: binding.agent,
+      input: {
+        instruction: binding.boundedInstruction,
+        ...(binding.tools.length ? { tools: binding.tools.map((type) => ({ type })) } : {}),
+        ...(binding.maxTotalTokens !== null ? { maxTotalTokens: binding.maxTotalTokens } : {}),
+      },
+      taskId: binding.taskId ?? undefined,
+      // The ledger's own idempotency: a replay of this correlation returns the
+      // existing row and never submits a second remote interaction.
+      idempotencyKey: correlationId,
+    });
+
+    const externalExecution = {
+      id: execution.id,
+      runtime: execution.runtime,
+      status: execution.status,
+      remoteJobId: execution.remote_job_id,
+      created,
+    };
+
+    if (execution.status === 'FAILED') {
+      return {
+        outcome: 'FAILED',
+        capability,
+        reason: `Antigravity submission failed: ${execution.error_message_safe || 'no reason reported'}.`,
+        taskId: binding.taskId ?? undefined,
+        externalExecution,
+        toolsInvoked: ['runtime.antigravity'],
+      };
+    }
+
+    return {
+      outcome: 'SUBMITTED',
+      capability,
+      reason: created
+        ? `Submitted to Antigravity (remote job ${execution.remote_job_id}). The scheduler sweep advances it; artifact, Aegis and receipt follow on completion.`
+        : `Already submitted under this correlation (execution ${execution.id}); not submitted again.`,
+      taskId: binding.taskId ?? undefined,
+      externalExecution,
+      toolsInvoked: created ? ['runtime.antigravity'] : [],
+    };
+  } catch (err: any) {
+    const code = String(err?.code || '');
+    const reason = scrubSecrets(String(err?.message || 'Antigravity submission failed.'), 300);
+    if (code === 'GUARDIAN_BLOCKED') return { outcome: 'BLOCKED', capability, reason, toolsInvoked: [] };
+    if (code === 'RUNTIME_NOT_CONFIGURED') return { outcome: 'NOT_CONFIGURED', capability, reason, toolsInvoked: [] };
+    return { outcome: 'FAILED', capability, reason, toolsInvoked: [] };
   }
 }

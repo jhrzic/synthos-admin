@@ -3081,7 +3081,14 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
     return isModelProvider(value) ? value : null;
   };
 
-  app.get("/api/business/model-credential", requireWorkspaceAdmin(fromQuery), (req, res) => {
+  // PLATFORM AUTHORITY. model_credentials has no workspace column: these keys
+  // are the platform's own (managed infrastructure — every client's usage is
+  // Synthos's cost), and their provider/source/env-var metadata is internal
+  // margin data. Being an admin of ONE customer workspace must confer no
+  // authority over them, so every route here — reads included — requires the
+  // existing platform_admin role (lib/authorization.ts::requirePlatformAdmin),
+  // the same guard Master Admin uses. No second auth model.
+  app.get("/api/business/model-credential", requirePlatformAdmin, (req, res) => {
     try {
       const provider = resolveCredentialProvider((req.query as any)?.provider);
       if (!provider) {
@@ -3098,7 +3105,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
    * screen can render authority truthfully instead of trusting its own
    * browser state. Presence and provenance only — never a key value.
    */
-  app.get("/api/business/model-credentials", requireWorkspaceAdmin(fromQuery), (_req, res) => {
+  app.get("/api/business/model-credentials", requirePlatformAdmin, (_req, res) => {
     try {
       return res.json({
         success: true,
@@ -3109,7 +3116,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
     }
   });
 
-  app.post("/api/business/model-credential", requireWorkspaceAdmin(fromBody), async (req, res) => {
+  app.post("/api/business/model-credential", requirePlatformAdmin, async (req, res) => {
     try {
       const user = getRequestUser(req);
       const action = String(req.body?.action || "save");
@@ -6122,7 +6129,7 @@ Rules for spokenSummary specifically:
   // a provider error can echo a key back, so nothing raw is forwarded.
   // -------------------------------------------------------------------------
 
-  app.get("/api/platform/model-credentials", requireWorkspaceAdmin(fromQuery), (_req, res) => {
+  app.get("/api/platform/model-credentials", requirePlatformAdmin, (_req, res) => {
     try {
       return res.json({ success: true, providers: listProviderCredentialStatuses(), supported: SUPPORTED_MODEL_PROVIDERS });
     } catch (err: any) {
@@ -6130,7 +6137,7 @@ Rules for spokenSummary specifically:
     }
   });
 
-  app.get("/api/platform/model-credentials/:provider", requireWorkspaceAdmin(fromQuery), (req, res) => {
+  app.get("/api/platform/model-credentials/:provider", requirePlatformAdmin, (req, res) => {
     const provider = String(req.params.provider || "");
     if (!isModelProvider(provider)) {
       return res.status(400).json({ success: false, error: `Unsupported provider "${provider}". Supported: ${SUPPORTED_MODEL_PROVIDERS.join(", ")}.` });
@@ -6142,7 +6149,7 @@ Rules for spokenSummary specifically:
     }
   });
 
-  app.post("/api/platform/model-credentials/:provider", requireWorkspaceAdmin(fromBody), async (req, res) => {
+  app.post("/api/platform/model-credentials/:provider", requirePlatformAdmin, async (req, res) => {
     const provider = String(req.params.provider || "");
     if (!isModelProvider(provider)) {
       return res.status(400).json({ success: false, error: `Unsupported provider "${provider}". Supported: ${SUPPORTED_MODEL_PROVIDERS.join(", ")}.` });
@@ -6252,12 +6259,21 @@ Rules for spokenSummary specifically:
     }
   });
 
-  app.post("/api/development/tasks/:id/approve", requireWorkspaceAdmin(fromBody), (req, res) => {
+  // Approve IS the go signal. Approval records the canonical approval and then
+  // dispatches through the envelope in the same request — submission only; the
+  // scheduler sweep carries the remote job to completion. No second click.
+  // Carries the dispatch route's EXPENSIVE_EXECUTION limit because it now
+  // causes the same paid submission.
+  app.post("/api/development/tasks/:id/approve", requireWorkspaceAdmin(fromBody), rateLimit("EXPENSIVE_EXECUTION", byUserOrIp, "development-dispatch"), async (req, res) => {
     try {
       const workspaceId = (req as AuthedRequest).authWorkspaceId!;
       const approverUserId = (req as AuthedRequest).authUser!.user_id;
-      const task = approveDevelopmentTask(workspaceId, req.params.id, approverUserId);
-      return res.json({ success: true, task });
+      approveDevelopmentTask(workspaceId, req.params.id, approverUserId);
+      const dispatched = await dispatchDevelopmentTask(workspaceId, req.params.id, approverUserId);
+      // Same contract as the dispatch route: a Guardian refusal is a recorded
+      // outcome of the task, reported as 403 BLOCKED rather than a success.
+      const blocked = dispatched.task.state === "BLOCKED";
+      return res.status(blocked ? 403 : 200).json({ success: !blocked, task: dispatched.task, execution: dispatched.execution, reason: dispatched.reason });
     } catch (err: any) {
       const code = err?.code === "NOT_FOUND" ? 404 : err?.code === "INVALID_STATE" ? 409 : 500;
       return res.status(code).json({ success: false, error: err?.message || "Failed to approve development task" });

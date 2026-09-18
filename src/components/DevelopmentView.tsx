@@ -333,9 +333,9 @@ export const DevelopmentView: React.FC<DevelopmentViewProps> = ({ activeWorkspac
                 <label className="flex items-center gap-1.5 cursor-pointer">
                   <input type="checkbox" checked={draft.requiresReview} onChange={(e) => setDraft({ ...draft, requiresReview: e.target.checked })} /> Requires review
                 </label>
-                <label className="flex items-center gap-1.5 cursor-pointer">
-                  <input type="checkbox" checked={draft.requiresApproval} onChange={(e) => setDraft({ ...draft, requiresApproval: e.target.checked })} /> Requires approval
-                </label>
+                <span className="flex items-center gap-1.5 text-[#8E94B8]">
+                  Approval always required: Antigravity runs are paid remote execution
+                </span>
               </div>
               <div className="flex gap-2">
                 <button

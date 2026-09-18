@@ -4,6 +4,8 @@ import {
   createInitialTask,
   updateTaskStatus,
   recordActivityEvent,
+  settleOrchestrationClaimForTask,
+  hasOpenOrchestrationClaim,
   runDeterministicAegisVerification,
   recordQualityReview,
   recordReceipt,
@@ -474,6 +476,7 @@ export async function refreshExternalExecutionStatus(workspaceId: string, id: st
   const updated = patchRow(existing.id, patch);
   const eventStatus = nextStatus === 'SUCCEEDED' ? 'SUCCESS' : nextStatus === 'RUNNING' ? 'RUNNING' : nextStatus === 'CANCELLED' ? 'CANCELLED' : nextStatus === 'FAILED' ? 'FAILED' : 'SUBMITTED';
   recordTransition(updated, previousStatus, eventStatus as any);
+  syncOrchestratedTaskForExecution(updated);
   return updated;
 }
 
@@ -549,12 +552,23 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
   const description = `External execution of ${runtimeLabel} ${existing.target_kind} "${existing.remote_path}" (remote job ${existing.remote_job_id}).`;
   const nowIso = new Date().toISOString();
 
-  createInitialTask({ taskId, workspaceId, title, description, assignedAgent: runtime, assignedModel: `${runtime}:${existing.remote_path}`, createdAt: existing.created_at });
-  recordActivityEvent({ taskId, eventType: 'TASK_CREATED', agentId: 'orchestrator', payload: { title, status: 'TODO' }, createdAt: existing.created_at });
-  updateTaskStatus(taskId, 'READY');
-  recordActivityEvent({ taskId, eventType: 'AGENT_ASSIGNED', agentId: runtime, payload: { agent: runtime, model: `${runtime}:${existing.remote_path}`, status: 'READY' } });
-  updateTaskStatus(taskId, 'RUNNING');
-  recordActivityEvent({ taskId, eventType: 'EXECUTION_STARTED', agentId: runtime, payload: { status: 'RUNNING', remoteJobId: existing.remote_job_id, correlationId: existing.correlation_id } });
+  // A task that ALREADY exists is the caller's own canonical task (the
+  // orchestrator dispatched runtime.antigravity for it). createInitialTask is
+  // an upsert that would overwrite its title, description and assignment with
+  // this synthetic runtime label and reset it to TODO, so it is only called
+  // when there is no task yet — the original ad-hoc/Development behaviour.
+  const taskAlreadyExists = !!getDatabase().prepare('SELECT 1 FROM tasks WHERE task_id = ?').get(taskId);
+  if (!taskAlreadyExists) {
+    createInitialTask({ taskId, workspaceId, title, description, assignedAgent: runtime, assignedModel: `${runtime}:${existing.remote_path}`, createdAt: existing.created_at });
+    recordActivityEvent({ taskId, eventType: 'TASK_CREATED', agentId: 'orchestrator', payload: { title, status: 'TODO' }, createdAt: existing.created_at });
+    updateTaskStatus(taskId, 'READY');
+    recordActivityEvent({ taskId, eventType: 'AGENT_ASSIGNED', agentId: runtime, payload: { agent: runtime, model: `${runtime}:${existing.remote_path}`, status: 'READY' } });
+    updateTaskStatus(taskId, 'RUNNING');
+    recordActivityEvent({ taskId, eventType: 'EXECUTION_STARTED', agentId: runtime, payload: { status: 'RUNNING', remoteJobId: existing.remote_job_id, correlationId: existing.correlation_id } });
+  } else {
+    updateTaskStatus(taskId, 'RUNNING');
+    recordActivityEvent({ taskId, eventType: 'EXECUTION_RESULT_RECEIVED', agentId: runtime, payload: { status: 'RUNNING', remoteJobId: existing.remote_job_id, correlationId: existing.correlation_id } });
+  }
 
   recordActivityEvent({ taskId, eventType: 'PROVIDER_COMPLETED', agentId: runtime, payload: { model: `${runtime}:${existing.remote_path}`, runtime, outputLength: resultText.length, truncated: resultTruncated, ...runtimeEvidence } });
 
@@ -674,6 +688,7 @@ export async function ingestExternalExecutionResult(workspaceId: string, id: str
     result_ingested_at: nowIso,
   });
 
+  syncOrchestratedTaskForExecution(updated);
   return { execution: updated, alreadyIngested: false, verified: !!receiptId };
 }
 
@@ -779,12 +794,13 @@ function claimPollLease(id: string, nowIso: string): boolean {
  * inventing FAILED here would be a fabricated outcome.
  */
 function markPollDeadlineExceeded(id: string): void {
-  patchRow(id, {
+  const stopped = patchRow(id, {
     status: 'UNKNOWN',
     next_poll_at: null,
     error_code: 'POLL_DEADLINE_EXCEEDED',
     error_message_safe: `SynthOS stopped polling after ${MAX_POLL_ATTEMPTS} attempts. The remote job's final state is unknown; it was not observed to fail.`,
   });
+  syncOrchestratedTaskForExecution(stopped);
 }
 
 /** Terminal rows stop being polled. Called after every real status read. */
@@ -795,7 +811,7 @@ function settlePollSchedule(execution: ExternalExecutionRecord, nowIso: string):
   }
   if (execution.error_code === 'REMOTE_REQUIRES_ACTION') {
     // Blocked on an input SynthOS cannot supply. Stop polling; stay UNKNOWN.
-    patchRow(execution.id, { next_poll_at: null });
+    syncOrchestratedTaskForExecution(patchRow(execution.id, { next_poll_at: null }));
     return;
   }
   if (execution.poll_attempts >= MAX_POLL_ATTEMPTS) {
@@ -857,6 +873,7 @@ export async function advanceExternalExecution(workspaceId: string, id: string, 
         error_message_safe: sanitizeError(err?.message),
         next_poll_at: null,
       });
+      syncOrchestratedTaskForExecution(refreshed);
       return { execution: refreshed, polled: true, ingested: false };
     }
   }
@@ -1063,4 +1080,69 @@ export async function submitAndAwaitExternalExecution(
     return execution;
   }
   return current;
+}
+
+
+// ---------------------------------------------------------------------------
+// ORCHESTRATED TASKS — closing the loop for an asynchronous dispatch.
+//
+// When the orchestrator dispatches runtime.antigravity, the envelope returns
+// SUBMITTED and the task stays RUNNING under an open orchestration claim.
+// This is the ONE place that finishes it, called from the one sweep's own
+// transitions (ingest, refresh, deadline, blocked-on-input). It never polls
+// and never dispatches; it only reflects an outcome the ledger already holds
+// onto the canonical task and settles the claim.
+//
+// Acts only on a task with an OPEN orchestration claim. A Development-loop or
+// ad-hoc execution has none, so its behaviour is unchanged.
+// ---------------------------------------------------------------------------
+export function syncOrchestratedTaskForExecution(execution: ExternalExecutionRecord | null | undefined): void {
+  try {
+    if (!execution || !execution.task_id) return;
+    const workspaceId = execution.workspace_id;
+    const taskId = execution.task_id;
+    if (!hasOpenOrchestrationClaim(workspaceId, taskId)) return;
+
+    const note = (eventType: string, payload: Record<string, unknown>) => {
+      try {
+        recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType, agentId: 'orchestrator', payload: { executionId: execution.id, ...payload } });
+      } catch { /* evidence must not block settlement */ }
+    };
+
+    if (execution.result_ingested_at) {
+      // Ingestion already drove the task to DONE (Aegis VERIFIED + receipt) or
+      // FAILED (Aegis refused, or the receipt did not verify).
+      const row = getDatabase().prepare('SELECT status FROM tasks WHERE task_id = ?').get(taskId) as { status: string } | undefined;
+      const done = row?.status === 'DONE';
+      settleOrchestrationClaimForTask(workspaceId, taskId, done ? 'DONE' : 'FAILED');
+      return;
+    }
+
+    if (execution.status === 'FAILED' || execution.status === 'CANCELLED') {
+      updateTaskStatus(taskId, 'FAILED', undefined, workspaceId);
+      settleOrchestrationClaimForTask(workspaceId, taskId, 'FAILED');
+      note('EXTERNAL_EXECUTION_FAILED', { status: execution.status, errorCode: execution.error_code });
+      return;
+    }
+
+    if (execution.status === 'SUCCEEDED' && execution.next_poll_at === null && execution.error_code) {
+      // The remote job succeeded but its result could not be ingested (e.g. it
+      // returned no output). Terminal for this task; no receipt exists.
+      updateTaskStatus(taskId, 'FAILED', undefined, workspaceId);
+      settleOrchestrationClaimForTask(workspaceId, taskId, 'FAILED');
+      note('EXTERNAL_EXECUTION_INGEST_FAILED', { errorCode: execution.error_code });
+      return;
+    }
+
+    if (execution.status === 'UNKNOWN' && execution.next_poll_at === null) {
+      // Polling stopped without an observed outcome (deadline, or blocked on an
+      // input SynthOS cannot supply). The remote work may have had effects, so
+      // the task is BLOCKED for an operator and never re-run automatically.
+      updateTaskStatus(taskId, 'BLOCKED', undefined, workspaceId);
+      settleOrchestrationClaimForTask(workspaceId, taskId, 'FAILED');
+      note('EXTERNAL_EXECUTION_UNRESOLVED', { errorCode: execution.error_code, reason: execution.error_message_safe });
+    }
+  } catch {
+    /* settlement is best-effort; the ledger row itself is the durable truth */
+  }
 }

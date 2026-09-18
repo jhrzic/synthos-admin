@@ -1627,6 +1627,15 @@ export function listStrandedOrchestrationTasks(workspaceId: string, olderThanIso
             capability, parameters_json, autonomy_eligible, created_at
        FROM tasks
       WHERE workspace_id = ? AND autonomy_eligible = 1 AND status = 'RUNNING' AND updated_at < ?
+        -- A task waiting on an external execution the sweep is still polling
+        -- is in flight, not stranded. Once polling stops (deadline, blocked on
+        -- input) next_poll_at is NULL and the task surfaces here again.
+        AND NOT EXISTS (
+          SELECT 1 FROM external_executions e
+           WHERE e.task_id = tasks.task_id AND e.workspace_id = tasks.workspace_id
+             AND e.next_poll_at IS NOT NULL
+             AND e.status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+        )
       ORDER BY updated_at ASC`,
   ).all(workspaceId, olderThanIso);
   return (rows || []) as OrchestratorTaskRow[];
@@ -1763,6 +1772,29 @@ export function acquireExecutionClaim(params: {
  */
 export function releaseExecutionClaim(claimId: string): void {
   getDatabase().prepare('DELETE FROM execution_claims WHERE claim_id = ? AND status = ?').run(claimId, 'CLAIMED');
+}
+
+/**
+ * Settle the orchestrator's durable claim on a task whose work finished
+ * asynchronously (a SUBMITTED external execution). Returns true when an open
+ * claim existed and was settled — i.e. the task really is orchestrator-owned.
+ * Tasks with no such claim (a Development-loop or ad-hoc execution) are left
+ * untouched.
+ */
+export function settleOrchestrationClaimForTask(workspaceId: string, taskId: string, status: 'DONE' | 'FAILED'): boolean {
+  const res: any = getDatabase().prepare(
+    `UPDATE execution_claims SET status = ?, updated_at = ?
+      WHERE workspace_id = ? AND actor_user_id = 'orchestrator' AND idempotency_key = ? AND status = 'CLAIMED'`,
+  ).run(status, new Date().toISOString(), workspaceId, `orchestration-task:${taskId}`);
+  return !!res && res.changes === 1;
+}
+
+export function hasOpenOrchestrationClaim(workspaceId: string, taskId: string): boolean {
+  const row = getDatabase().prepare(
+    `SELECT 1 FROM execution_claims
+      WHERE workspace_id = ? AND actor_user_id = 'orchestrator' AND idempotency_key = ? AND status = 'CLAIMED'`,
+  ).get(workspaceId, `orchestration-task:${taskId}`);
+  return !!row;
 }
 
 export function resolveExecutionClaim(claimId: string, status: 'DONE' | 'FAILED'): void {

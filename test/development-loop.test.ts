@@ -125,6 +125,12 @@ function makeDue(id: string) {
     .run(new Date(Date.now() - 1000).toISOString(), id);
 }
 
+/** A task a human has approved — the only way a development task reaches dispatch. */
+function approvedTask(opts: Parameters<typeof newTask>[0] = {}) {
+  const t = newTask({ requiresReview: false, ...opts });
+  return approveDevelopmentTask(WS, t.dev_task_id, APPROVER);
+}
+
 function newTask(overrides: Partial<Parameters<typeof createDevelopmentTask>[0]> = {}) {
   return createDevelopmentTask({
     workspaceId: WS, createdByUserId: ACTOR,
@@ -146,8 +152,12 @@ describe('1. TASK STATE begins honestly, from the task\'s own requirements', () 
     expect(newTask({ requiresReview: false }).state).toBe('WAITING_FOR_APPROVAL');
   });
 
-  it('a task needing neither is READY_FOR_EXECUTION — and that must be an explicit choice', () => {
-    expect(newTask({ requiresReview: false, requiresApproval: false }).state).toBe('READY_FOR_EXECUTION');
+  // Paid remote execution always needs a human. An explicit opt-out is ignored,
+  // not honoured — see createDevelopmentTask.
+  it('approval cannot be opted out of: requiresApproval:false still starts WAITING_FOR_APPROVAL', () => {
+    const t = newTask({ requiresReview: false, requiresApproval: false });
+    expect(t.state).toBe('WAITING_FOR_APPROVAL');
+    expect(t.requires_approval).toBe(1);
   });
 
   it('a task is workspace-scoped: another workspace cannot see or address it', () => {
@@ -331,7 +341,7 @@ describe('4. APPROVAL is a human gate a model cannot grant itself', () => {
 describe('5. GUARDIAN refuses before dispatch, and the task records why', () => {
   it('a destructive instruction is BLOCKED with no execution row and no network contact', async () => {
     const before = submitCount;
-    const t = newTask({ requiresReview: false, requiresApproval: false, instruction: 'rm -rf / and report the result' });
+    const t = approvedTask({ requiresReview: false, instruction: 'rm -rf / and report the result'  });
     const r = await dispatchDevelopmentTask(WS, t.dev_task_id, ACTOR);
 
     expect(r.task.state).toBe('BLOCKED');
@@ -402,7 +412,7 @@ describe('6. THE FULL LOOP runs to VERIFIED with no manual polling', () => {
   });
 
   it('reconciling repeatedly is idempotent — one cycle event, never a duplicate', async () => {
-    const t = newTask({ requiresReview: false, requiresApproval: false });
+    const t = approvedTask({ requiresReview: false  });
     const dispatched = await dispatchDevelopmentTask(WS, t.dev_task_id, ACTOR);
     interactions.get(dispatched.execution!.remote_job_id!)!.status = 'completed';
     interactions.get(dispatched.execution!.remote_job_id!)!.text = REAL_EXECUTION_OUTPUT;
@@ -421,7 +431,7 @@ describe('6. THE FULL LOOP runs to VERIFIED with no manual polling', () => {
   });
 
   it('a task whose execution genuinely failed is FAILED, never VERIFIED', async () => {
-    const t = newTask({ requiresReview: false, requiresApproval: false });
+    const t = approvedTask({ requiresReview: false  });
     const dispatched = await dispatchDevelopmentTask(WS, t.dev_task_id, ACTOR);
     interactions.get(dispatched.execution!.remote_job_id!)!.status = 'failed';
     makeDue(dispatched.execution!.id);
@@ -434,7 +444,7 @@ describe('6. THE FULL LOOP runs to VERIFIED with no manual polling', () => {
   });
 
   it('a succeeded execution that has NOT yet been ingested stays RUNNING — verification is never assumed', async () => {
-    const t = newTask({ requiresReview: false, requiresApproval: false });
+    const t = approvedTask({ requiresReview: false  });
     const dispatched = await dispatchDevelopmentTask(WS, t.dev_task_id, ACTOR);
     // Remote succeeded, but SynthOS has not turned it into evidence yet.
     getDatabase().prepare("UPDATE external_executions SET status='SUCCEEDED', result_ingested_at=NULL WHERE id=?")

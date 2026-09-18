@@ -42,7 +42,8 @@ const ENV_OPENAI_KEY = 'sk-environment-openai-value-must-never-be-returned';
 
 let child: ChildProcess;
 let BASE_URL: string;
-let adminToken: string;   // workspace admin of WS_A
+let adminToken: string;   // workspace admin of WS_A — NOT a platform admin
+let platformToken: string; // platform_admin, the only role that may touch model credentials
 let memberToken: string;  // plain member of WS_A
 let otherToken: string;   // admin of WS_B only
 
@@ -82,10 +83,12 @@ beforeAll(async () => {
   grantMembership(admin.user_id, WS_A, 'admin');
   grantMembership(member.user_id, WS_A, 'member');
   grantMembership(other.user_id, WS_B, 'admin');
+  const platform = createUser({ email: `cred-platform-${Date.now()}@example.test`, password: 'correct horse battery staple 4', displayName: 'Cred Platform', platformRole: 'platform_admin' });
 
   adminToken = login(admin.email, 'correct horse battery staple 1')!.rawToken;
   memberToken = login(member.email, 'correct horse battery staple 2')!.rawToken;
   otherToken = login(other.email, 'correct horse battery staple 3')!.rawToken;
+  platformToken = login(platform.email, 'correct horse battery staple 4')!.rawToken;
 
   const PORT = await freePort();
   BASE_URL = `http://127.0.0.1:${PORT}`;
@@ -121,7 +124,7 @@ beforeEach(() => {
 
 describe('1. ONE route serves every provider — extensible without a new endpoint', () => {
   it('lists every supported provider, and openai is genuinely among them', async () => {
-    const { status, json } = await api('GET', `/api/platform/model-credentials?workspaceId=${WS_A}`, adminToken);
+    const { status, json } = await api('GET', `/api/platform/model-credentials?workspaceId=${WS_A}`, platformToken);
     expect(status).toBe(200);
     expect(json.success).toBe(true);
     const names = json.providers.map((p: any) => p.provider).sort();
@@ -131,21 +134,21 @@ describe('1. ONE route serves every provider — extensible without a new endpoi
   });
 
   it('an unknown provider is refused by name rather than silently treated as one of the real ones', async () => {
-    const { status, json } = await api('GET', `/api/platform/model-credentials/anthropic?workspaceId=${WS_A}`, adminToken);
+    const { status, json } = await api('GET', `/api/platform/model-credentials/anthropic?workspaceId=${WS_A}`, platformToken);
     expect(status).toBe(400);
     expect(json.error).toContain('Unsupported provider');
     expect(json.error).toContain('anthropic');
   });
 
   it('an unknown provider cannot be written to either', async () => {
-    const { status } = await api('POST', '/api/platform/model-credentials/notaprovider', adminToken, { workspaceId: WS_A, apiKey: 'x' });
+    const { status } = await api('POST', '/api/platform/model-credentials/notaprovider', platformToken, { workspaceId: WS_A, apiKey: 'x' });
     expect(status).toBe(400);
   });
 });
 
 describe('2. TRUTHFUL STATE — the vocabulary an operator surface renders', () => {
   it('with nothing configured the state is NOT_CONFIGURED, and configured is false', async () => {
-    const { json } = await api('GET', `/api/platform/model-credentials/openai?workspaceId=${WS_A}`, adminToken);
+    const { json } = await api('GET', `/api/platform/model-credentials/openai?workspaceId=${WS_A}`, platformToken);
     expect(json.status.state).toBe('NOT_CONFIGURED');
     expect(json.status.configured).toBe(false);
     expect(json.status.envVar).toBe('OPENAI_API_KEY');
@@ -207,7 +210,7 @@ describe('2. TRUTHFUL STATE — the vocabulary an operator surface renders', () 
 
 describe('3. SECRET REDACTION — the value goes in and never comes back out', () => {
   it('saving over HTTP returns a status that does not contain the key anywhere in the response', async () => {
-    const { status, json, text } = await api('POST', '/api/platform/model-credentials/openai', adminToken, { workspaceId: WS_A, apiKey: STORED_OPENAI_KEY });
+    const { status, json, text } = await api('POST', '/api/platform/model-credentials/openai', platformToken, { workspaceId: WS_A, apiKey: STORED_OPENAI_KEY });
     expect(status).toBe(200);
     expect(json.status.state).toBe('STORED');
     // The whole response body, not just the field we expected to be safe.
@@ -218,8 +221,8 @@ describe('3. SECRET REDACTION — the value goes in and never comes back out', (
     saveModelCredential({ provider: 'openai', apiKey: STORED_OPENAI_KEY, userId: 'test' });
     saveModelCredential({ provider: 'gemini', apiKey: STORED_GEMINI_KEY, userId: 'test' });
 
-    const one = await api('GET', `/api/platform/model-credentials/openai?workspaceId=${WS_A}`, adminToken);
-    const all = await api('GET', `/api/platform/model-credentials?workspaceId=${WS_A}`, adminToken);
+    const one = await api('GET', `/api/platform/model-credentials/openai?workspaceId=${WS_A}`, platformToken);
+    const all = await api('GET', `/api/platform/model-credentials?workspaceId=${WS_A}`, platformToken);
     for (const body of [one.text, all.text]) {
       expect(body).not.toContain(STORED_OPENAI_KEY);
       expect(body).not.toContain(STORED_GEMINI_KEY);
@@ -227,7 +230,7 @@ describe('3. SECRET REDACTION — the value goes in and never comes back out', (
   });
 
   it('a verify against a bogus key surfaces the failure without echoing the key back', async () => {
-    const { text } = await api('POST', '/api/platform/model-credentials/openai', adminToken, {
+    const { text } = await api('POST', '/api/platform/model-credentials/openai', platformToken, {
       workspaceId: WS_A, action: 'save', apiKey: STORED_OPENAI_KEY,
     });
     // Save triggers a real verification attempt; it fails (no such account),
@@ -259,6 +262,34 @@ describe('4. AUTHORIZATION — unauthorized callers get nothing', () => {
     expect(status).toBe(401);
   });
 
+  // THE AUTHORITY FIX. Model credentials are platform-global; administering
+  // one customer workspace confers no authority over them.
+  it('a workspace ADMIN (not platform admin) cannot read, save, verify or delete — on either route family', async () => {
+    const reads = [
+      `/api/platform/model-credentials?workspaceId=${WS_A}`,
+      `/api/platform/model-credentials/openai?workspaceId=${WS_A}`,
+      `/api/business/model-credential?workspaceId=${WS_A}`,
+      `/api/business/model-credentials?workspaceId=${WS_A}`,
+    ];
+    for (const url of reads) {
+      expect((await api('GET', url, adminToken)).status, url).toBe(403);
+    }
+    for (const action of ['save', 'verify', 'delete']) {
+      const a = await api('POST', '/api/platform/model-credentials/openai', adminToken, { workspaceId: WS_A, action, apiKey: 'sk-ws-admin-attempt' });
+      expect(a.status, `platform ${action}`).toBe(403);
+      const b = await api('POST', '/api/business/model-credential', adminToken, { workspaceId: WS_A, provider: 'openai', action, apiKey: 'sk-ws-admin-attempt' });
+      expect(b.status, `business ${action}`).toBe(403);
+    }
+    expect(getProviderCredentialStatus('openai').storedRowPresent).toBe(false);
+    expect(JSON.stringify(getDatabase().prepare('SELECT * FROM model_credentials').all())).not.toContain('sk-ws-admin-attempt');
+  });
+
+  it('a platform admin needs NO workspace membership to manage platform credentials', async () => {
+    const { status, json } = await api('GET', '/api/platform/model-credentials', platformToken);
+    expect(status).toBe(200);
+    expect(json.success).toBe(true);
+  });
+
   it('a plain workspace MEMBER cannot read credential state — this is admin-only', async () => {
     const { status } = await api('GET', `/api/platform/model-credentials?workspaceId=${WS_A}`, memberToken);
     expect(status).toBe(403);
@@ -287,7 +318,7 @@ describe('4. AUTHORIZATION — unauthorized callers get nothing', () => {
 
 describe('5. THE CONCIERGE PATH IS UNCHANGED', () => {
   it('the existing Gemini route still works and still reports its own shape', async () => {
-    const { status, json } = await api('GET', `/api/business/model-credential?workspaceId=${WS_A}`, adminToken);
+    const { status, json } = await api('GET', `/api/business/model-credential?workspaceId=${WS_A}`, platformToken);
     expect(status).toBe(200);
     expect(json.success).toBe(true);
     expect(json.status.provider).toBe('gemini');
@@ -295,8 +326,8 @@ describe('5. THE CONCIERGE PATH IS UNCHANGED', () => {
   });
 
   it('a key saved through the shared provider route is visible to the Concierge route — one store, not two', async () => {
-    await api('POST', '/api/platform/model-credentials/gemini', adminToken, { workspaceId: WS_A, apiKey: STORED_GEMINI_KEY });
-    const { json } = await api('GET', `/api/business/model-credential?workspaceId=${WS_A}`, adminToken);
+    await api('POST', '/api/platform/model-credentials/gemini', platformToken, { workspaceId: WS_A, apiKey: STORED_GEMINI_KEY });
+    const { json } = await api('GET', `/api/business/model-credential?workspaceId=${WS_A}`, platformToken);
     expect(json.status.apiKeyPresent).toBe(true);
     expect(json.status.source).toBe('server_store');
   });
@@ -354,12 +385,15 @@ describe('6. DEVELOPMENT-LOOP API COMPLETENESS — every step of the copy/paste-
     expect(cross.json.tasks.map((t: any) => t.dev_task_id)).not.toContain(devTaskId);
   });
 
-  it('dispatching a Guardian-refused instruction returns 403 BLOCKED with the reason, not a 500', async () => {
+  // Approval is always required and IS the go signal: approving dispatches in
+  // the same request, so a Guardian refusal surfaces on approve.
+  it('approving a Guardian-refused instruction returns 403 BLOCKED with the reason, not a 500', async () => {
     const created = await api('POST', '/api/development/tasks', adminToken, {
       workspaceId: WS_A, title: 'Destructive', instruction: 'rm -rf / and report',
       requiresReview: false, requiresApproval: false,
     });
-    const { status, json } = await api('POST', `/api/development/tasks/${created.json.task.dev_task_id}/dispatch`, adminToken, { workspaceId: WS_A });
+    expect(created.json.task.state).toBe('WAITING_FOR_APPROVAL');
+    const { status, json } = await api('POST', `/api/development/tasks/${created.json.task.dev_task_id}/approve`, adminToken, { workspaceId: WS_A });
     expect(status).toBe(403);
     expect(json.task.state).toBe('BLOCKED');
     expect(json.task.state_reason).toContain('Guardian refused');

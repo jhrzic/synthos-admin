@@ -46,9 +46,14 @@ import { classifyModelRequest, resolveReviewSeatModel, explainUnroutableModel } 
 import { resolveModelApiKey } from './model-credentials';
 import { generateViaOpenAI } from './fabric/model-openai';
 import {
-  submitExternalExecution, getWorkspaceExternalExecution, guardianCheckInstruction,
+  getWorkspaceExternalExecution, guardianCheckInstruction,
   type ExternalExecutionRecord,
 } from './external-executions';
+import {
+  executeEnvelope, resolveAntigravityBinding, antigravityApprovalDigest,
+  type ExecutionEnvelopeInput,
+} from './fabric/envelope';
+import { requestApproval, decideApproval } from './approvals';
 import { createExecutionContext } from './fabric/context';
 
 /**
@@ -196,7 +201,13 @@ export function createDevelopmentTask(params: {
   if (!instruction) throw Object.assign(new Error('An instruction is required.'), { code: 'INVALID_INPUT' });
 
   const requiresReview = params.requiresReview !== false;
-  const requiresApproval = params.requiresApproval !== false;
+  // ALWAYS required. Every development task dispatches to runtime.antigravity,
+  // a paid remote agent, and the current policy is that no paid remote
+  // execution happens without a human decision. An explicit
+  // `requiresApproval: false` is therefore ignored rather than honoured — the
+  // envelope would refuse the unapproved dispatch anyway, and a task that
+  // looked "ready" but could never run would be a lie in the queue.
+  const requiresApproval = true;
   const kind: DevelopmentTaskKind = params.kind === 'CODING' ? 'CODING' : 'GENERAL';
   const now = new Date().toISOString();
   const devTaskId = `dev-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
@@ -412,13 +423,62 @@ export async function requestDevelopmentReview(
   };
 }
 
-/** Human approval. The one gate a model may never grant itself. */
+/**
+ * The exact envelope request a development task dispatches with. Built in ONE
+ * place so the approval recorded at approve time and the approval the envelope
+ * checks at dispatch are computed from identical inputs — if they could differ,
+ * a human approval would silently fail to authorize the run.
+ */
+export function developmentEnvelopeInput(task: DevelopmentTaskRecord, actorUserId: string): ExecutionEnvelopeInput {
+  return {
+    workspaceId: task.workspace_id,
+    actorUserId,
+    capability: 'runtime.antigravity',
+    action: 'execute',
+    parameters: { instruction: buildExecutionInstruction(task) },
+    rawText: '',
+    // Also the ledger idempotency key: unchanged from before the Development
+    // loop moved onto the envelope, so existing rows keep deduplicating.
+    correlationId: `devtask:${task.dev_task_id}`,
+  };
+}
+
+/**
+ * Human approval. The one gate a model may never grant itself.
+ *
+ * Recorded TWICE ON PURPOSE, as one decision: on the development task (the
+ * loop's own vocabulary) and as a canonical approval in lib/approvals.ts,
+ * bound to the same runtime.antigravity digest the envelope checks. That is
+ * what lets dispatch go through the canonical envelope — Guardian, approval
+ * gate, single-use consumption, the one external-execution ledger — instead of
+ * a Development-only submission path.
+ */
 export function approveDevelopmentTask(workspaceId: string, devTaskId: string, approverUserId: string): DevelopmentTaskRecord {
   const task = getWorkspaceDevelopmentTask(workspaceId, devTaskId);
   if (!task) throw Object.assign(new Error('Development task not found.'), { code: 'NOT_FOUND' });
   if (task.state !== 'WAITING_FOR_APPROVAL') {
     throw Object.assign(new Error(`Only a task waiting for approval can be approved; this one is ${task.state}.`), { code: 'INVALID_STATE' });
   }
+
+  const envelopeInput = developmentEnvelopeInput(task, approverUserId);
+  const binding = resolveAntigravityBinding(envelopeInput);
+  const pending = requestApproval({
+    workspaceId,
+    taskId: null,
+    correlationId: envelopeInput.correlationId!,
+    capability: 'runtime.antigravity',
+    action: 'execute',
+    effectClass: 'EXTERNAL_ACTION',
+    requestedByUserId: task.created_by_user_id,
+    guardianDecision: 'SAFE',
+    actionSummary: `Development task ${task.dev_task_id}: ${task.title}`,
+    inputDigest: antigravityApprovalDigest(binding),
+  });
+  const decided = decideApproval({ approvalId: pending.approval_id, workspaceId, decidedByUserId: approverUserId, decision: 'APPROVED', reason: 'Approved in the Development workspace.' });
+  if (!decided.ok) {
+    throw Object.assign(new Error(`Could not record the canonical approval: ${decided.reason}`), { code: 'INVALID_STATE' });
+  }
+
   return patch(devTaskId, {
     approved_by_user_id: approverUserId,
     approved_at: new Date().toISOString(),
@@ -572,13 +632,28 @@ export async function dispatchDevelopmentTask(
   }
 
   try {
-    const { execution } = await submitExternalExecution({
-      workspaceId,
-      createdByUserId: actorUserId,
-      runtime: 'antigravity',
-      input: { instruction: buildExecutionInstruction(task) },
-      idempotencyKey: `devtask:${devTaskId}`,
-    });
+    // THE CANONICAL PATH. The envelope re-checks the registry (configured and
+    // enabled), runs Guardian on the full bounded instruction, consumes the
+    // canonical approval recorded at approve time, and submits through the one
+    // external-execution ledger. The Development loop no longer submits on its
+    // own.
+    const result = await executeEnvelope(developmentEnvelopeInput(task, actorUserId));
+
+    if (result.outcome === 'APPROVAL_REQUIRED') {
+      // The approval did not match: the instruction, agent or scope changed
+      // since approval, or it lapsed. Back to the human, never around them.
+      const waiting = patch(devTaskId, { state: 'WAITING_FOR_APPROVAL', state_reason: result.reason });
+      return { task: waiting, execution: null, reason: result.reason };
+    }
+
+    const execution = result.externalExecution
+      ? getWorkspaceExternalExecution(workspaceId, result.externalExecution.id)
+      : null;
+
+    if (!execution) {
+      const blocked = patch(devTaskId, { state: 'BLOCKED', state_reason: String(result.reason || 'Dispatch refused.').slice(0, 500) });
+      return { task: blocked, execution: null, reason: blocked.state_reason! };
+    }
 
     if (execution.status === 'FAILED') {
       const failed = patch(devTaskId, {
