@@ -62,6 +62,10 @@ import { tonAnalyticsSnapshot, recordTonTelemetry } from "./lib/ton-analytics";
 import { tonGuardianViews, installTonGuardians } from "./lib/ton-guardians";
 import { listWorkspaceVaultEntries, getWorkspaceVaultEntry, previewWorkspaceVaultEntry, writeWorkspaceArtifact } from "./lib/vault";
 import { getVaultStatus, SYNTHOS_VAULT_SUBDIR } from "./lib/vault-config";
+import {
+  CATALOG_PROVIDERS, modelsForProvider, defaultModelForProvider,
+  resolveModelAvailability, catalogAgreesWithRouter,
+} from "./lib/model-catalog";
 import { listKnowledgeNotes, searchKnowledgeNotes, listKnowledgeNotesDetailed } from "./lib/knowledge-vault";
 import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory, listWorkspaceMemory } from "./lib/memory-index";
 import { runAeoAudit, createAuditMissionTasks, resolveGeoProvider } from "./lib/aeo/service";
@@ -160,6 +164,7 @@ import { assistantPageCsp, normalizeOrigin } from "./lib/conversation/origins";
 import { synthesizeFishAudio, getFishAccountState } from "./lib/voice-credentials";
 import { resolveVoiceRuntime, saveVoiceSettings, isVoiceProvider, VOICE_PROVIDERS } from "./lib/voice-settings";
 import { getModelCredentialStatus, saveModelCredential, deleteModelCredential, verifyModelCredential, isModelProvider, SUPPORTED_MODEL_PROVIDERS, type ModelProvider } from "./lib/model-credentials";
+import { resolveProviderState } from "./lib/provider-state";
 import { resolvePublicBaseUrl } from "./lib/public-url";
 import { requireAuth, requireWorkspaceMember, requireWorkspaceAdmin, requirePlatformAdmin, requireSameOrigin, getRequestUser, fromBody, fromQuery, fromBodyOrQuery, authorizedWorkspaceId, AuthedRequest } from "./lib/authorization";
 import { recordAdminAuditEvent, listRecentAdminAuditEvents } from "./lib/audit";
@@ -6273,6 +6278,96 @@ Rules for spokenSummary specifically:
       });
     } catch (err: any) {
       res.status(503).json({ ready: false, error: "Readiness check failed to run.", timestamp: new Date().toISOString() });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // MODEL CATALOG — provider and model as separate concepts.
+  //
+  // The Admin used to hold one registry entry per provider with the model
+  // smuggled into its display name ("Claude 3.7 Sonnet / Opus"), so a provider
+  // structurally WAS one model and a stale label was the only thing to update.
+  // This route serves the canonical catalog instead: providers, the models each
+  // exposes, which model the router defaults to, and each model's real
+  // availability.
+  //
+  // Truth comes from the modules that already own it — lib/model-catalog.ts for
+  // identity, lib/model-credentials.ts for whether a key resolves, and
+  // lib/provider-state.ts for whether a real call has ever succeeded. Nothing
+  // is re-derived here, and catalog presence never implies usability.
+  //
+  // Workspace-member gated: it reports which providers are configured, which is
+  // deployment information.
+  // ---------------------------------------------------------------------------
+  app.get("/api/models/catalog", requireWorkspaceMember(fromQuery), (_req, res) => {
+    try {
+      const providers = CATALOG_PROVIDERS.map((provider) => {
+        const executable = provider.execution === "EXECUTABLE";
+
+        // Only the two executable providers have a credential concept here.
+        const credentialPresent = executable && isModelProvider(provider.providerId === "google" ? "gemini" : provider.providerId)
+          ? getModelCredentialStatus(provider.providerId === "google" ? "gemini" : (provider.providerId as any)).apiKeyPresent
+          : false;
+
+        // Provider-level state from the existing ledger-backed resolver.
+        const state = resolveProviderState({
+          provider: provider.routerProvider ?? provider.providerId.toUpperCase(),
+          implemented: executable,
+          configured: credentialPresent,
+          brokenUpstream: provider.providerId === "nousresearch" ? true : undefined,
+        });
+
+        const models = modelsForProvider(provider.providerId).map((model) => ({
+          modelId: model.modelId,
+          displayName: model.displayName,
+          family: model.family,
+          capabilityTags: model.capabilityTags,
+          modalities: model.modalities,
+          isProviderDefault: model.isProviderDefault,
+          deprecated: model.deprecated,
+          availability: resolveModelAvailability(model, {
+            credentialPresent,
+            liveVerified: state.state === "LIVE_VERIFIED",
+          }),
+          // Proves the catalog and the router agree about where this id goes.
+          routesToRouterProvider: catalogAgreesWithRouter(model),
+        }));
+
+        return {
+          providerId: provider.providerId,
+          displayName: provider.displayName,
+          family: provider.family,
+          execution: provider.execution,
+          routerProvider: provider.routerProvider,
+          credentialEnvVar: provider.credentialEnvVar,
+          credentialPresent,
+          providerState: state.state,
+          providerReason: state.reason,
+          lastErrorCategory: state.lastErrorCategory,
+          lastModelUsed: state.lastModelUsed,
+          lastVerifiedAt: state.lastVerifiedAt ?? null,
+          // So a UI can say "and others" rather than implying an exhaustive list.
+          acceptsUncataloguedIds: provider.acceptsUncataloguedIds,
+          note: provider.note,
+          defaultModelId: defaultModelForProvider(provider.providerId),
+          modelCount: models.length,
+          models,
+        };
+      });
+
+      return res.json({
+        success: true,
+        providers,
+        // Stated explicitly so no caller has to infer it.
+        catalogPresenceImpliesUsability: false,
+        modelDiscoverySource: "CANONICAL_CATALOG_MODULE",
+        discoveryNote:
+          "No provider API discovery is implemented. Model identity comes from lib/model-catalog.ts, "
+          + "whose ids are sourced from lib/model-router.ts — the only module here that knows what can be dispatched. "
+          + "Providers with no execution mapping carry zero models rather than invented ones.",
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to read the model catalog" });
     }
   });
 

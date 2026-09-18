@@ -1,19 +1,39 @@
 import React, { useState, useEffect } from 'react';
 import { AIModelInfo, ObsidianNote } from '../types';
+import { ProviderModelCatalog } from './ProviderModelCatalog';
 import { 
   Sparkles, Terminal, Brain, Code2, Globe, Compass, 
   Send, RefreshCw, CheckCircle2, Copy, Save, Database, 
   Cpu, Activity, Zap, Play, ExternalLink, Sliders, Shield, Layers, ChevronRight
 } from 'lucide-react';
 
+
+/**
+ * Seat id to catalog provider id. A seat is an Admin tab, not a model and not
+ * quite a provider — `claude` and `claudecode` are both Anthropic seats.
+ * Mirrors SEAT_PROVIDER in lib/model-catalog.ts, which is the authority.
+ */
+function seatProviderId(seatId: string): string | undefined {
+  const map: Record<string, string> = {
+    chatgpt: 'openai', codex: 'openai',
+    gemini: 'google', antigravity: 'google',
+    claude: 'anthropic', claudecode: 'anthropic',
+    deepseek: 'deepseek', hermes: 'nousresearch', perplexity: 'perplexity',
+  };
+  return map[seatId.toLowerCase()];
+}
+
 interface ModelDashboardViewProps {
   model: AIModelInfo;
+  /** Needed by the catalog fetch, which is workspace-member gated. */
+  workspaceId: string;
   onSendQuery: (query: string, modelId: string, systemInstruction?: string) => Promise<string>;
   onAddNoteToVault: (title: string, content: string, tags: string[]) => void;
 }
 
 export const ModelDashboardView: React.FC<ModelDashboardViewProps> = ({
   model,
+  workspaceId,
   onSendQuery,
   onAddNoteToVault,
 }) => {
@@ -39,14 +59,10 @@ export const ModelDashboardView: React.FC<ModelDashboardViewProps> = ({
     } catch {
       // fallback
     }
-    return [
-      {
-        query: `Sample diagnostics for ${model.name} connected to Obsidian`,
-        response: `[${model.name.toUpperCase()}]: Telemetry nominal. Latency is ${model.latency}ms with context window allocation of ${model.contextWindow}.\n\nReady to analyze vaults or compile code modules into [[Obsidian-Knowledge-Graph]].`,
-        thinking: model.id === 'deepseek' ? '1. Analyzing model weights...\n2. Validating chain of thought...\n3. Compiling LaTeX equations and theorem proofs.' : undefined,
-        timestamp: '1 min ago'
-      }
-    ];
+    // This used to seed a transcript asserting "Telemetry nominal. Latency is
+    // 145ms", attributed to the model, timestamped "1 min ago" — for a seat
+    // that had never been called. An empty history is the true state.
+    return [];
   });
 
   const [savedToast, setSavedToast] = useState<string | null>(null);
@@ -167,18 +183,36 @@ export const ModelDashboardView: React.FC<ModelDashboardViewProps> = ({
         </div>
       )}
 
+      {/* PROVIDER -> MODELS.
+          This screen is a SEAT: one Admin tab per agent slot. The seat is not a
+          model, and its provider may expose several. Rendering the catalog here
+          is what stops the page reading as "this provider = this one model",
+          which is how a stale version survived on screen. */}
+      <ProviderModelCatalog workspaceId={workspaceId} providerId={seatProviderId(model.id)} />
+
       {/* Model Spec Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-[#090A14] border border-[#1C1F33] rounded-xl p-4 space-y-1">
           <div className="text-[10px] font-mono text-[#6E759D] uppercase">Latency</div>
-          <div className="text-xl font-bold text-white font-['Space_Grotesk']">{model.latency} ms</div>
-          <div className="text-[11px] text-[#615EFF] font-mono">Hermes Fast Pipeline</div>
+          {/* 0 means "not measured". It used to be a seeded figure (145ms on a
+              provider whose status read `requires_key`), so a never-called
+              provider advertised a response time. */}
+          <div className={`text-xl font-bold font-['Space_Grotesk'] ${model.latency > 0 ? 'text-white' : 'text-[#7E8BB5]'}`}>
+            {model.latency > 0 ? `${model.latency} ms` : 'UNKNOWN'}
+          </div>
+          <div className="text-[11px] text-[#7E8BB5] font-mono">
+            {model.latency > 0 ? 'Last measured call' : 'No call measured'}
+          </div>
         </div>
 
         <div className="bg-[#090A14] border border-[#1C1F33] rounded-xl p-4 space-y-1">
           <div className="text-[10px] font-mono text-[#6E759D] uppercase">Throughput</div>
-          <div className="text-xl font-bold text-white font-['Space_Grotesk']">{model.tokensPerSec} tok/s</div>
-          <div className="text-[11px] text-[#00D26A] font-mono">Stream Synchronized</div>
+          <div className={`text-xl font-bold font-['Space_Grotesk'] ${model.tokensPerSec > 0 ? 'text-white' : 'text-[#7E8BB5]'}`}>
+            {model.tokensPerSec > 0 ? `${model.tokensPerSec} tok/s` : 'UNKNOWN'}
+          </div>
+          <div className="text-[11px] text-[#7E8BB5] font-mono">
+            {model.tokensPerSec > 0 ? 'Last measured call' : 'Not measured'}
+          </div>
         </div>
 
         <div className="bg-[#090A14] border border-[#1C1F33] rounded-xl p-4 space-y-1">

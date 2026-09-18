@@ -2272,6 +2272,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           {isModelTab(activeTab) && (
             <ModelDashboardView
               model={models[activeTab]}
+              workspaceId={activeWorkspaceId}
               onSendQuery={handleSendQuery}
               onAddNoteToVault={(title, content, tags) => handleAddNoteToVault(title, content, tags, 'Model-Syntheses')}
             />
