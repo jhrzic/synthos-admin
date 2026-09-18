@@ -25,7 +25,10 @@ export type AdminEventType =
   | 'SETUP_TOKEN_ISSUED'
   | 'WINDMILL_TARGET_CREATED'
   | 'WINDMILL_TARGET_UPDATED'
-  | 'BACKUP_RESTORE_STAGED';
+  | 'BACKUP_RESTORE_STAGED'
+  | 'PLATFORM_SETTING_CHANGED'
+  | 'RUNTIME_CREDENTIAL_SAVED'
+  | 'RUNTIME_CREDENTIAL_DELETED';
 
 export interface AdminAuditEventRecord {
   event_id: string;

@@ -188,7 +188,7 @@ describe('1. TRUTHFUL STATUS — an unconfigured or disabled runtime says so, an
       expect(antigravity.isAntigravityEnabled()).toBe(false);
       const health = await antigravity.health();
       expect(health.status).toBe('DISABLED');
-      expect(health.error).toContain('ANTIGRAVITY_ENABLED');
+      expect(health.error).toContain('Antigravity is not enabled');
     } finally {
       disableRuntime();
     }
@@ -202,7 +202,7 @@ describe('1. TRUTHFUL STATUS — an unconfigured or disabled runtime says so, an
       await expect(submitExternalExecution({
         workspaceId: WS_A, createdByUserId: ACTOR, runtime: 'antigravity',
         input: { instruction: 'summarise the repository' },
-      })).rejects.toThrow(/ANTIGRAVITY_ENABLED/);
+      })).rejects.toThrow(/Antigravity is not enabled/);
     } finally {
       disableRuntime();
     }

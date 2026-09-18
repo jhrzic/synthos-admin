@@ -86,7 +86,7 @@ interface Row {
   updated_at: string | null;
 }
 
-function readRow(provider: ModelProvider): Row | undefined {
+function readRow(provider: ModelProvider | RuntimeCredentialSlot): Row | undefined {
   // A credential lookup must never be the thing that takes a request down.
   // This is now called from the execution kernel, where an unreachable or
   // not-yet-migrated database would otherwise turn "no key stored" into a
@@ -303,4 +303,85 @@ export function getProviderCredentialStatus(provider: ModelProvider): ProviderCr
 /** Every provider this build can execute, with its real state. The list is the extension point — a new provider needs no new endpoint. */
 export function listProviderCredentialStatuses(): ProviderCredentialStatus[] {
   return SUPPORTED_MODEL_PROVIDERS.map((p) => getProviderCredentialStatus(p));
+}
+
+
+// ---------------------------------------------------------------------------
+// RUNTIME CREDENTIAL SLOTS — keys for execution runtimes that are NOT model
+// providers.
+//
+// Antigravity is a managed-agent runtime, not a model the router selects, so it
+// is deliberately NOT in SUPPORTED_MODEL_PROVIDERS (that list drives routing).
+// Its key still lives in THIS store — same table, same encryption, same
+// environment-first precedence, same platform_admin-only routes — rather than
+// in a second secret store.
+// ---------------------------------------------------------------------------
+export const RUNTIME_CREDENTIAL_SLOTS = ['antigravity'] as const;
+export type RuntimeCredentialSlot = (typeof RUNTIME_CREDENTIAL_SLOTS)[number];
+
+const RUNTIME_ENV_VAR: Record<RuntimeCredentialSlot, string> = { antigravity: 'ANTIGRAVITY_API_KEY' };
+
+export function isRuntimeCredentialSlot(v: unknown): v is RuntimeCredentialSlot {
+  return typeof v === 'string' && (RUNTIME_CREDENTIAL_SLOTS as readonly string[]).includes(v);
+}
+
+export function resolveRuntimeCredential(slot: RuntimeCredentialSlot): { apiKey: string; source: ModelKeySource } {
+  const envKey = (process.env[RUNTIME_ENV_VAR[slot]] || '').trim();
+  if (envKey) return { apiKey: envKey, source: 'environment' };
+  const row = readRow(slot);
+  if (row?.api_key_encrypted) {
+    try {
+      const apiKey = decryptVoiceSecret(row.api_key_encrypted).trim();
+      if (apiKey) return { apiKey, source: 'server_store' };
+    } catch { /* undecryptable is absent; status still shows the row exists */ }
+  }
+  return { apiKey: '', source: 'none' };
+}
+
+export function saveRuntimeCredential(params: { slot: RuntimeCredentialSlot; apiKey: string; userId: string }): RuntimeCredentialStatus {
+  const apiKey = String(params.apiKey || '').trim();
+  if (!apiKey) throw new Error('An API key is required.');
+  if (apiKey.length > 500) throw new Error('That does not look like an API key.');
+  const now = new Date().toISOString();
+  getDatabase().prepare(`
+    INSERT INTO model_credentials (provider, api_key_encrypted, updated_by_user_id, created_at, updated_at)
+    VALUES (?,?,?,?,?)
+    ON CONFLICT(provider) DO UPDATE SET
+      api_key_encrypted = excluded.api_key_encrypted,
+      updated_by_user_id = excluded.updated_by_user_id,
+      updated_at = excluded.updated_at
+  `).run(params.slot, encryptVoiceSecret(apiKey), params.userId, now, now);
+  return getRuntimeCredentialStatus(params.slot);
+}
+
+export function deleteRuntimeCredential(slot: RuntimeCredentialSlot): void {
+  getDatabase().prepare('DELETE FROM model_credentials WHERE provider = ?').run(slot);
+}
+
+export interface RuntimeCredentialStatus {
+  slot: RuntimeCredentialSlot;
+  state: ProviderCredentialState;
+  configured: boolean;
+  envVar: string;
+  storedRowPresent: boolean;
+  overriddenByEnvironment: boolean;
+  updatedAt: string | null;
+}
+
+/** Presence and provenance only. The value is never returned. */
+export function getRuntimeCredentialStatus(slot: RuntimeCredentialSlot): RuntimeCredentialStatus {
+  const envVar = RUNTIME_ENV_VAR[slot];
+  const envPresent = Boolean((process.env[envVar] || '').trim());
+  const row = readRow(slot);
+  const storedRowPresent = Boolean(row?.api_key_encrypted);
+  const resolved = resolveRuntimeCredential(slot);
+  return {
+    slot,
+    state: resolved.source === 'environment' ? 'ENVIRONMENT' : resolved.source === 'server_store' ? 'STORED' : 'NOT_CONFIGURED',
+    configured: Boolean(resolved.apiKey),
+    envVar,
+    storedRowPresent,
+    overriddenByEnvironment: envPresent && storedRowPresent,
+    updatedAt: row?.updated_at ?? null,
+  };
 }

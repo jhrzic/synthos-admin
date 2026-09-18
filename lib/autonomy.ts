@@ -33,6 +33,8 @@
 
 import type { CapabilityEffectClass } from './fabric/registry';
 
+import { resolvePlatformSetting } from './platform-settings';
+
 export type AutonomyLevel = 'MANUAL' | 'INTERNAL_AUTOMATION' | 'APPROVAL_GATED_EXTERNAL';
 
 export const AUTONOMY_LEVELS: readonly AutonomyLevel[] = ['MANUAL', 'INTERNAL_AUTOMATION', 'APPROVAL_GATED_EXTERNAL'];
@@ -47,9 +49,23 @@ export const DEFAULT_AUTONOMY_LEVEL: AutonomyLevel = 'INTERNAL_AUTOMATION';
  * silently widen authority, and it must not take the runtime down either.
  */
 export function resolveAutonomyLevel(env: NodeJS.ProcessEnv = process.env): AutonomyLevel {
-  const raw = String(env.SYNTHOS_AUTONOMY_LEVEL || '').trim().toUpperCase();
-  if ((AUTONOMY_LEVELS as readonly string[]).includes(raw)) return raw as AutonomyLevel;
-  return DEFAULT_AUTONOMY_LEVEL;
+  return describeAutonomyLevel(env).level;
+}
+
+/**
+ * The level and where it came from: SYNTHOS_AUTONOMY_LEVEL when set (locked),
+ * else the platform setting a platform_admin controls from the Admin, else the
+ * default. Read on every call, so a change applies on the next tick.
+ */
+export function describeAutonomyLevel(env: NodeJS.ProcessEnv = process.env) {
+  const r = resolvePlatformSetting('autonomy.level', DEFAULT_AUTONOMY_LEVEL, env);
+  const raw = r.value.trim().toUpperCase();
+  const valid = (AUTONOMY_LEVELS as readonly string[]).includes(raw);
+  return { ...r, level: (valid ? raw : DEFAULT_AUTONOMY_LEVEL) as AutonomyLevel, valid };
+}
+
+export function isAutonomyLevel(v: unknown): v is AutonomyLevel {
+  return typeof v === 'string' && (AUTONOMY_LEVELS as readonly string[]).includes(v);
 }
 
 export interface AutonomyVerdict {

@@ -81,7 +81,10 @@ import {
 } from "./lib/gmail-connection";
 import { listWorkspaceGmailSendAttempts } from "./lib/gmail-send-ledger";
 import { getOrchestratorHealth, runOrchestrationTick } from "./lib/fabric/orchestrator";
-import { resolveAutonomyLevel, AUTONOMY_LEVELS } from "./lib/autonomy";
+import { resolveAutonomyLevel, AUTONOMY_LEVELS, describeAutonomyLevel, isAutonomyLevel } from "./lib/autonomy";
+import { getAntigravityControlStatus } from "./lib/antigravity-control";
+import { setPlatformSetting } from "./lib/platform-settings";
+import { describeAntigravityEnablement } from "./lib/antigravity-client";
 import {
   summarizeExternalSources,
   indexExternalVaultSources,
@@ -178,6 +181,7 @@ import {
   // provider instead of one route per provider.
   getProviderCredentialStatus, listProviderCredentialStatuses, isModelProvider, SUPPORTED_MODEL_PROVIDERS,
   type ModelProvider,
+  saveRuntimeCredential, deleteRuntimeCredential,
 } from "./lib/model-credentials";
 import { resolveProviderState } from "./lib/provider-state";
 import { resolvePublicBaseUrl } from "./lib/public-url";
@@ -3162,8 +3166,14 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       const workspaceId = (req as AuthedRequest).authWorkspaceId!;
       const profile = getBusinessProfile(workspaceId);
       const base = resolvePublicBaseUrl(req);
+      // PLATFORM vs WORKSPACE. The model key and the voice account are platform
+      // infrastructure (neither store has a workspace column) — managed by
+      // Synthos, billed to Synthos. Whether they exist, where they came from and
+      // what tier they are is platform configuration, so only a platform_admin
+      // sees it. Everyone else gets a constant MANAGED row that is identical
+      // whether a key exists or not, so the row cannot be used as an oracle.
+      const isPlatformAdmin = (req as AuthedRequest).authUser?.platform_role === "platform_admin";
       const model = getModelCredentialStatus("gemini");
-      const voice = getVoiceCredentialStatus("fish_audio");
       const fish = getFishAccountState();
       const knowledgeCount = listWorkspaceVaultEntries(workspaceId).filter((e: any) =>
         typeof e.relative_path === "string" && e.relative_path.includes("Business-Knowledge/")
@@ -3194,15 +3204,19 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
             base.warning || `Public address ${base.origin || "UNKNOWN"} (${base.source}).`),
           row("TEXT", profile?.published ? "READY" : "NOT_CONFIGURED",
             profile?.published ? "Answering from your approved material." : "Publish to enable."),
-          row("LLM", model.apiKeyPresent ? "READY" : "NOT_CONFIGURED",
-            model.apiKeyPresent
-              ? `Natural phrasing over your own material (key from ${model.source === "environment" ? model.envVar : "the encrypted store"}).`
-              : "Replies quote your documents directly. Add a model key for natural phrasing."),
+          isPlatformAdmin
+            ? row("LLM", model.apiKeyPresent ? "READY" : "NOT_CONFIGURED",
+                model.apiKeyPresent
+                  ? `Natural phrasing over your own material (key from ${model.source === "environment" ? model.envVar : "the encrypted store"}).`
+                  : "Replies quote your documents directly. Add a model key for natural phrasing.")
+            : row("LLM", "MANAGED", "Language processing is provided and operated by Synthos."),
           row("VOICE_INPUT", "READY", "Runs in the visitor's browser where supported. No audio reaches this server."),
-          row("VOICE_OUTPUT", fish.state === "PRODUCTION_READY" ? "READY"
-              : fish.state === "FREE_TIER_ONLY" ? "ATTENTION"
-              : fish.state === "NOT_CONFIGURED" ? "NOT_CONFIGURED" : "ATTENTION",
-            fish.detail),
+          isPlatformAdmin
+            ? row("VOICE_OUTPUT", fish.state === "PRODUCTION_READY" ? "READY"
+                  : fish.state === "FREE_TIER_ONLY" ? "ATTENTION"
+                  : fish.state === "NOT_CONFIGURED" ? "NOT_CONFIGURED" : "ATTENTION",
+                fish.detail)
+            : row("VOICE_OUTPUT", "MANAGED", "Spoken replies are provided and operated by Synthos."),
           row("FOLLOW_UP", "READY", "Scheduling requests and handoffs create real tasks for a person."),
           row("CALENDAR", "NOT_CONFIGURED", "No calendar is connected. The assistant never claims a booking."),
           row("PHONE", "NOT_CONFIGURED", "No carrier line is provisioned."),
@@ -6920,6 +6934,77 @@ Rules for spokenSummary specifically:
   // NOT_IMPLEMENTED/FAILED/UNKNOWN, plus an explicit evidenceSource per
   // system) and adds MCP connectivity, which the diagnostics route above
   // does not cover.
+  // -------------------------------------------------------------------------
+  // ANTIGRAVITY + AUTONOMY CONTROL — operated from the Admin, never the shell.
+  //
+  // platform_admin only (requirePlatformAdmin). Every change is audited through
+  // lib/audit.ts. Values take effect on the next call — no restart. A value the
+  // deployment ENVIRONMENT sets is locked and reported as such rather than
+  // "changed" by a toggle that cannot win (lib/platform-settings.ts).
+  // No route here makes a call to Antigravity.
+  // -------------------------------------------------------------------------
+  app.get("/api/master-admin/antigravity", requirePlatformAdmin, (_req, res) => {
+    try {
+      return res.json({ success: true, status: getAntigravityControlStatus() });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: String(err?.message || "Failed to read Antigravity status").slice(0, 200) });
+    }
+  });
+
+  app.post("/api/master-admin/antigravity/credential", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "antigravity-credential"), (req, res) => {
+    try {
+      const actor = (req as AuthedRequest).authUser!.user_id;
+      const action = String(req.body?.action || "save");
+      if (action === "delete") {
+        deleteRuntimeCredential("antigravity");
+        recordAdminAuditEvent({ actorUserId: actor, eventType: "RUNTIME_CREDENTIAL_DELETED", targetType: "runtime_credential", targetId: "antigravity" });
+        return res.json({ success: true, status: getAntigravityControlStatus() });
+      }
+      const apiKey = String(req.body?.apiKey || "");
+      if (!apiKey.trim()) return res.status(400).json({ success: false, error: "An API key is required." });
+      saveRuntimeCredential({ slot: "antigravity", apiKey, userId: actor });
+      // Presence only in the audit trail — never the value.
+      recordAdminAuditEvent({ actorUserId: actor, eventType: "RUNTIME_CREDENTIAL_SAVED", targetType: "runtime_credential", targetId: "antigravity" });
+      return res.json({ success: true, status: getAntigravityControlStatus() });
+    } catch (err: any) {
+      // Never echo the submitted key back, even inside an error.
+      return res.status(500).json({ success: false, error: "Failed to update the Antigravity credential." });
+    }
+  });
+
+  app.post("/api/master-admin/antigravity/enabled", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "antigravity-enabled"), (req, res) => {
+    try {
+      if (typeof req.body?.enabled !== "boolean") return res.status(400).json({ success: false, error: "enabled must be true or false." });
+      const current = describeAntigravityEnablement();
+      if (current.locked) {
+        return res.status(409).json({ success: false, error: "ANTIGRAVITY_ENABLED is set in the deployment environment, which takes precedence. Remove it there to control this from the Admin.", status: getAntigravityControlStatus() });
+      }
+      const actor = (req as AuthedRequest).authUser!.user_id;
+      setPlatformSetting("antigravity.enabled", req.body.enabled ? "true" : "false", actor);
+      recordAdminAuditEvent({ actorUserId: actor, eventType: "PLATFORM_SETTING_CHANGED", targetType: "platform_setting", targetId: "antigravity.enabled", detail: { from: current.enabled, to: req.body.enabled } });
+      return res.json({ success: true, status: getAntigravityControlStatus() });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: String(err?.message || "Failed to change Antigravity enablement").slice(0, 200) });
+    }
+  });
+
+  app.post("/api/master-admin/autonomy", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "autonomy-level"), (req, res) => {
+    try {
+      const level = String(req.body?.level || "").trim().toUpperCase();
+      if (!isAutonomyLevel(level)) return res.status(400).json({ success: false, error: `level must be one of ${AUTONOMY_LEVELS.join(", ")}.` });
+      const current = describeAutonomyLevel();
+      if (current.locked) {
+        return res.status(409).json({ success: false, error: "SYNTHOS_AUTONOMY_LEVEL is set in the deployment environment, which takes precedence. Remove it there to control this from the Admin.", status: getAntigravityControlStatus() });
+      }
+      const actor = (req as AuthedRequest).authUser!.user_id;
+      setPlatformSetting("autonomy.level", level, actor);
+      recordAdminAuditEvent({ actorUserId: actor, eventType: "PLATFORM_SETTING_CHANGED", targetType: "platform_setting", targetId: "autonomy.level", detail: { from: current.level, to: level } });
+      return res.json({ success: true, status: getAntigravityControlStatus() });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: String(err?.message || "Failed to change the autonomy level").slice(0, 200) });
+    }
+  });
+
   app.get("/api/master-admin/runtime-status", requirePlatformAdmin, async (req, res) => {
     try {
       const report = await getRuntimeStatus();

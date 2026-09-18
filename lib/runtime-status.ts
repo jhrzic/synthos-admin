@@ -83,11 +83,24 @@ export interface RuntimeSystemReport {
  * HEALTHY is reachable only from LIVE_VERIFIED, so no row can show green on
  * the strength of a credential.
  */
-export function providerStateToRuntimeStatus(state: ProviderState): RuntimeSystemStatus {
+/**
+ * Categories of a failed call that say nothing about the credential: the
+ * request did not complete (timeout, network) or was throttled. The provider
+ * is DEGRADED — it failed its last real call — but not FAILED, which is
+ * reserved for failures that implicate the credential or the model access
+ * (AUTHENTICATION, MODEL_NOT_FOUND) or that could not be classified.
+ *
+ * Found live: one 60s TIMEOUT after three successful calls on the same stored
+ * key rendered "OpenAI Provider FAILED", which read as a rejected credential.
+ */
+export const TRANSIENT_PROVIDER_ERROR_CATEGORIES = new Set(['TIMEOUT', 'NETWORK', 'RATE_LIMIT']);
+
+export function providerStateToRuntimeStatus(state: ProviderState, lastErrorCategory?: string | null): RuntimeSystemStatus {
   switch (state) {
     case 'LIVE_VERIFIED': return 'HEALTHY';
     case 'QUOTA_BLOCKED': return 'DEGRADED';
     case 'PROVIDER_ERROR':
+      return lastErrorCategory && TRANSIENT_PROVIDER_ERROR_CATEGORIES.has(lastErrorCategory) ? 'DEGRADED' : 'FAILED';
     case 'BROKEN_UPSTREAM': return 'FAILED';
     case 'CREDENTIAL_PRESENT': return 'UNKNOWN';
     case 'NO_CREDENTIAL':
@@ -115,7 +128,7 @@ function geminiStatus(): RuntimeSystemReport {
   const state = resolveProviderState({ provider: 'gemini', implemented: true, configured: credential.apiKeyPresent });
   return {
     system: 'Gemini Provider',
-    status: providerStateToRuntimeStatus(state.state),
+    status: providerStateToRuntimeStatus(state.state, state.lastErrorCategory),
     evidenceSource: providerEvidenceSource(state),
     lastCheck: state.lastAttemptAt,
     detail: `${state.state} — ${state.reason}`,
@@ -144,7 +157,7 @@ function openAiStatus(): RuntimeSystemReport {
   const state = resolveProviderState({ provider: 'openai', implemented: true, configured: credential.apiKeyPresent });
   return {
     system: 'OpenAI Provider',
-    status: providerStateToRuntimeStatus(state.state),
+    status: providerStateToRuntimeStatus(state.state, state.lastErrorCategory),
     evidenceSource: providerEvidenceSource(state),
     lastCheck: state.lastAttemptAt,
     detail: `${state.state} — ${state.reason}`,
@@ -355,7 +368,7 @@ async function antigravityStatus(): Promise<RuntimeSystemReport> {
     });
     return {
       system: 'Antigravity Runtime',
-      status: providerStateToRuntimeStatus(state.state),
+      status: providerStateToRuntimeStatus(state.state, state.lastErrorCategory),
       evidenceSource: 'configuration_only',
       lastCheck: null,
       detail: `${state.state} — ${state.reason}`,
@@ -774,7 +787,7 @@ async function hermesLocalRuntimeStatus(): Promise<RuntimeSystemReport> {
     });
     return {
       system: 'Hermes Local Runtime (CLI)',
-      status: providerStateToRuntimeStatus(state.state),
+      status: providerStateToRuntimeStatus(state.state, state.lastErrorCategory),
       evidenceSource: 'live_probe',
       lastCheck: probe.checkedAt,
       detail: `${state.state} — ${detailBase} answers --version, but \`hermes -z\` fails upstream: AttributeError: 'list' object has no attribute 'items' (reproduces with a clean env and --ignore-user-config). The SynthOS adapter is valid. Dispatch is also switched off (HERMES_LOCAL_ENABLED is not "true").`,

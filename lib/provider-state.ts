@@ -268,7 +268,9 @@ export function resolveProviderState(input: ResolveProviderStateInput): Provider
       state: quota ? 'QUOTA_BLOCKED' : 'PROVIDER_ERROR',
       reason: quota
         ? `The provider authenticated this credential and refused on quota or billing at ${last.at}. Not a configuration fault.`
-        : `The last real call failed at ${last.at} (${last.errorCategory}).`,
+        : ['TIMEOUT', 'NETWORK', 'RATE_LIMIT'].includes(String(last.errorCategory))
+          ? `The last real call failed at ${last.at} (${last.errorCategory}) — the request did not complete, which says nothing about the credential; it was not rejected.${lastSuccess ? ` Last success: ${lastSuccess.at}.` : ''}`
+          : `The last real call failed at ${last.at} (${last.errorCategory}).`,
     };
   }
   if (lastSuccess) {

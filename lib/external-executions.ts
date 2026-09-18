@@ -348,7 +348,7 @@ export async function submitExternalExecution(params: SubmitExternalExecutionPar
       throw Object.assign(new Error('Antigravity is not configured in this deployment — no credential resolves.'), { code: 'RUNTIME_NOT_CONFIGURED' });
     }
     if (!antigravityClient.isAntigravityEnabled()) {
-      throw Object.assign(new Error('ANTIGRAVITY_ENABLED is not "true" — outward Antigravity execution is switched off in this deployment.'), { code: 'RUNTIME_NOT_CONFIGURED' });
+      throw Object.assign(new Error('Antigravity is not enabled — outward Antigravity execution is switched off (Master Admin → Antigravity).'), { code: 'RUNTIME_NOT_CONFIGURED' });
     }
     const instruction = antigravityInstructionFrom(params.input || {});
     if (!instruction.trim()) {

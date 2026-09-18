@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
+import http from 'node:http';
 
 const REPO_ROOT = process.cwd();
 const TEST_DB_PATH = path.join(os.tmpdir(), `synthos-platform-cred-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
@@ -32,6 +33,8 @@ import {
 // ---------------------------------------------------------------------------
 
 const SESSION_COOKIE_NAME = 'synthos_session';
+let agServer: http.Server;
+let agRequests = 0;
 const WS_A = `ws-cred-a-${Date.now()}`;
 const WS_B = `ws-cred-b-${Date.now()}`;
 
@@ -100,6 +103,13 @@ beforeAll(async () => {
   delete env.OPENAI_API_KEY;
   delete env.GEMINI_API_KEY;
   delete env.ANTIGRAVITY_API_KEY;
+  delete env.ANTIGRAVITY_ENABLED;
+  delete env.SYNTHOS_AUTONOMY_LEVEL;
+  // A counting stand-in for Google's managed-agent endpoint. The control
+  // surface must never contact Antigravity; this proves it by observation.
+  agServer = http.createServer((_req, res) => { agRequests += 1; res.writeHead(500); res.end('{}'); });
+  await new Promise<void>((r) => agServer.listen(0, '127.0.0.1', () => r()));
+  env.ANTIGRAVITY_BASE_URL = `http://127.0.0.1:${(agServer.address() as any).port}`;
 
   child = spawn(path.join(REPO_ROOT, 'node_modules', '.bin', 'tsx'), ['server.ts'], { cwd: REPO_ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
   await new Promise<void>((resolve, reject) => {
@@ -112,6 +122,7 @@ beforeAll(async () => {
 }, 40000);
 
 afterAll(async () => {
+  if (agServer) await new Promise<void>((r) => agServer.close(() => r()));
   if (child && !child.killed) { child.kill('SIGTERM'); await new Promise((r) => setTimeout(r, 300)); }
   try { fs.unlinkSync(TEST_DB_PATH); } catch { /* best effort */ }
   delete process.env.OPENAI_API_KEY;
@@ -430,5 +441,121 @@ describe('6. DEVELOPMENT-LOOP API COMPLETENESS — every step of the copy/paste-
     expect(frame).toMatch(/event: (runtime|ready)/);
     expect(frame).not.toContain(STORED_OPENAI_KEY);
     await reader.cancel();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// CONTROL-PLANE GAPS — readiness leak, and Antigravity/autonomy from the Admin.
+// ---------------------------------------------------------------------------
+
+describe('7. BUSINESS READINESS does not leak platform configuration to a workspace', () => {
+  const rowsFor = async (token: string) => {
+    const { status, json } = await api('GET', `/api/business/readiness?workspaceId=${WS_A}`, token);
+    expect(status).toBe(200);
+    return Object.fromEntries((json.items as any[]).map((i) => [i.key, i]));
+  };
+
+  it('a member and a workspace admin see MANAGED — identical whether a platform key exists or not', async () => {
+    const before = { member: await rowsFor(memberToken), admin: await rowsFor(adminToken) };
+    saveModelCredential({ provider: 'gemini', apiKey: STORED_GEMINI_KEY, userId: 'test' });
+    const after = { member: await rowsFor(memberToken), admin: await rowsFor(adminToken) };
+    for (const who of ['member', 'admin'] as const) {
+      for (const key of ['LLM', 'VOICE_OUTPUT']) {
+        expect(after[who][key].state, `${who} ${key}`).toBe('MANAGED');
+        expect(after[who][key]).toEqual(before[who][key]); // not an oracle
+      }
+      const text = JSON.stringify(after[who]);
+      expect(text).not.toMatch(/GEMINI_API_KEY|encrypted store|environment|free tier|FREE_TIER/i);
+    }
+  });
+
+  it('workspace-scoped readiness is still reported to members', async () => {
+    const rows = await rowsFor(memberToken);
+    for (const key of ['ASSISTANT', 'KNOWLEDGE', 'PUBLICATION', 'DOMAIN']) expect(rows[key]).toBeTruthy();
+  });
+
+  it('a platform admin who is a member of the workspace sees the real platform detail', async () => {
+    const u = createUser({ email: `cred-platform-member-${Date.now()}@example.test`, password: 'correct horse battery staple 5', displayName: 'P', platformRole: 'platform_admin' });
+    grantMembership(u.user_id, WS_A, 'member');
+    const token = login(u.email, 'correct horse battery staple 5')!.rawToken;
+    saveModelCredential({ provider: 'gemini', apiKey: STORED_GEMINI_KEY, userId: 'test' });
+    const rows = await rowsFor(token);
+    expect(rows.LLM.state).toBe('READY');
+    expect(JSON.stringify(rows)).not.toContain(STORED_GEMINI_KEY);
+  });
+
+  it('another workspace\'s admin cannot read this workspace\'s readiness at all', async () => {
+    const { status } = await api('GET', `/api/business/readiness?workspaceId=${WS_A}`, otherToken);
+    expect(status).toBe(403);
+  });
+});
+
+describe('8. ANTIGRAVITY + AUTONOMY are operated from the Admin by a platform admin only', () => {
+  const auditRows = (targetId: string) =>
+    getDatabase().prepare('SELECT event_type, detail_json FROM admin_audit_events WHERE target_id = ? ORDER BY created_at').all(targetId) as any[];
+
+  it('member, workspace admin and another workspace\'s admin get 403 on every control', async () => {
+    for (const token of [memberToken, adminToken, otherToken]) {
+      expect((await api('GET', '/api/master-admin/antigravity', token)).status).toBe(403);
+      expect((await api('POST', '/api/master-admin/antigravity/enabled', token, { enabled: true })).status).toBe(403);
+      expect((await api('POST', '/api/master-admin/autonomy', token, { level: 'APPROVAL_GATED_EXTERNAL' })).status).toBe(403);
+      expect((await api('POST', '/api/master-admin/antigravity/credential', token, { action: 'save', apiKey: 'ag-forbidden-attempt-000000' })).status).toBe(403);
+    }
+    expect(JSON.stringify(getDatabase().prepare('SELECT * FROM model_credentials').all())).not.toContain('ag-forbidden-attempt');
+  });
+
+  it('defaults are safe: disabled, INTERNAL_AUTOMATION, NOT_READY, never live-verified', async () => {
+    const { status, json } = await api('GET', '/api/master-admin/antigravity', platformToken);
+    expect(status).toBe(200);
+    expect(json.status.implementation).toBe('IMPLEMENTED');
+    expect(json.status.enabled.value).toBe(false);
+    expect(json.status.autonomy.level).toBe('INTERNAL_AUTOMATION');
+    expect(json.status.readiness).toBe('NOT_READY');
+    expect(json.status.lastLiveVerified).toBeNull();
+  });
+
+  it('credential, enablement and autonomy can all be set from the Admin, audited, effective without a restart', async () => {
+    const save = await api('POST', '/api/master-admin/antigravity/credential', platformToken, { action: 'save', apiKey: 'ag-admin-saved-key-must-not-echo-0000' });
+    expect(save.status).toBe(200);
+    expect(save.text).not.toContain('ag-admin-saved-key-must-not-echo');
+    expect(save.json.status.credential.state).toBe('CONFIGURED');
+    expect(save.json.status.credential.source).toBe('antigravity_store');
+
+    const en = await api('POST', '/api/master-admin/antigravity/enabled', platformToken, { enabled: true });
+    expect(en.status).toBe(200);
+    expect(en.json.status.enabled).toMatchObject({ value: true, source: 'platform_setting', locked: false });
+    expect(en.json.status.readiness).toBe('READY_FOR_LIVE_VERIFICATION');
+
+    const au = await api('POST', '/api/master-admin/autonomy', platformToken, { level: 'APPROVAL_GATED_EXTERNAL' });
+    expect(au.status).toBe(200);
+    expect(au.json.status.autonomy.level).toBe('APPROVAL_GATED_EXTERNAL');
+
+    // The RUNNING server (not this process) now sees the capability as dispatchable.
+    const again = await api('GET', '/api/master-admin/antigravity', platformToken);
+    expect(again.json.status.readiness).toBe('READY_FOR_LIVE_VERIFICATION');
+
+    expect(auditRows('antigravity').map((r) => r.event_type)).toContain('RUNTIME_CREDENTIAL_SAVED');
+    expect(auditRows('antigravity.enabled').map((r) => r.event_type)).toContain('PLATFORM_SETTING_CHANGED');
+    const autonomyAudit = auditRows('autonomy.level');
+    expect(autonomyAudit.length).toBeGreaterThan(0);
+    expect(JSON.parse(autonomyAudit[autonomyAudit.length - 1].detail_json)).toMatchObject({ from: 'INTERNAL_AUTOMATION', to: 'APPROVAL_GATED_EXTERNAL' });
+    const audited = JSON.stringify(getDatabase().prepare('SELECT * FROM admin_audit_events').all());
+    expect(audited).not.toContain('ag-admin-saved-key-must-not-echo');
+
+    // Restore the safe state for anything that runs after.
+    await api('POST', '/api/master-admin/antigravity/enabled', platformToken, { enabled: false });
+    await api('POST', '/api/master-admin/autonomy', platformToken, { level: 'INTERNAL_AUTOMATION' });
+    const del = await api('POST', '/api/master-admin/antigravity/credential', platformToken, { action: 'delete' });
+    expect(del.json.status.credential.state).toBe('NOT_CONFIGURED');
+  });
+
+  it('an invalid autonomy level or a non-boolean enable is refused', async () => {
+    expect((await api('POST', '/api/master-admin/autonomy', platformToken, { level: 'FULLY_AUTONOMOUS' })).status).toBe(400);
+    expect((await api('POST', '/api/master-admin/antigravity/enabled', platformToken, { enabled: 'yes' })).status).toBe(400);
+  });
+
+  it('no control in this suite ever contacted Antigravity', () => {
+    expect(agRequests).toBe(0);
   });
 });

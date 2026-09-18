@@ -209,10 +209,10 @@ function antigravityRuntimeCapability(): CapabilityDescriptor {
     workspaceScope: 'admin',
     reference: 'lib/external-executions.ts::submitExternalExecution (runtime: antigravity) -> lib/antigravity-client.ts::submitInteraction',
     reason: !configured
-      ? 'No Antigravity credential resolves (neither ANTIGRAVITY_API_KEY nor a Gemini credential).'
+      ? 'No Antigravity credential resolves (no dedicated Antigravity key and no Gemini credential). Add one in Master Admin → Antigravity.'
       : !enabled
-        ? 'A credential resolves, but ANTIGRAVITY_ENABLED is not "true" — outward execution is switched off in this deployment.'
-        : 'A credential resolves and ANTIGRAVITY_ENABLED is "true". Every instruction is evaluated by the real checkGuardianRules() gate before dispatch; BLOCKED and APPROVAL_REQUIRED are refused. Results are never trusted: they pass Aegis and the KIL gate before any receipt exists.',
+        ? 'A credential resolves, but Antigravity is not enabled — outward execution is switched off. A platform admin enables it in Master Admin → Antigravity.'
+        : 'A credential resolves and Antigravity is enabled. Every instruction is evaluated by the real checkGuardianRules() gate before dispatch; BLOCKED and APPROVAL_REQUIRED are refused. Results are never trusted: they pass Aegis and the KIL gate before any receipt exists.',
   };
 }
 

@@ -35,7 +35,8 @@
 // logged, and is never included in any returned object.
 // ---------------------------------------------------------------------------
 
-import { resolveModelApiKey } from './model-credentials';
+import { resolveModelApiKey, resolveRuntimeCredential } from './model-credentials';
+import { resolvePlatformSetting } from './platform-settings';
 import { scrubSecrets as sharedScrubSecrets } from './redact';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -80,9 +81,19 @@ export function resolveAntigravityAgent(): string {
  * ANTIGRAVITY_API_KEY exists only for a deployment that wants to bill or
  * scope agent execution separately from ordinary generation.
  */
-export function resolveAntigravityApiKey(): { apiKey: string; source: 'antigravity_env' | 'gemini_credential' | 'none' } {
-  const dedicated = (process.env.ANTIGRAVITY_API_KEY || '').trim();
-  if (dedicated) return { apiKey: dedicated, source: 'antigravity_env' };
+export type AntigravityKeySource = 'antigravity_env' | 'antigravity_store' | 'gemini_credential' | 'none';
+
+/**
+ * Order: a dedicated Antigravity key (environment, then the encrypted store an
+ * operator fills from the Admin), then the Gemini credential. The Gemini
+ * fallback is real, not cosmetic: this adapter authenticates to the same
+ * Google endpoint with the same key type. It proves only that a key resolves —
+ * not that the key has access to the managed-agent API. Only a live run
+ * proves that.
+ */
+export function resolveAntigravityApiKey(): { apiKey: string; source: AntigravityKeySource } {
+  const dedicated = resolveRuntimeCredential('antigravity');
+  if (dedicated.apiKey) return { apiKey: dedicated.apiKey, source: dedicated.source === 'environment' ? 'antigravity_env' : 'antigravity_store' };
   const { apiKey } = resolveModelApiKey('gemini');
   if (apiKey) return { apiKey, source: 'gemini_credential' };
   return { apiKey: '', source: 'none' };
@@ -94,8 +105,18 @@ export function isAntigravityConfigured(): boolean {
 }
 
 /** True only when the operator has explicitly enabled outward Antigravity execution. */
+/**
+ * Enablement: the ANTIGRAVITY_ENABLED environment variable when set (locked),
+ * otherwise the platform setting a platform_admin controls from the Admin,
+ * otherwise OFF. Read on every call, so a change applies without a restart.
+ */
+export function describeAntigravityEnablement() {
+  const r = resolvePlatformSetting('antigravity.enabled', 'false');
+  return { ...r, enabled: r.value.trim().toLowerCase() === 'true' };
+}
+
 export function isAntigravityEnabled(): boolean {
-  return String(process.env.ANTIGRAVITY_ENABLED || '').trim().toLowerCase() === 'true';
+  return describeAntigravityEnablement().enabled;
 }
 
 export type AntigravityConnectionStatus = 'NOT_CONFIGURED' | 'DISABLED' | 'CONNECTED' | 'FAILED' | 'INVALID_RESPONSE';
@@ -214,7 +235,7 @@ export async function health(timeoutMs = HEALTH_TIMEOUT_MS): Promise<Antigravity
     return { status: 'NOT_CONFIGURED', reachable: false, authenticated: false, agent: null, latencyMs: null, checkedAt, error: 'No Antigravity credential is configured (ANTIGRAVITY_API_KEY or a Gemini credential).' };
   }
   if (!isAntigravityEnabled()) {
-    return { status: 'DISABLED', reachable: false, authenticated: false, agent: null, latencyMs: null, checkedAt, error: 'ANTIGRAVITY_ENABLED is not "true" — outward Antigravity execution is switched off in this deployment.' };
+    return { status: 'DISABLED', reachable: false, authenticated: false, agent: null, latencyMs: null, checkedAt, error: 'Antigravity is not enabled — outward Antigravity execution is switched off (Master Admin → Antigravity).' };
   }
 
   const probe = await call('/interactions/synthos-connectivity-probe-nonexistent', { method: 'GET' }, timeoutMs);
@@ -258,7 +279,7 @@ export async function submitInteraction(params: {
   timeoutMs?: number;
 }): Promise<AntigravitySubmitResult> {
   if (!isAntigravityConfigured()) return { ok: false, remoteJobId: null, error: 'No Antigravity credential is configured.' };
-  if (!isAntigravityEnabled()) return { ok: false, remoteJobId: null, error: 'ANTIGRAVITY_ENABLED is not "true" — outward Antigravity execution is switched off in this deployment.' };
+  if (!isAntigravityEnabled()) return { ok: false, remoteJobId: null, error: 'Antigravity is not enabled — outward Antigravity execution is switched off (Master Admin → Antigravity).' };
   if (!isInstructionWithinBounds(params.instruction)) {
     return { ok: false, remoteJobId: null, error: `Instruction exceeds the ${MAX_INSTRUCTION_BYTES}-byte bound.` };
   }
