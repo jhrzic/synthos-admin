@@ -39,6 +39,8 @@ export const ExecutionReconciliationPanel: React.FC<{ workspaceId: string; taskI
     fetch(`/api/tasks/${encodeURIComponent(taskId)}/execution-reconciliation?workspaceId=${encodeURIComponent(workspaceId)}`)
       .then(async (r) => {
         const j = await r.json().catch(() => null);
+        // A task that exists only on this browser's board has no server record: nothing to reconcile.
+        if (r.status === 404) { setData({ notFound: true }); return; }
         if (!r.ok || !j?.success) { setError(j?.error || `HTTP ${r.status}`); return; }
         setData(j);
       })
@@ -48,6 +50,7 @@ export const ExecutionReconciliationPanel: React.FC<{ workspaceId: string; taskI
 
   if (error) return <div className="text-xs text-[#7E8BB5]" data-testid="execution-reconciliation">Reconciliation record: UNKNOWN ({error})</div>;
   if (!data) return <div className="text-xs text-[#7E8BB5]" data-testid="execution-reconciliation">Loading reconciliation record…</div>;
+  if (data.notFound) return null;
   const g = data.guide;
   const trail: any[] = data.trail || [];
   if (!g) return null;

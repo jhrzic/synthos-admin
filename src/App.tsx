@@ -9,7 +9,7 @@ import {
 import { 
   INITIAL_VAULTS, INITIAL_NOTES, 
   INITIAL_BOT_TASKS, INITIAL_JARVIS_SETTINGS,
-  INITIAL_AGENTS, INITIAL_KANBAN_TASKS, INITIAL_ROUTER_RULES,
+  INITIAL_AGENTS, INITIAL_ROUTER_RULES,
   INITIAL_TELEGRAM_MESSAGES, INITIAL_CRON_JOBS, INITIAL_GUIDE_STEPS,
   INITIAL_INTAKE_ITEMS, INITIAL_IDEAS, INITIAL_SYSTEM_AUDIT_CHECKS,
   GuideStep
@@ -169,7 +169,10 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
     } catch (e) {
       console.warn('Could not restore tasks from localStorage:', e);
     }
-    return INITIAL_KANBAN_TASKS;
+    // No invented tasks: a fresh browser starts with an empty board. (The
+    // mock seed in src/data/mockData.ts showed invented RUNNING tasks as if
+    // they were live work — never synced to the server's tasks table.)
+    return [];
   });
   const [routerRules, setRouterRules] = useState<ModelRouterRule[]>(INITIAL_ROUTER_RULES);
   const [vaults, setVaults] = useState<ObsidianVault[]>(INITIAL_VAULTS);

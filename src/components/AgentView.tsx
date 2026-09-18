@@ -209,16 +209,16 @@ export const AgentView: React.FC<AgentViewProps> = ({
                   {agent.role.toUpperCase()}
                 </span>
                 
-                {/* Interactive Status Selector */}
+                {/* Operator-set status label: not a measured runtime status. */}
                 <select
                   value={editStatus}
                   onChange={(e) => setEditStatus(e.target.value as any)}
                   className="bg-[#05060B] border border-[#1E223D] text-[10px] font-mono font-bold text-[#00D26A] rounded px-2 py-0.5 focus:outline-none focus:border-[#615EFF]"
                 >
-                  <option value="active">● ONLINE / ACTIVE</option>
-                  <option value="busy">● BUSY (IN-TASK)</option>
-                  <option value="idle">○ IDLE</option>
-                  <option value="standby">◌ STANDBY</option>
+                  <option value="active">● ACTIVE (operator label)</option>
+                  <option value="busy">● BUSY (operator label)</option>
+                  <option value="idle">○ IDLE (operator label)</option>
+                  <option value="standby">◌ STANDBY (operator label)</option>
                 </select>
               </div>
 
@@ -499,7 +499,7 @@ export const AgentView: React.FC<AgentViewProps> = ({
           <div className="bg-[#090A14] border border-[#1F233C] rounded-2xl p-6 space-y-4">
             <div className="flex items-center justify-between border-b border-[#1A1D30] pb-3">
               <h3 className="text-base font-bold text-white font-['Space_Grotesk']">
-                Assigned Kanban Tasks ({agentTasks.length})
+                Assigned board tasks — this browser's board, not server records ({agentTasks.length})
               </h3>
               <button
                 onClick={() => setIsAddingTask(!isAddingTask)}

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { ListChecks } from 'lucide-react';
 import { Badge } from '../verification/outcome';
 import { ConfirmButton } from '../registry/LocalRouteControls';
+import { ExecutionReconciliationPanel } from '../registry/ExecutionReconciliationPanel';
 
 // ---------------------------------------------------------------------------
 // QUEUE REVIEW — every queued task (existing task table), whether it could run
@@ -52,6 +53,12 @@ export const QueueReviewPanel: React.FC = () => {
               workspace {t.workspaceId} · created {t.createdAt} · class {t.taskClass ?? 'NOT RECORDED'} · contract {t.outputContract ?? 'NOT RECORDED'} · model {t.assignedModel ?? 'none'}{t.pinnedRoute ? ` (pinned ${t.pinnedRoute.providerId}/${t.pinnedRoute.modelId})` : ''} · autonomy-eligible {t.autonomyEligible ? 'yes' : 'no'} · valid qualification {t.qualificationValid ? 'yes' : 'no'}
             </div>
             {t.blockedBecause.length > 0 && <ul className="list-disc ml-4 text-slate-500" data-testid="queue-task-blockers">{t.blockedBecause.map((b: string, i: number) => <li key={i}>{b}</li>)}</ul>}
+            {/* Ambiguous execution: the audited reconciliation action and its evidence trail. */}
+            {t.state === 'RECONCILING_UNKNOWN_EXECUTION' && (
+              <div className="mt-2 font-sans" data-testid="queue-task-reconciliation">
+                <ExecutionReconciliationPanel workspaceId={t.workspaceId} taskId={t.taskId} />
+              </div>
+            )}
             <div className="flex flex-wrap gap-2 items-center mt-1">
               <input className="bg-[#080A16] border border-[#1E223D] rounded px-2 py-1 text-[10px] text-white" placeholder="reason (required)" value={reason[t.taskId] || ''} onChange={(e) => setReason({ ...reason, [t.taskId]: e.target.value })} aria-label={`reason for ${t.taskId}`} />
               {t.actions.map((a: any) => (
