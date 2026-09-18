@@ -7,6 +7,7 @@ import {
   TrendingUp, Users, ArrowUpRight, Play, Server, Layers,
   Lock, Eye, FileText, Check, Mic
 } from 'lucide-react';
+import { useModelRegistry, modelKey, lastActiveWorkspaceId } from './registry/useModelRegistry';
 
 interface MasterOperationsViewProps {
   agents: Record<string, AgentInfo>;
@@ -41,7 +42,8 @@ export const MasterOperationsView: React.FC<MasterOperationsViewProps> = ({
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Chief of Staff Policy State
-  const [primaryReasoningModel, setPrimaryReasoningModel] = useState('deepseek/deepseek-r1:free');
+  const [primaryReasoningModel, setPrimaryReasoningModel] = useState('');
+  const registryForOps = useModelRegistry(lastActiveWorkspaceId());
   const [standupCadence, setStandupCadence] = useState('hourly');
 
   const activeAgentsList = Object.values(agents);
@@ -146,7 +148,7 @@ export const MasterOperationsView: React.FC<MasterOperationsViewProps> = ({
         sectionSubtitle="3-Step orchestration setup. Configure frontier reasoning engine, standup cadence, and token spend caps."
         statusBadge={{
           isConnected: true,
-          connectedLabel: `Ready: ${primaryReasoningModel.split('/')[1] || 'DeepSeek R1'}`,
+          connectedLabel: primaryReasoningModel ? `Selected: ${primaryReasoningModel}` : 'No model selected',
           pendingLabel: "Standby",
         }}
         inputConfig={{
@@ -154,11 +156,11 @@ export const MasterOperationsView: React.FC<MasterOperationsViewProps> = ({
           value: primaryReasoningModel,
           placeholder: "Select reasoning model",
           type: "select",
+          // From the model registry — nothing typed here. Models that cannot run
+          // are listed with the registry's reason.
           options: [
-            { label: "DeepSeek R1 (:free) — Frontier Mathematical Reasoning", value: "deepseek/deepseek-r1:free" },
-            { label: "Nous Hermes 3 405B — Autonomous Fleet Commander", value: "nousresearch/hermes-3-llama-3.1-405b" },
-            { label: "Claude 3.7 Sonnet / Thinking — Complex Systems Architect", value: "anthropic/claude-3.7-sonnet" },
-            { label: "Qwen 2.5 Coder 32B (:free) — Rapid Code Arbitrage", value: "qwen/qwen-2.5-coder-32b-instruct:free" },
+            { label: "Select a registry model…", value: "" },
+            ...registryForOps.models.map((m) => ({ label: `${m.displayName} — ${m.executable ? m.availability : `${m.availability}: ${m.blockers[0]?.reason ?? ''}`}`, value: modelKey(m) })),
           ],
           helperText: "Autonomous Orchestrator routes subtasks and monitors DAG execution state using this reasoning model.",
           onChange: (val) => setPrimaryReasoningModel(val),

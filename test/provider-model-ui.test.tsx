@@ -1,171 +1,190 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, waitFor, cleanup, fireEvent } from '@testing-library/react';
 import React from 'react';
+import fs from 'node:fs';
+import path from 'node:path';
 
 import { ProviderModelCatalog } from '../src/components/ProviderModelCatalog';
+import { RegistryModelSelect } from '../src/components/registry/RegistryModelSelect';
+import { KanbanView } from '../src/components/KanbanView';
+import { INITIAL_AGENTS } from '../src/data/mockData';
 
 // ---------------------------------------------------------------------------
-// THE UI RENDERS MANY MODELS PER PROVIDER, AND INFERS NOTHING.
+// THE REGISTRY-DRIVEN MODEL UI.
 //
-// The old surface was one card per provider with the version in its title, so
-// a provider could only ever show one model and "Claude" was permanently
-// "Claude 3.7 Sonnet". These tests assert the rendered DOM: several models
-// under one provider, the routed default marked distinctly, and availability
-// taken from the payload rather than inferred from the provider existing.
+// The Admin catalog and every selector render GET /api/registry/models — the
+// persisted local registry. These tests feed it SYNTHETIC providers and models
+// (no production model name anywhere in this file's fixtures) and assert the
+// rendered DOM: many models per provider, availability and its real reason per
+// model, unavailable models disabled rather than hidden, and a failed read
+// reported as a failure. The components hold no model list of their own.
 // ---------------------------------------------------------------------------
 
-const model = (over: Record<string, unknown>) => ({
-  displayName: 'x', family: 'Gemini', capabilityTags: ['text'], modalities: ['text'],
-  aliases: [], source: 'DOCUMENTED_CATALOG', isProviderDefault: false,
-  lifecycle: 'DISCOVERED', execution: 'SUPPORTED', routing: 'ROUTABLE',
-  verification: 'CONFIGURED', routesToRouterProvider: true, ...over,
+const cap = (id: string) => ({ id, supported: true, verification: 'ADMIN_ASSERTED', source: 'fixture' });
+const model = (providerId: string, modelId: string, over: Record<string, unknown> = {}) => ({
+  providerId, providerDisplayName: providerId === 'synthetic-alpha' ? 'Synthetic Alpha' : 'Synthetic Beta',
+  modelId, displayName: `${modelId} display`, aliases: [], lifecycle: 'ACTIVE',
+  limits: { contextTokens: null, outputTokens: null }, modalities: { input: ['text'], output: ['text'] },
+  capabilities: [cap('text.input'), cap('text.output')], outputContracts: ['NARRATIVE', 'LITERAL', 'JSON_OBJECT'],
+  protocol: 'openai.responses', source: 'SIGNED_IMPORT', manifestVersion: 'fx-1', adminState: 'ENABLED',
+  availability: 'AVAILABLE', executable: true, blockers: [],
+  pricing: { state: 'CURRENT', current: { rates: { input: 1, output: 2, cachedInput: null }, unit: 'tokens', currency: 'USD', staleAfter: '2099-01-01T00:00:00Z', source: 'fixture' }, versionKey: 'registry:x' },
+  paid: true, ...over,
+});
+const provider = (providerId: string, displayName: string, over: Record<string, unknown> = {}) => ({
+  providerId, displayName, protocol: 'openai.responses', adapterDispatch: 'MODEL_CALL', manifestVersion: 'fx-1', source: 'SIGNED_IMPORT',
+  approvedHosts: ['api.synthetic.example'], endpoint: { ok: true, host: 'api.synthetic.example', overridden: false, reason: null },
+  credential: { ready: true, source: 'environment' }, billing: 'METERED', modelCount: 0, executableCount: 0, health: 'UNKNOWN', ...over,
 });
 
 const PAYLOAD = {
-  success: true,
+  success: true, workspaceId: 'ws-test', source: 'LOCAL_REGISTRY', providerCallsMade: 0,
+  states: ['AVAILABLE', 'UNQUALIFIED', 'UNSUPPORTED_BY_ADAPTER', 'PRICING_REQUIRED'],
   providers: [
-    {
-      providerId: 'google', displayName: 'Google', family: 'Gemini',
-      execution: 'SUPPORTED', routerProvider: 'GEMINI',
-      credentialEnvVar: 'GEMINI_API_KEY', credentialPresent: true,
-      hasDiscoveryEndpoint: true, adapterNote: '',
-      providerState: 'CREDENTIAL_PRESENT', providerReason: 'configured, never attempted',
-      lastVerifiedAt: null, acceptsUncataloguedIds: false,
-      defaultModelId: 'gemini-3.1-flash-lite',
-      discoveredCount: 3, executableCount: 3, routableCount: 2,
-      refreshOutcome: 'LIVE', refreshError: null, stale: false,
-      models: [
-        model({ modelId: 'gemini-3.1-flash-lite', isProviderDefault: true }),
-        model({ modelId: 'gemini-3.7-flash' }),
-        model({ modelId: 'gemini-3.1-pro-preview', routing: 'NOT_ROUTABLE', verification: 'NOT_CONFIGURED' }),
-      ],
-    },
-    {
-      // THE CORRECTION UNDER TEST: known models, zero executable.
-      providerId: 'anthropic', displayName: 'Anthropic', family: 'Claude',
-      execution: 'EXECUTION_UNAVAILABLE', routerProvider: null,
-      credentialEnvVar: 'ANTHROPIC_API_KEY', credentialPresent: false,
-      hasDiscoveryEndpoint: true,
-      adapterNote: 'No Anthropic execution adapter exists in this build, so no Claude model can be dispatched.',
-      providerState: 'NO_CREDENTIAL', providerReason: 'no adapter',
-      lastVerifiedAt: null, acceptsUncataloguedIds: false,
-      defaultModelId: null,
-      discoveredCount: 2, executableCount: 0, routableCount: 0,
-      refreshOutcome: 'DOCUMENTED_NO_CREDENTIAL', refreshError: null, stale: false,
-      models: [
-        model({ modelId: 'claude-opus-5', family: 'Claude', execution: 'EXECUTION_UNAVAILABLE', routing: 'NOT_ROUTABLE', verification: 'UNKNOWN' }),
-        model({ modelId: 'claude-sonnet-5', family: 'Claude', execution: 'EXECUTION_UNAVAILABLE', routing: 'NOT_ROUTABLE', verification: 'UNKNOWN' }),
-      ],
-    },
+    provider('synthetic-alpha', 'Synthetic Alpha', { modelCount: 3, executableCount: 1 }),
+    provider('synthetic-beta', 'Synthetic Beta', { protocol: 'anthropic.messages', adapterDispatch: 'NONE', modelCount: 1, executableCount: 0 }),
   ],
+  models: [
+    model('synthetic-alpha', 'syn-one'),
+    model('synthetic-alpha', 'syn-two', { availability: 'UNQUALIFIED', executable: false, adminState: 'INSTALLED', blockers: [{ state: 'UNQUALIFIED', reason: 'not yet qualified by an operator' }] }),
+    model('synthetic-alpha', 'syn-three', { availability: 'PRICING_REQUIRED', executable: false, blockers: [{ state: 'PRICING_REQUIRED', reason: 'the manifest carries no pricing' }], pricing: { state: 'MISSING', current: null, versionKey: null },
+      capabilities: [cap('text.output'), cap('x.synthetic-alpha.brand_new_feature')] }),
+    model('synthetic-beta', 'syn-four', { protocol: 'anthropic.messages', availability: 'UNSUPPORTED_BY_ADAPTER', executable: false, blockers: [{ state: 'UNSUPPORTED_BY_ADAPTER', reason: 'this build has no dispatch adapter for the anthropic.messages protocol' }] }),
+  ],
+  workspacePolicy: { mode: 'INHERIT', allowed: [], denied: [] },
+  manualDiscoveryEnabled: false,
 };
 
+let calls: string[] = [];
 beforeEach(() => {
-  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => PAYLOAD })) as any);
+  calls = [];
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+    calls.push(String(url));
+    if (String(url).startsWith('/api/registry/admin')) return { ok: false, status: 403, json: async () => ({ success: false }) };
+    return { ok: true, status: 200, json: async () => PAYLOAD };
+  }) as any);
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-describe('one provider renders many models', () => {
-  it('shows all three Gemini model ids, not just the default', async () => {
+describe('Admin model registry: providers → many models, from the registry only', () => {
+  it('renders every registered model under its provider, including ones that cannot run', async () => {
     render(<ProviderModelCatalog workspaceId="ws-test" />);
-    await waitFor(() => expect(screen.getByText('gemini-3.1-flash-lite')).toBeTruthy());
-    // The point: every model id appears, addressable and distinct.
-    expect(screen.getByText('gemini-3.7-flash')).toBeTruthy();
-    expect(screen.getByText('gemini-3.1-pro-preview')).toBeTruthy();
-    expect(document.body.textContent).toContain('Models discovered: 3');
+    await waitFor(() => expect(screen.getByText('syn-one display')).toBeTruthy());
+    for (const id of ['syn-two', 'syn-three', 'syn-four']) expect(screen.getByText(`${id} display`)).toBeTruthy();
+    expect(screen.getAllByTestId('registry-model-row')).toHaveLength(4);
+    // Only the registry endpoints were read — no provider, no catalog poll.
+    expect(calls.every((u) => u.startsWith('/api/registry/'))).toBe(true);
   });
 
-  it('marks the routed default distinctly from the others', async () => {
+  it('shows each model\'s own availability and the registry\'s reason — never inferred from the provider', async () => {
     render(<ProviderModelCatalog workspaceId="ws-test" />);
-    await waitFor(() => expect(screen.getByText('gemini-3.1-flash-lite')).toBeTruthy());
-    // Exactly one default badge — a default is a selection, not the only model.
-    expect(screen.getAllByText('ROUTED DEFAULT')).toHaveLength(1);
-  });
-
-  it('renders the provider name without a model version in it', async () => {
-    render(<ProviderModelCatalog workspaceId="ws-test" />);
-    await waitFor(() => expect(screen.getByText('Google')).toBeTruthy());
-    // The conflated labels are gone: no provider heading carries a version.
+    await waitFor(() => expect(screen.getByText('syn-two display')).toBeTruthy());
     const text = document.body.textContent || '';
-    expect(text).not.toContain('Claude 3.7 Sonnet');
-    expect(text).not.toContain('Gemini 3.7 / 3.6 Flash');
+    expect(text).toContain('AVAILABLE');
+    expect(text).toContain('UNQUALIFIED: not yet qualified by an operator');
+    expect(text).toContain('PRICING_REQUIRED: the manifest carries no pricing');
+    expect(text).toContain('UNSUPPORTED_BY_ADAPTER: this build has no dispatch adapter for the anthropic.messages protocol');
+    expect(text).toContain('1 of 4 registered models can execute now');
   });
-});
 
-describe('availability is taken from evidence, never inferred', () => {
-  it('a configured model is not shown as verified', async () => {
+  it('a namespaced, not-yet-normalized capability is shown, not dropped', async () => {
     render(<ProviderModelCatalog workspaceId="ws-test" />);
-    await waitFor(() => expect(screen.getByText('gemini-3.1-flash-lite')).toBeTruthy());
-    const text = document.body.textContent || '';
-    // CONFIGURED means a key resolves — not that a call has ever worked.
-    expect(text).toContain('CONFIGURED');
-    expect(text).not.toContain('LIVE VERIFIED');
-    // And a model nothing can call reads UNVERIFIED, not "failed".
-    expect(text).toContain('UNVERIFIED');
+    await waitFor(() => expect(screen.getAllByText('x.synthetic-alpha.brand_new_feature').length).toBeGreaterThan(0));
   });
 
-  it('per-model availability differs within the same provider', async () => {
+  it('non-admins see the catalog but not the qualify / enable actions', async () => {
     render(<ProviderModelCatalog workspaceId="ws-test" />);
-    await waitFor(() => expect(screen.getByText('gemini-3.1-pro-preview')).toBeTruthy());
-    // If availability were inferred from the provider, every model under one
-    // provider would read identically. They must not.
-    expect(screen.getAllByText('CONFIGURED').length).toBeGreaterThanOrEqual(2);
-    expect(screen.getByText('NOT CONFIGURED')).toBeTruthy();
-    // Routing differs per model within one provider too.
-    expect(screen.getAllByText('ROUTABLE').length).toBeGreaterThanOrEqual(2);
-    expect(screen.getAllByText('NOT ROUTABLE').length).toBeGreaterThanOrEqual(1);
+    await waitFor(() => expect(screen.getByText('syn-one display')).toBeTruthy());
+    await waitFor(() => expect(document.body.textContent).toContain('platform-admin actions'));
+    expect(screen.queryAllByText('Qualify')).toHaveLength(0);
   });
 
-  it('a provider with no adapter still lists its known models, marked unexecutable', async () => {
-    // THE CORRECTION. Showing zero Claude models because execution is
-    // unavailable was its own untruth; the fleet is knowable either way.
-    render(<ProviderModelCatalog workspaceId="ws-test" />);
-    await waitFor(() => expect(screen.getByText('Anthropic')).toBeTruthy());
-
-    // The models are present and addressable...
-    expect(screen.getByText('claude-opus-5')).toBeTruthy();
-    expect(screen.getByText('claude-sonnet-5')).toBeTruthy();
-
-    const text = document.body.textContent || '';
-    // ...and plainly not executable, not routable, not verified.
-    expect(text).toContain('ADAPTER NOT CONFIGURED');
-    expect(text).toContain('NO ADAPTER');
-    expect(text).toContain('NOT ROUTABLE');
-    expect(text).not.toContain('No catalogued models');
-    // The stale version that started this is still absent.
-    expect(text).not.toMatch(/claude-3[.-]7/i);
-  });
-
-  it('shows discovered and executable counts side by side', async () => {
-    render(<ProviderModelCatalog workspaceId="ws-test" />);
-    await waitFor(() => expect(screen.getByText('Anthropic')).toBeTruthy());
-    const text = (document.body.textContent || '').replace(/\s+/g, ' ');
-    // Either number alone would mislead. Both, together.
-    expect(text).toContain('Models discovered: 2');
-    expect(text).toContain('Executable: 0');
-    expect(text).toContain('Models discovered: 3');
-    expect(text).toContain('Executable: 3');
-  });
-});
-
-describe('the catalog surface does not claim a count before it has one', () => {
-  it('shows an em-dash until the fetch resolves', async () => {
-    let release: (v: any) => void = () => {};
-    vi.stubGlobal('fetch', vi.fn(() => new Promise((r) => { release = r; })) as any);
-    render(<ProviderModelCatalog workspaceId="ws-test" />);
-    // Before resolution it must not claim "0 provider(s)" — that would read as
-    // "none exist" rather than "not loaded".
-    expect(document.body.textContent).toContain('—');
-    expect(document.body.textContent).not.toContain('0 provider(s)');
-    release({ ok: true, status: 200, json: async () => PAYLOAD });
-    await waitFor(() => expect(document.body.textContent).toContain('2 provider(s)'));
-  });
-
-  it('reports a failed read as a failure, not as an empty catalog', async () => {
+  it('a failed registry read is reported as a failure, not as an empty catalog', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 500, json: async () => ({ success: false, error: 'boom' }) })) as any);
     render(<ProviderModelCatalog workspaceId="ws-test" />);
-    await waitFor(() => expect(document.body.textContent).toContain('Could not read the model catalog'));
-    expect(document.body.textContent).toContain('boom');
+    await waitFor(() => expect(document.body.textContent).toContain('Registry unavailable: boom'));
+  });
+});
+
+describe('the shared selector', () => {
+  it('lists every model grouped by provider; unavailable ones are disabled with their reason', async () => {
+    const onChange = vi.fn();
+    render(<RegistryModelSelect workspaceId="ws-test" value="" onChange={onChange} />);
+    await waitFor(() => expect(screen.getByText(/syn-one display/)).toBeTruthy());
+    const options = Array.from(document.querySelectorAll('option')).filter((o) => (o as HTMLOptionElement).value);
+    const byValue = Object.fromEntries(options.map((o) => [(o as HTMLOptionElement).value, o as HTMLOptionElement]));
+    expect(Object.keys(byValue).sort()).toEqual(['synthetic-alpha/syn-one', 'synthetic-alpha/syn-three', 'synthetic-alpha/syn-two', 'synthetic-beta/syn-four']);
+    expect(byValue['synthetic-alpha/syn-one'].disabled).toBe(false);
+    expect(byValue['synthetic-alpha/syn-two'].disabled).toBe(true);
+    expect(byValue['synthetic-alpha/syn-two'].textContent).toContain('not yet qualified');
+    expect(byValue['synthetic-beta/syn-four'].disabled).toBe(true);
+    expect(Array.from(document.querySelectorAll('optgroup')).map((g) => g.getAttribute('label'))).toEqual(['Synthetic Alpha (1/3 executable)', 'Synthetic Beta (0/1 executable)']);
+    fireEvent.change(document.querySelector('select')!, { target: { value: 'synthetic-alpha/syn-one' } });
+    expect(onChange).toHaveBeenCalledWith('synthetic-alpha/syn-one', expect.objectContaining({ modelId: 'syn-one' }));
+  });
+
+  it('opening the selector reads only the local registry', async () => {
+    render(<RegistryModelSelect workspaceId="ws-test" value="" onChange={() => {}} showFilters />);
+    await waitFor(() => expect(screen.getByText(/syn-one display/)).toBeTruthy());
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatch(/^\/api\/registry\/models\?workspaceId=ws-test/);
+  });
+
+  it('filters by availability without a hardcoded list', async () => {
+    render(<RegistryModelSelect workspaceId="ws-test" value="" onChange={() => {}} showFilters />);
+    await waitFor(() => expect(screen.getByText(/syn-one display/)).toBeTruthy());
+    fireEvent.change(screen.getByLabelText('Availability'), { target: { value: 'EXECUTABLE' } });
+    const values = Array.from(document.querySelectorAll('select#undefined, select')).pop()!;
+    const opts = Array.from((values as HTMLSelectElement).querySelectorAll('option')).map((o) => (o as HTMLOptionElement).value).filter(Boolean);
+    expect(opts).toEqual(['synthetic-alpha/syn-one']);
+  });
+});
+
+describe('no production model name lives in a reusable model UI component', () => {
+  const PRODUCTION = /\b(claude|gpt-|gemini-|deepseek-|o[1-9]-|sonnet|opus|haiku|llama|mistral|grok)/i;
+  for (const f of [
+    'src/components/registry/RegistryModelSelect.tsx',
+    'src/components/registry/useModelRegistry.ts',
+    'src/components/registry/EvaluationRequestPanel.tsx',
+    'src/components/ProviderModelCatalog.tsx',
+  ]) {
+    it(f, () => {
+      const code = fs.readFileSync(path.join(process.cwd(), f), 'utf8').split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+      expect(code).not.toMatch(PRODUCTION);
+    });
+  }
+
+  it('the task-creation, task-detail and graph-node selectors are the registry selector', () => {
+    const kanban = fs.readFileSync(path.join(process.cwd(), 'src/components/KanbanView.tsx'), 'utf8');
+    expect(kanban).toContain('<RegistryModelSelect');
+    expect(kanban).not.toMatch(/<option value="[^"]*">[^<]*(Claude|ChatGPT|DeepSeek|Gemini|Perplexity Sonar|Nous Hermes)/);
+    const graph = fs.readFileSync(path.join(process.cwd(), 'src/components/GraphBuilderView.tsx'), 'utf8');
+    expect(graph).toContain('<RegistryModelSelect');
+    expect(graph).not.toMatch(/<option value="[^"]*">[^<]*(Claude|DeepSeek|Gemini|OpenRouter|Llama)/);
+    const data = fs.readFileSync(path.join(process.cwd(), 'src/data/mockData.ts'), 'utf8');
+    expect(data).not.toContain('export const INITIAL_MODELS');
+  });
+});
+
+
+describe('the task board makes no provider call to open, refresh or show a DONE task', () => {
+  it('rendering and re-rendering the board (a DONE task included) only reads the local registry', async () => {
+    const noop = () => {};
+    const task: any = {
+      id: 'task-ui-1', title: 'A finished task', description: 'd', column: 'done', assignedAgent: 'scribe', assignedModel: 'synthetic-alpha/syn-one',
+      priority: 'medium', tags: [], obsidianWikilinks: [], subtasks: [], dependencies: [], createdAt: 'now', updatedAt: 'now',
+      executedModel: { providerId: 'synthetic-alpha', modelId: 'syn-one', reportedModel: 'syn-one' },
+      verificationOutcome: { taskStatus: 'DONE', receiptOutcome: 'COMPLETED', receiptId: 'rcpt-1' },
+    };
+    const props: any = { tasks: [task], agents: INITIAL_AGENTS, models: {}, onAddTask: noop, onUpdateTask: noop, onDeleteTask: noop, onExecuteTask: async () => {}, onPushTaskToObsidian: noop, onSelectAgent: noop, activeWorkspaceId: 'ws-test' };
+    const { rerender } = render(<KanbanView {...props} />);
+    await new Promise((r) => setTimeout(r, 30));
+    rerender(<KanbanView {...props} tasks={[{ ...task }]} />);
+    await new Promise((r) => setTimeout(r, 30));
+    // The card states what actually ran, from the receipt.
+    expect(document.body.textContent).toContain('Ran: synthetic-alpha/syn-one');
+    // No generation, execution, evaluation or provider endpoint was touched.
+    expect(calls.filter((u) => !u.startsWith('/api/registry/'))).toEqual([]);
   });
 });

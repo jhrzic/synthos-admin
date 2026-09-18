@@ -18,6 +18,8 @@ import {
   FileCode, Terminal, X, Check, ArrowUpRight
 } from 'lucide-react';
 import { VerificationOutcomePanel, TaskStatusBadge } from './verification/outcome';
+import { RegistryModelSelect } from './registry/RegistryModelSelect';
+import { EvaluationRequestPanel } from './registry/EvaluationRequestPanel';
 
 interface KanbanViewProps {
   tasks: KanbanTask[];
@@ -30,6 +32,8 @@ interface KanbanViewProps {
   onPushTaskToObsidian: (task: KanbanTask) => void;
   onSelectAgent: (agentRole: AgentRole) => void;
   onOpenJulianAudit?: () => void;
+  /** Workspace whose model registry view (permissions included) the selectors use. */
+  activeWorkspaceId?: string;
 }
 
 export const KANBAN_COLUMNS: Array<{ 
@@ -117,6 +121,7 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
   onPushTaskToObsidian,
   onSelectAgent,
   onOpenJulianAudit,
+  activeWorkspaceId,
 }) => {
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string>('all');
   const [selectedAgentFilter, setSelectedAgentFilter] = useState<string>('all');
@@ -153,7 +158,8 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
   const [newDescription, setNewDescription] = useState('');
   const [newColumn, setNewColumn] = useState<KanbanColumnId>('triage');
   const [newAgent, setNewAgent] = useState<AgentRole>('scout');
-  const [newModel, setNewModel] = useState<string>('perplexity');
+  // A task's model is chosen from the registry — never defaulted to a name.
+  const [newModel, setNewModel] = useState<string>('');
   const [newPriority, setNewPriority] = useState<KanbanTask['priority']>('medium');
   const [newTags, setNewTags] = useState('startup-curation, deep-research');
   const [newWikilinks, setNewWikilinks] = useState('Startup-Theses/Agentic-Browser-OS');
@@ -218,7 +224,7 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
           description: parentTask.description,
           column: (parentTask.column as KanbanColumnId) || 'triage',
           assignedAgent: parentTask.assignedAgent || 'orchestrator',
-          assignedModel: parentTask.assignedModel || 'nous-hermes-3',
+          assignedModel: parentTask.assignedModel || '',
           priority: parentTask.priority || 'critical',
           tags: parentTask.tags || ['triage-master', 'orchestrator-decomposed'],
           obsidianWikilinks: parentTask.obsidianWikilinks || [`Startup-Theses/${parentTask.title.replace(/\s+/g, '-')}`],
@@ -274,6 +280,7 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
   const handleCreateSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTitle.trim()) return;
+    if (!newModel) return; // the registry selector below is required
 
     const tags = newTags.split(',').map(t => t.trim()).filter(Boolean);
     const wikilinks = newWikilinks.split(',').map(w => w.trim()).filter(Boolean);
@@ -356,6 +363,11 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
   };
 
   const handleRunTask = async (taskId: string) => {
+    const t = tasks.find((x) => x.id === taskId);
+    if (t && !t.assignedModel) {
+      onUpdateTask(taskId, { outputLog: '[Execution]: no model selected. Choose one from the model registry in the task detail; nothing was run.' });
+      return;
+    }
     setExecutingTaskId(taskId);
     try {
       await onExecuteTask(taskId);
@@ -1041,6 +1053,15 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
                                 </p>
                               </div>
 
+                              {/* What the task runs on — and, once run, what actually executed (from the receipt). */}
+                              <div className="text-[10px] font-mono text-[#8E94B8] truncate" data-testid="task-model">
+                                {task.executedModel?.modelId
+                                  ? `Ran: ${task.executedModel.providerId}/${task.executedModel.modelId}`
+                                  : task.assignedModel
+                                    ? `Model: ${models[task.assignedModel]?.name ?? task.assignedModel}`
+                                    : 'Model: not selected'}
+                              </div>
+
                               {/* The canonical outcome, when it is not plain DONE — a card in
                                   BLOCKED must say whether it was INCOMPLETE or broke its contract. */}
                               {task.verificationOutcome && task.verificationOutcome.taskStatus !== 'DONE' && (
@@ -1310,6 +1331,22 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
             <div className="p-6 overflow-y-auto space-y-4 font-mono text-xs max-h-[60vh]">
               {detailTab === 'overview' && (
                 <div className="space-y-4">
+                  <div className="space-y-2">
+                    <RegistryModelSelect
+                      label="Model (from the model registry)"
+                      workspaceId={activeWorkspaceId}
+                      value={selectedTaskForDetail.assignedModel || ''}
+                      onChange={(v) => { onUpdateTask(selectedTaskForDetail.id, { assignedModel: v }); setSelectedTaskForDetail({ ...selectedTaskForDetail, assignedModel: v }); }}
+                    />
+                    {selectedTaskForDetail.executedModel && (
+                      <div className="text-[10px] font-mono text-[#8E94B8]" data-testid="executed-model">
+                        Executed (from the signed receipt): {selectedTaskForDetail.executedModel.providerId ?? 'UNKNOWN'}/{selectedTaskForDetail.executedModel.modelId ?? 'UNKNOWN'} · provider reported {selectedTaskForDetail.executedModel.reportedModel ?? 'UNKNOWN'}
+                      </div>
+                    )}
+                  </div>
+                  {selectedTaskForDetail.verificationOutcome?.taskStatus === 'DONE' && (
+                    <EvaluationRequestPanel workspaceId={activeWorkspaceId} taskId={selectedTaskForDetail.id} />
+                  )}
                   {selectedTaskForDetail.verificationOutcome && (
                     <div>
                       <label className="text-[#8E94B8] block mb-1 uppercase text-[10px]">Aegis Verification Outcome</label>
@@ -1596,13 +1633,26 @@ ${(selectedTaskForDetail.obsidianWikilinks || []).map(w => `- [[${w}]]`).join('\
                     onChange={(e) => setNewAgent(e.target.value as AgentRole)}
                     className="w-full bg-[#05060C] border border-[#1E223D] rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-[#615EFF]"
                   >
-                    <option value="scout">Scout (Perplexity Sonar)</option>
-                    <option value="scribe">Scribe (Claude 3.7)</option>
-                    <option value="reach">Reach (ChatGPT o3)</option>
-                    <option value="dev">Dev (Claude Code)</option>
-                    <option value="analytics">Analytics (DeepSeek R1)</option>
-                    <option value="orchestrator">Orchestrator (Nous Hermes)</option>
+                    {/* Agents are roles. The model is chosen separately, from the registry. */}
+                    <option value="scout">Scout</option>
+                    <option value="scribe">Scribe</option>
+                    <option value="reach">Reach</option>
+                    <option value="dev">Dev</option>
+                    <option value="analytics">Analytics</option>
+                    <option value="orchestrator">Orchestrator</option>
                   </select>
+                </div>
+
+                <div className="col-span-2">
+                  <RegistryModelSelect
+                    id="new-task-model"
+                    label="Model (from the model registry)"
+                    workspaceId={activeWorkspaceId}
+                    value={newModel}
+                    onChange={(v) => setNewModel(v)}
+                    showFilters
+                  />
+                  {!newModel && <div className="text-[10px] text-[#8E94B8] mt-1">Select a model. Unavailable models are listed with the reason they cannot run.</div>}
                 </div>
 
                 <div>

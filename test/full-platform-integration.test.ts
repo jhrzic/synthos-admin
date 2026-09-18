@@ -75,7 +75,7 @@ describe('Full platform integration: graph -> execution -> receipt -> Vault -> M
   const graphId = `graph-integ-${Date.now()}`;
   const runId = `run-integ-${Date.now()}`;
   const taskId = `task-integ-${Date.now()}`;
-  const agentNode = { id: 'n1', type: 'agent', label: 'Diligence Node', agentRole: 'dev', description: 'Real integration test node' };
+  const agentNode = { id: 'n1', type: 'agent', label: 'Diligence Node', agentRole: 'dev', description: 'Real integration test node', assignedModel: 'gemini-3.6-flash' };
   const triggerNode = { id: 'n0', type: 'trigger', label: 'Trigger' };
   const content = `# Full Integration Thesis\n\nReal end-to-end platform chain proof. Marker: ${UNIQUE_MARKER}. Source: https://example.com/evidence. This document is structurally complete with a clear thesis, evidence, and a conclusion.`;
 

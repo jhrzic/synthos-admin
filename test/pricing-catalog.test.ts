@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -29,6 +29,9 @@ import { ensureUsageTable, listUsageForKey, spentSince, periodStarts } from '../
 import { generateViaOpenAI } from '../lib/fabric/model-openai';
 import { resolveDefaultOpenAiModel } from '../lib/model-router';
 import { getSpendStatus } from '../lib/spend/status';
+import { registerModelViaAdmin, qualifyModel, enableModel } from '../lib/registry';
+import { applyCatalogPricesToRegistry } from '../lib/registry/catalog-bridge';
+import { registerFixtureModel } from './helpers/spend';
 
 // ---------------------------------------------------------------- fixtures
 const openaiDoc = (terraIn = '$2.00', terraOut = '$8.00', extraRow = true) => `# Pricing
@@ -187,6 +190,13 @@ beforeEach(async () => {
   try { getDatabase().exec('DELETE FROM platform_settings'); } catch { /* lazily created */ }
   try { getDatabase().exec('DELETE FROM model_prices; DELETE FROM model_price_history; DELETE FROM pricing_sources;'); } catch { /* lazily created */ }
   await refreshPricingCatalog('TEST', { ...fetcher(standardDocs()), antigravityAgentId: 'fx-agent' });
+  // The scraped catalog is reference data; execution is priced from the model
+  // registry. Register the fixture models there (test DB only) with exactly the
+  // catalog's prices, qualified and enabled, the way an operator would.
+  for (const [prov, id] of [['openai', 'fx-flat'], ['openai', 'fx-terra'], ['antigravity', 'fx-agent']] as const) {
+    const rec = getCatalogPrice(prov, id)!.record;
+    registerFixtureModel(prov, id, { input: rec.windows[0].rates.input, output: rec.windows[0].rates.output, cachedInput: rec.windows[0].rates.cachedInput ?? null }, rec.longContext);
+  }
 });
 
 // ======================================================================
@@ -298,32 +308,52 @@ describe('REFRESH — automatic, versioned, zero inference', () => {
 });
 
 // ======================================================================
-describe('SPEND GUARD ON CATALOG PRICES', () => {
-  it('an unpriced model is blocked: PRICE UNKNOWN — EXECUTION BLOCKED', async () => {
+describe('SPEND GUARD ON REGISTRY PRICES', () => {
+  it('an unregistered model, and a registered but unpriced one, are blocked before anything is sent', async () => {
     openPolicy();
     const r = await call('fx-unpriced');
-    expect(r.lastProviderError).toMatch(/PRICE_UNKNOWN/);
-    expect(r.lastProviderError).toMatch(/PRICE UNKNOWN — EXECUTION BLOCKED/);
+    expect(r.lastProviderError).toMatch(/MODEL_NOT_REGISTERED/);
+    const reg = registerModelViaAdmin('openai', {
+      modelId: 'fx-noprice', aliases: [], displayName: 'fx-noprice', lifecycle: 'ACTIVE', releaseDate: null, deprecationDate: null, shutdownDate: null,
+      limits: { contextTokens: null, outputTokens: null }, modalities: { input: ['text'], output: ['text'] },
+      capabilities: [{ id: 'text.output', supported: true, source: 't', verification: 'ADMIN_ASSERTED', effectiveDate: null }],
+      supportedParameters: [], outputContracts: ['NARRATIVE'], pricing: [],
+      adapterCompatibility: { protocol: 'openai.responses', minAdapterVersion: '1.0.0' }, restrictions: { regions: [], compliance: [] },
+    }, 'test');
+    expect(reg.ok).toBe(true);
+    const r2 = await call('fx-noprice');
+    expect(r2.lastProviderError).toMatch(/MODEL_PRICING_REQUIRED/);
     expect(calls).toBe(0);
   });
 
-  it('a stale price is blocked (PRICE_STALE), even though last-known prices are kept', async () => {
+  it('a stale price is blocked (PRICE_STALE) once its staleAfter passes — the model stays registered', async () => {
     openPolicy();
-    getDatabase().prepare("UPDATE pricing_sources SET last_success_at = ? WHERE source_id = 'openai'").run(new Date(Date.now() - 100 * 3_600_000).toISOString());
-    const r = await call('fx-flat');
-    expect(r.lastProviderError).toMatch(/PRICE_STALE/);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 31 * 86_400_000); // fixture prices go stale after 30 days
+      const r = await call('fx-flat');
+      expect(r.lastProviderError).toMatch(/PRICE_STALE/);
+    } finally {
+      vi.useRealTimers();
+    }
     expect(calls).toBe(0);
   });
 
-  it('a price increase above policy blocks the SELECTED model — it is not swapped for another', async () => {
+  it('a price increase un-qualifies the SELECTED model; after re-qualification the ceiling blocks it — never swapped', async () => {
     openPolicy({ task: { maxEstimatedUsd: 0.01, maxInputChars: 60_000, maxOutputTokens: 1000, maxTier: 'PREMIUM' } });
     const selectedBefore = resolveDefaultOpenAiModel();
     expect((await call('fx-flat')).output).toBe('ok');                     // $0.0031 max — fits
     await refreshPricingCatalog('TEST', { ...fetcher(standardDocs(openaiDoc().replace('| fx-flat | $1.00 | - | - | $3.00 |', '| fx-flat | $1.00 | - | - | $30.00 |'))), antigravityAgentId: 'fx-agent' });
+    // The refresh alone changes nothing that executes.
+    expect((await call('fx-flat')).output).toBe('ok');
+    expect(applyCatalogPricesToRegistry('openai', 'test').ok).toBe(true);
+    expect((await call('fx-flat')).lastProviderError).toMatch(/MODEL_UNQUALIFIED/);
+    expect(qualifyModel('openai', 'fx-flat', 'test').ok).toBe(true);
+    expect(enableModel('openai', 'fx-flat', 'test').ok).toBe(true);
     const r = await call('fx-flat');                                          // now $0.0301 max — does not
     expect(r.lastProviderError).toMatch(/TASK_CEILING_EXCEEDED/);
     expect(resolveDefaultOpenAiModel()).toBe(selectedBefore);
-    expect(calls).toBe(1);
+    expect(calls).toBe(2);
   });
 
   it('long-context rates are used for the estimate when the threshold could be crossed', () => {
@@ -400,11 +430,14 @@ describe('BUDGET RESERVATION — atomic, and never released on an ambiguous outc
     await call('fx-flat', k);
     const before = listUsageForKey(k)[0];
     await refreshPricingCatalog('TEST', { ...fetcher(standardDocs(openaiDoc().replace('| fx-flat | $1.00 | - | - | $3.00 |', '| fx-flat | $5.00 | - | - | $15.00 |'))), antigravityAgentId: 'fx-agent' });
+    expect(applyCatalogPricesToRegistry('openai', 'test').ok).toBe(true);
     const after = listUsageForKey(k)[0];
     expect(after.actual_cost_usd).toBe(before.actual_cost_usd);
     expect(JSON.parse(after.price_snapshot_json!)).toMatchObject({ input: 1, output: 3 });
-    expect(after.price_version).toMatch(/^openai:fx-flat#v1:/);
+    expect(after.price_version).toBe(before.price_version);
+    expect(after.price_version).toMatch(/^registry:openai:fx-flat#/);
     expect(getCatalogPrice('openai', 'fx-flat')!.version).toBe(2);
+    expect(getModelPrice('openai', 'fx-flat')!.versionKey).not.toBe(before.price_version);
   });
 
   it('no silent fallback: the same execution may not switch to another model', async () => {
@@ -423,8 +456,12 @@ describe('ADMIN VISIBILITY', () => {
     const s = getSpendStatus();
     expect(s.pricing.sources.map((x: any) => x.sourceId).sort()).toEqual(['antigravity', 'gemini', 'openai']);
     const openaiDefault = s.pricing.selectedModels.find((m: any) => m.role === 'OpenAI default')!;
-    // The routed default is a real model id, which these fixtures do not price.
-    expect(openaiDefault.priceState).toBe('PRICE_UNKNOWN');
-    expect(openaiDefault.eligibility).toMatch(/PAID_EXECUTION_DISABLED|PRICE_UNKNOWN/);
+    // The routed default is priced from its bundled registry manifest (not the
+    // scraped catalog), and is not spendable: paid execution is off and the
+    // model has not been qualified.
+    expect(openaiDefault.priceSource).toBe('REGISTRY');
+    expect(openaiDefault.price!.versionKey).toMatch(/^registry:openai:/);
+    expect(['CURRENT', 'PRICE_STALE']).toContain(openaiDefault.priceState);
+    expect(openaiDefault.eligibility).toMatch(/PAID_EXECUTION_DISABLED|MODEL_UNQUALIFIED/);
   });
 });

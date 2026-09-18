@@ -361,10 +361,16 @@ describe('UI — status and label rendering', () => {
 describe('no retry, fallback or duplicate call', () => {
   it('the task board never re-runs a task the canonical fabric already decided', () => {
     const app = repo('src/App.tsx');
-    const block = app.slice(app.indexOf('const verificationOutcome = execData'), app.indexOf('if (execRes.ok && execData)'));
-    expect(block).toContain('if (verificationOutcome && !execData.success)');
-    expect(block).toContain('return;');
-    expect(block).not.toContain('handleSendQuery(');
+    const start = app.indexOf('const handleExecuteKanbanTask');
+    const handler = app.slice(start, app.indexOf('const handlePushTaskToObsidian', start));
+    expect(handler).toContain('if (verificationOutcome && !execData.success)');
+    // No chat fallback, no judge model, no local score/receipt, no duplicate vault note — anywhere in the handler.
+    expect(handler).not.toContain('handleSendQuery(');
+    expect(handler).not.toContain('judgeModel');
+    expect(handler).not.toContain('JUDGE_EVALUATED');
+    expect(handler).not.toContain('verifyWithAegis(');
+    expect(handler).not.toContain('issueReceipt(');
+    expect(handler).not.toContain('handleAddNoteToVault(');
   });
 
   it('one ingest = one Windmill result read; ingesting again is a no-op read with no new request', async () => {

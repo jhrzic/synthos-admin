@@ -15,10 +15,12 @@ import {
  */
 function seatProviderId(seatId: string): string | undefined {
   const map: Record<string, string> = {
+    // Seat → model-registry provider id. A seat with no entry has no provider
+    // plugin installed, and its dashboard says so rather than guessing.
     chatgpt: 'openai', codex: 'openai',
-    gemini: 'google', antigravity: 'google',
+    gemini: 'gemini', antigravity: 'antigravity',
     claude: 'anthropic', claudecode: 'anthropic',
-    deepseek: 'deepseek', hermes: 'nousresearch', perplexity: 'perplexity',
+    deepseek: 'deepseek', perplexity: 'perplexity',
   };
   return map[seatId.toLowerCase()];
 }

@@ -41,7 +41,8 @@ export const PRICING_SOURCES = {
 } as const;
 
 export type PricingSourceId = 'openai' | 'gemini' | 'antigravity';
-export type PricingTrigger = 'STARTUP' | 'SCHEDULED' | 'MANUAL' | 'TEST';
+/** MANUAL (an operator, when manual discovery is enabled) or TEST. Never startup, never a timer. */
+export type PricingTrigger = 'MANUAL' | 'TEST';
 
 /** GET a documentation page as text. Injectable so tests never touch the network. */
 export type TextFetcher = (url: string) => Promise<string>;

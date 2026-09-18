@@ -149,7 +149,10 @@ function pricingView(policy: ReturnType<typeof getSpendPolicy>) {
     });
     return {
       ...m,
-      priceState: !price ? 'PRICE_UNKNOWN' : price.ageHours === null || price.ageHours > policy.pricing.maxAgeHours ? 'PRICE_STALE' : 'CURRENT',
+      priceState: !price ? 'PRICE_UNKNOWN'
+        : price.staleAfter ? (Date.now() > Date.parse(price.staleAfter) ? 'PRICE_STALE' : 'CURRENT')
+        : price.ageHours === null || price.ageHours > policy.pricing.maxAgeHours ? 'PRICE_STALE' : 'CURRENT',
+      priceSource: price?.source ?? null,
       price: price ? { unit: price.unit, input: price.inputPerMillion, output: price.outputPerMillion, cachedInput: price.cachedInputPerMillion ?? null, long: price.long ?? null, versionKey: price.versionKey, derivedFrom: price.derivedFrom ?? null, tier: costTierFor(price, policy) } : null,
       estimatedMaxUsd: preview.estimatedCostUsd,
       eligibility: preview.permitted ? 'ELIGIBLE' : preview.code,

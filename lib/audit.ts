@@ -31,7 +31,8 @@ export type AdminEventType =
   | 'RUNTIME_CREDENTIAL_DELETED'
   | 'SPEND_POLICY_CHANGED'
   | 'SPEND_PRICING_CHANGED'
-  | 'SPEND_USAGE_CLEARED';
+  | 'SPEND_USAGE_CLEARED'
+  | 'MODEL_REGISTRY_CHANGED';
 
 export interface AdminAuditEventRecord {
   event_id: string;

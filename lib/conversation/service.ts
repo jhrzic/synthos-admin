@@ -746,6 +746,12 @@ export function summarizeConversation(workspaceId: string, conversationId: strin
         // Present only when a receipt genuinely exists — this is the link that
         // makes the knowledge note traceable back to verified work.
         receipts: receiptId ? [receiptId] : [],
+        // A conversation summary is a RECORD of what was said — an
+        // observation. It is not knowledge unless the canonical admission
+        // process (KIL gate → promoted, verified candidate) admits it, and it
+        // never grants permission. Projected into Obsidian as exactly that.
+        classification: 'OBSERVATION',
+        promotionStatus: 'NOT_PROMOTED',
         createdAt: nowIso,
       },
       markdown,

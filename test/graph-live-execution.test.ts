@@ -51,7 +51,7 @@ describe('POST /api/graphs/estimate: real routing signal only, never a fabricate
   const estimateRoute = routeSlice('app.post("/api/graphs/estimate"', 'app.post("/api/graphs/execute"');
 
   it('exists as its own route and calls the real estimator, not a stub', () => {
-    expect(estimateRoute).toContain('estimateGraphExecution(nodes)');
+    expect(estimateRoute).toContain('estimateGraphExecution(nodes, resolved.workspaceId)');
   });
 
   it('never dispatches to the execution spine — it is read-only', () => {

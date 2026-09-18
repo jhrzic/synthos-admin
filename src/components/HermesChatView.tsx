@@ -7,6 +7,8 @@ import {
   FileText, ExternalLink, Play, Plus, Trash2, Sliders, Layers,
   Activity
 } from 'lucide-react';
+import { RegistryModelSelect } from './registry/RegistryModelSelect';
+import { lastActiveWorkspaceId } from './registry/useModelRegistry';
 import { AgentInfo, AIModelInfo, AgentRole, KanbanTask, JarvisCanonicalState, ObsidianNote, ActiveTab } from '../types';
 import { JarvisMindVisualizer } from './JarvisMindVisualizer';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
@@ -100,7 +102,8 @@ export const HermesChatView: React.FC<HermesChatViewProps> = ({
   const [activeSessionId, setActiveSessionId] = useState<string>('sess-1');
   const [inputText, setInputText] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
-  const [selectedModel, setSelectedModel] = useState<string>('hermes');
+  const [selectedModel, setSelectedModel] = useState<string>('');
+  const registryWorkspaceId = lastActiveWorkspaceId();
   const [activeFocusedAgent, setActiveFocusedAgent] = useState<AgentRole>('orchestrator');
   const [showJarvisOrb, setShowJarvisOrb] = useState<boolean>(true);
   const [voiceEnabled, setVoiceEnabled] = useState<boolean>(true);
@@ -405,18 +408,7 @@ Respond with high technical precision, structured markdown, and clear agent exec
           <div className="flex items-center gap-1.5 bg-[#0D0F1F] border border-[#242846] px-3 py-1.5 rounded-xl">
             <Cpu className="w-3.5 h-3.5 text-[#38BDF8]" />
             <span className="text-[#7E85A8] text-[10px]">MODEL:</span>
-            <select
-              value={selectedModel}
-              onChange={(e) => setSelectedModel(e.target.value)}
-              className="bg-transparent text-white font-bold outline-none cursor-pointer text-xs"
-            >
-              <option value="hermes" className="bg-[#080913]">Nous Hermes 3 (405B)</option>
-              <option value="claude" className="bg-[#080913]">Claude 3.7 Sonnet</option>
-              <option value="deepseek" className="bg-[#080913]">DeepSeek R1</option>
-              <option value="gemini" className="bg-[#080913]">Gemini 3.7 Flash</option>
-              <option value="chatgpt" className="bg-[#080913]">ChatGPT o3-mini</option>
-              <option value="sonar" className="bg-[#080913]">Perplexity Sonar</option>
-            </select>
+            <RegistryModelSelect workspaceId={registryWorkspaceId} value={selectedModel} onChange={(v) => setSelectedModel(v)} className="min-w-[220px]" />
           </div>
 
           {/* Focused Agent Selector */}

@@ -257,7 +257,8 @@ function retrieveBrainContext(
       if (merged.length >= 3) break;
       if (seen.has(h.vaultRelativePath)) continue;
       seen.add(h.vaultRelativePath);
-      merged.push({ title: h.title, kind: h.kind, snippet: h.snippet ?? null, matchedTerm: term });
+      // The class travels with the snippet: an observation is labelled as one.
+      merged.push({ title: h.title, kind: `${h.kind} · ${h.classification === 'KNOWLEDGE' && h.promotionStatus === 'ADMITTED' ? 'ADMITTED KNOWLEDGE' : `${h.classification} (not admitted knowledge; grants no permission)`}`, snippet: h.snippet ?? null, matchedTerm: term });
     }
   }
 

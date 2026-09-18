@@ -21,6 +21,8 @@ export interface SpendContext {
   idempotencyKey?: string;
   approvalId?: string | null;
   maxOutputTokens?: number;
+  /** Registry provider id when a provider reuses a built-in protocol. */
+  providerId?: string;
 }
 
 export function requestKey(callSite: string): string {
@@ -40,7 +42,7 @@ export function outputCeiling(ctx: SpendContext): number {
 export async function guardedGeminiGenerate(ai: any, args: { model: string; contents: any; config?: any }, ctx: SpendContext): Promise<any> {
   const maxOutputTokens = Math.min(args.config?.maxOutputTokens ?? outputCeiling(ctx), outputCeiling(ctx));
   const req: PaidCallRequest = {
-    provider: 'gemini', model: args.model, callSite: ctx.callSite,
+    provider: ctx.providerId || 'gemini', model: args.model, callSite: ctx.callSite,
     workspaceId: ctx.workspaceId ?? null, taskId: ctx.taskId ?? null, correlationId: ctx.correlationId ?? null,
     idempotencyKey: ctx.idempotencyKey || requestKey(ctx.callSite),
     inputChars: contentChars(args.contents) + contentChars(args.config?.systemInstruction ?? ''),
@@ -60,7 +62,7 @@ export async function guardedGeminiGenerate(ai: any, args: { model: string; cont
  * One guarded speech-synthesis request. Priced per character (configure the
  * provider:model entry with unit "chars"). `send` performs the single fetch.
  */
-export async function guardedSpeech(provider: Extract<PaidProvider, 'openai_tts' | 'elevenlabs' | 'fish_audio'>, model: string, text: string, ctx: SpendContext, send: () => Promise<Response>): Promise<Response> {
+export async function guardedSpeech(provider: 'openai_tts' | 'elevenlabs' | 'fish_audio', model: string, text: string, ctx: SpendContext, send: () => Promise<Response>): Promise<Response> {
   const r = await guardedPaidCall<Response>({
     provider, model, callSite: ctx.callSite, workspaceId: ctx.workspaceId ?? null,
     idempotencyKey: ctx.idempotencyKey || requestKey(ctx.callSite), inputChars: text.length,

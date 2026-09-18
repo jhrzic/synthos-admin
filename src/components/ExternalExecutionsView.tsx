@@ -3,6 +3,7 @@ import {
   Server, RefreshCw, Loader2, AlertTriangle, ChevronDown, ChevronRight,
   Box, FileCheck, ExternalLink, XCircle, CheckCircle2, Clock, RotateCw
 } from 'lucide-react';
+import { useModelRegistry } from './registry/useModelRegistry';
 import { TaskStatusBadge, RetrievalBadge } from './verification/outcome';
 
 // ---------------------------------------------------------------------------
@@ -68,6 +69,9 @@ const when = (iso: string | null) => {
 
 export const ExternalExecutionsView: React.FC<ExternalExecutionsViewProps> = ({ activeWorkspaceId }) => {
   const workspaceId = activeWorkspaceId || 'ws-synthos-primary';
+  const registry = useModelRegistry(workspaceId);
+  const externalRuntimeProviders = new Set(registry.providers.filter((p) => p.adapterDispatch === 'EXTERNAL_RUNTIME').map((p) => p.providerId));
+  const externalRuntimeModels = registry.models.filter((m) => externalRuntimeProviders.has(m.providerId));
 
   const [executions, setExecutions] = useState<ExternalExecution[]>([]);
   const [loading, setLoading] = useState(true);
@@ -147,6 +151,14 @@ export const ExternalExecutionsView: React.FC<ExternalExecutionsViewProps> = ({ 
               <p className="text-xs text-[#8E94B8] mt-1 font-sans">
                 Windmill external execution control plane (ADR-006) · Workspace: <span className="text-white">{workspaceId}</span>
               </p>
+              {/* Managed-agent runtimes' models, from the model registry — the
+                  same records, states and reasons the rest of the UI shows. */}
+              <div className="text-[10px] text-[#8E94B8] mt-1" data-testid="external-runtime-models">
+                Runtime models (registry):{' '}
+                {externalRuntimeModels.length === 0
+                  ? (registry.loading ? 'loading…' : 'none installed')
+                  : externalRuntimeModels.map((m) => `${m.providerId}/${m.modelId} — ${m.executable ? m.availability : `${m.availability}: ${m.blockers[0]?.reason ?? ''}`}`).join(' · ')}
+              </div>
             </div>
           </div>
           <div className="flex items-center gap-2">

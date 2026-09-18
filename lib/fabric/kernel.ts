@@ -71,8 +71,8 @@ import {
   read_package_metadata,
   projectKnowledgeCandidate,
 } from '../persistence';
-import { classifyModelRequest, DEFAULT_CANDIDATE_MODELS, PROVIDER_ENV_VAR, type ExecutableProvider } from '../model-router';
-import { resolveModelApiKey, type ModelProvider } from '../model-credentials';
+import { resolveRoute, credentialForTarget, credentialHint, primaryCredentialEnvVar, evaluateModel } from '../registry';
+import { listUsageForKey } from '../spend/ledger';
 import { recordProviderAttempt } from '../provider-state';
 import { verifyTaskAtGate } from '../kil-gate';
 import { indexVaultArtifact, getArtifactRetrievalStatus } from '../memory-index';
@@ -87,12 +87,10 @@ import { writeWorkspaceArtifact } from '../vault';
 // prompt for a node as this route would — required for graph node output
 // to remain equivalent to before, not because graph execution needs an
 // agent-persona concept of its own.
-import { generateViaGemini } from './model-gemini';
 // PUSH 1 — the OpenAI counterpart of model-gemini.ts, same shape, same
 // never-throws contract. Imported alongside it rather than behind a new
 // abstraction: two providers do not justify a plugin layer, and the one
 // switch below is easier to read than an indirection would be.
-import { generateViaOpenAI } from './model-openai';
 import type { ExecuteAgentTaskInput, ExecutionResult, ExecutionContext } from './types';
 
 /**
@@ -102,10 +100,18 @@ import type { ExecuteAgentTaskInput, ExecutionResult, ExecutionContext } from '.
  * string every receipt signed before PUSH 1 already carries — changing it
  * would break comparability with the existing signed history.
  */
-export const PROVIDER_RECEIPT_IDENTITY: Record<ExecutableProvider, string> = {
-  GEMINI: "google-genai",
-  OPENAI: "openai",
+const LEGACY_RECEIPT_IDENTITY: Record<string, string> = {
+  gemini: "google-genai",
 };
+
+/**
+ * The provider string signed into receipts. Registry provider ids are used
+ * as-is; Gemini keeps "google-genai" so receipts stay comparable with every
+ * receipt signed before the registry existed. A new provider needs no entry.
+ */
+export function receiptProviderIdentity(providerId: string): string {
+  return LEGACY_RECEIPT_IDENTITY[providerId] ?? providerId;
+}
 
 export interface AgentRolePromptParams {
   assignedAgent: string;
@@ -247,7 +253,9 @@ export async function executeAgentTask(
       taskTitle = "",
       description = "",
       assignedAgent = "scout",
-      assignedModel = "gemini-3.6-flash",
+      // No default model. A task runs on the model it names, or not at all —
+      // choosing one silently would be a fallback nobody selected.
+      assignedModel = "",
       inputs = "",
       sourceUrl = "",
       spendIdempotencyKey,
@@ -333,50 +341,48 @@ export async function executeAgentTask(
     // "gpt-4" assertion still holds, now because OpenAI genuinely has no
     // credential in that environment rather than because Gemini's check
     // shadowed it.
-    const modelClassification = classifyModelRequest(assignedModel);
-    if (modelClassification.provider === "UNSUPPORTED") {
+    // ROUTING — the model registry decides where this goes, by canonical
+    // identity and protocol. Never by name prefix, never with a substitute.
+    // Whether it may run (qualified, enabled, priced, permitted) is decided by
+    // the spend guard's registry gate, which records a ledger row either way.
+    const route = assignedModel.trim()
+      ? resolveRoute(assignedModel)
+      : { ok: false as const, code: 'MODEL_NOT_SELECTED' as const, requested: '', reason: 'No model was selected for this task. Choose one from the model registry; nothing was run.' };
+    if (!route.ok) {
       updateTaskStatus(taskId, "FAILED", undefined, resolvedWorkspaceId);
       recordActivityEvent({
         taskId,
         expectedWorkspaceId: resolvedWorkspaceId,
         eventType: "PROVIDER_UNSUPPORTED",
         agentId: assignedAgent,
-        payload: {
-          reason: modelClassification.reason,
-          error: modelClassification.message,
-          requestedModel: modelClassification.requestedModel,
-        },
+        payload: { reason: route.code, error: route.reason, requestedModel: route.requested },
       });
       return {
         status: 400,
-        body: {
-          success: false,
-          status: "FAILED",
-          reason: modelClassification.reason,
-          error: modelClassification.message,
-          requestedModel: modelClassification.requestedModel,
-          taskId,
-        },
+        body: { success: false, status: "FAILED", reason: route.code, error: route.reason, requestedModel: route.requested, taskId },
       };
     }
 
-    // 2b. Provider-specific credential gate. Resolved through the existing
-    // server-side credential store (lib/model-credentials.ts — environment
-    // first, then the encrypted row), not a private process.env read, so
-    // this route and the conversation engine agree about what "configured"
-    // means instead of holding two opinions. The key never leaves this
-    // scope: it is passed to the provider adapter and to nothing else.
-    const provider: ExecutableProvider = modelClassification.provider;
-    const { apiKey } = resolveModelApiKey(provider.toLowerCase() as ModelProvider);
+    const provider = route.providerId;
+    // TASK RESTRICTIONS — the task's output contract must be one the model
+    // declares. Refused before any credential is read or request is built.
+    const taskView = evaluateModel(provider, route.modelId, { workspaceId: resolvedWorkspaceId, outputContract: outputContract.mode, credentialHeld: true });
+    if (taskView && !taskView.outputContracts.includes(outputContract.mode)) {
+      updateTaskStatus(taskId, "FAILED", undefined, resolvedWorkspaceId);
+      const error = `${provider}/${route.modelId} does not declare the ${outputContract.mode} output contract this task requires. It was not run.`;
+      recordActivityEvent({ taskId, expectedWorkspaceId: resolvedWorkspaceId, eventType: "PROVIDER_UNSUPPORTED", agentId: assignedAgent, payload: { reason: "MODEL_TASK_INCOMPATIBLE", error } });
+      return { status: 400, body: { success: false, status: "FAILED", reason: "MODEL_TASK_INCOMPATIBLE", error, taskId } };
+    }
+    const apiKey = credentialForTarget(provider);
     if (!apiKey) {
-      const envVar = PROVIDER_ENV_VAR[provider];
+      const hint = credentialHint(provider);
       updateTaskStatus(taskId, "FAILED", undefined, resolvedWorkspaceId);
       recordActivityEvent({
         taskId,
         expectedWorkspaceId: resolvedWorkspaceId,
         eventType: "PROVIDER_FAILED",
         agentId: assignedAgent,
-        payload: { reason: "BLOCKED_MISSING_CREDENTIAL", provider, error: `${envVar} environment variable is not configured` },
+        payload: { reason: "BLOCKED_MISSING_CREDENTIAL", provider, error: `${hint} is not configured` },
       });
       return {
         status: 400,
@@ -384,13 +390,14 @@ export async function executeAgentTask(
           success: false,
           status: "BLOCKED",
           reason: "BLOCKED_MISSING_CREDENTIAL",
-          error: `${envVar} environment variable is not configured on the server`,
+          // Same wording as before the registry for the primary env var; the
+          // activity event carries every accepted source.
+          error: `${primaryCredentialEnvVar(provider) ?? hint} environment variable is not configured on the server`,
           taskId,
         },
       };
     }
 
-    // 3. Immediately before provider call: RUNNING & EXECUTION_STARTED
     updateTaskStatus(taskId, "RUNNING", undefined, resolvedWorkspaceId);
     recordActivityEvent({
       taskId,
@@ -402,6 +409,7 @@ export async function executeAgentTask(
 
     let executionOutput = "";
     let modelUsed = assignedModel;
+    let spendKeyUsed: string | null = null;
     let lastProviderError: string | null = null;
     let hadProviderError = false;
     let providerUsageMetadata: any = null;
@@ -409,51 +417,15 @@ export async function executeAgentTask(
 
     // Step 1: Execute tool/model logic based on role against the real,
     // classified provider.
-    const normalizedAssignedModel = modelClassification.resolvedModel;
-    // PUSH 1 — DEFAULT_CANDIDATE_MODELS is a GEMINI candidate list, so it is
-    // only appended for a Gemini request. Appending it to an OpenAI request
-    // would build exactly the cross-provider substitution chain the router's
-    // header forbids: an OpenAI call that quietly succeeded on Gemini.
-    // OpenAI therefore gets a single-model candidate list, and a failure is
-    // reported as a failure.
-    const candidateModels = provider === "GEMINI"
-      ? [normalizedAssignedModel, ...DEFAULT_CANDIDATE_MODELS].filter((v, i, a) => a.indexOf(v) === i)
-      : [normalizedAssignedModel];
-
-    // STEP 1b — the only sanctioned path for a model/tool/external-service
-    // call inside the kernel. Wraps the exact existing multi-candidate
-    // retry loop unchanged; ctx.invoke only observes (name, timing,
-    // success/failure), it does not alter control flow, retries, or error
-    // handling. Because this whole block already catches every error
-    // internally (per-candidate and outer), the wrapped function itself
-    // never rejects — ctx.invoke records this as a successful "model.gemini"
-    // invocation whenever the code reaches the point of attempting it
-    // (i.e. whenever an API key and a supported model exist), independent
-    // of whether any candidate actually returned usable text. That real,
-    // observed name — never a fabricated or per-role literal — is what
-    // toolsInvoked is built from below.
-    //
-    // STEP 4 — the persona-prompt construction (buildAgentRolePrompt) and
-    // the real retry-loop mechanics (generateViaGemini, lib/fabric/
-    // model-gemini.ts) are now the same two calls graph execution's native
-    // COMPUTE nodes use (server.ts POST /api/graphs/execute) — extracted
-    // verbatim, not reimplemented, so this route's behavior is unchanged.
-    // PUSH 1 — the invocation NAME is the real provider's, never a generic
-    // "model" label. toolsInvoked/toolCalls is built from these names, so a
-    // run executed on OpenAI must not leave a trace claiming Gemini ran.
-    const invocationName = provider === "OPENAI" ? "model.openai" : "model.gemini";
+    // The canonical id propagates unchanged: task → spend guard → provider →
+    // ledger → Aegis → receipt. One model, no candidate list, no fallback.
+    const canonicalModelId = route.modelId;
+    const invocationName = `model.${provider}`;
 
     await ctx.invoke(invocationName, async () => {
-      // A LITERAL / JSON_OBJECT contract bypasses the persona template
-      // entirely: the persona brief is what overrode the literal instruction
-      // in the first live proof. NARRATIVE keeps the persona, as before.
       const rolePrompt = outputContract.mode === 'NARRATIVE'
         ? buildAgentRolePrompt({ assignedAgent, taskTitle, description, sourceUrl, inputs })
         : buildContractPrompt(outputContract, taskTitle, description);
-      // No exclude-list needed here: the provider identity gate above already
-      // fixed the provider before this point, so every candidate in this
-      // queue is guaranteed to belong to it.
-      const modelsToTry = [normalizedAssignedModel, ...candidateModels].filter((v, i, a) => a.indexOf(v) === i);
       const providerStartedAt = Date.now();
       const spend = {
         callSite: 'kernel.model_task',
@@ -462,9 +434,8 @@ export async function executeAgentTask(
         correlationId: spendIdempotencyKey ?? taskId,
         idempotencyKey: spendIdempotencyKey || `kernel:${taskId}:${crypto.randomUUID()}`,
       };
-      const genResult = provider === "OPENAI"
-        ? await generateViaOpenAI({ apiKey, contents: rolePrompt, candidateModels: modelsToTry, spend })
-        : await generateViaGemini({ apiKey, contents: rolePrompt, candidateModels: modelsToTry, spend });
+      spendKeyUsed = spend.idempotencyKey;
+      const genResult = await route.adapter.call!({ providerId: provider, modelId: canonicalModelId, apiKey, baseUrl: route.baseUrl, contents: rolePrompt, spend });
       executionOutput = genResult.output;
       if (genResult.modelUsed) modelUsed = genResult.modelUsed;
       if (genResult.providerUsageMetadata) providerUsageMetadata = genResult.providerUsageMetadata;
@@ -508,7 +479,7 @@ export async function executeAgentTask(
         // lib/provider-state.ts keys on the lowercase provider id, the same
         // one lib/model-credentials.ts uses, so probe and real work land in
         // one ledger rather than two spellings of it.
-        provider: provider === "OPENAI" ? "openai" : "gemini",
+        provider,
         ok: providerOk,
         modelUsed: genResult.modelUsed,
         // Only meaningful on failure; scrubbed downstream before storage.
@@ -576,7 +547,7 @@ export async function executeAgentTask(
         // PUSH 1 — the activity ledger records WHICH provider ran, not just
         // which model string came back. Two providers can return similar
         // looking ids; the knowledge layer downstream must not have to guess.
-        provider: PROVIDER_RECEIPT_IDENTITY[provider],
+        provider: receiptProviderIdentity(provider),
         outputLength: executionOutput.length,
         usage: providerUsageMetadata || null,
         // How the PROVIDER says the response ended — the fact that decides
@@ -588,6 +559,16 @@ export async function executeAgentTask(
 
     const elapsedMs = Date.now() - startTime;
     const nowIso = new Date().toISOString();
+
+    // The ledger row this execution reserved and dispatched under — its price
+    // snapshot is immutable, so the receipt names it rather than re-pricing.
+    const usageRow = spendKeyUsed ? listUsageForKey(spendKeyUsed).filter((r) => r.status === 'SUCCESS').pop() ?? null : null;
+    const registryEvidence = {
+      registryProviderId: provider,
+      canonicalModelId,
+      priceVersion: usageRow?.price_version ?? null,
+      usageId: usageRow?.usage_id ?? null,
+    };
 
     // STEP 2 — the artifact write and its DB record both now go through
     // writeWorkspaceArtifact() (lib/vault.ts), the one canonical Vault
@@ -702,8 +683,9 @@ export async function executeAgentTask(
         // only executable provider; leaving it literal once a second
         // provider exists would have signed a false statement about which
         // company processed the customer's prompt.
-        provider: PROVIDER_RECEIPT_IDENTITY[provider],
+        provider: receiptProviderIdentity(provider),
         modelUsed,
+        ...registryEvidence,
         artifactId: persistedArtifact.artifact_id,
         artifactHash: persistedArtifact.content_hash,
         aegisDecision: aegisResult.decision,
@@ -836,7 +818,8 @@ export async function executeAgentTask(
       receiptId = commitContentFailure({
         taskId, workspaceId: resolvedWorkspaceId, reviewId: persistedReview.review_id, scoped,
         artifact: persistedArtifact,
-        identity: { assignedAgent, provider: PROVIDER_RECEIPT_IDENTITY[provider], modelUsed },
+        identity: { assignedAgent, provider: receiptProviderIdentity(provider), modelUsed },
+        registry: registryEvidence,
         nowIso,
       }).receiptId ?? undefined;
     } else if (aegisResult.decision === "FAILED") {

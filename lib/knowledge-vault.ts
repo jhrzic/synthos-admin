@@ -47,9 +47,28 @@ import {
   getVaultStatus, ensureVaultRoot, canWriteKnowledge,
   SYNTHOS_VAULT_SUBDIR, type VaultStatus,
 } from './vault-config';
+import { getDatabase } from './persistence';
 
 /** The kinds of knowledge SynthOS writes. Each gets its own subdirectory. */
 export type KnowledgeKind = 'Conversations' | 'Decisions' | 'Research' | 'Sessions';
+
+/**
+ * WHAT A NOTE IS — not the same as where it lives.
+ *
+ *   OBSERVATION  a record of something that happened (a conversation, a
+ *                session). The default. True as a record; not knowledge.
+ *   PROJECTION   a human-facing rendering of other records (e.g. an Obsidian
+ *                view of verified artifacts). Not independently knowledge.
+ *   KNOWLEDGE    admitted through the canonical admission process: a KIL
+ *                observation promoted to a verified knowledge candidate. A
+ *                note may claim this ONLY with a reference that resolves to
+ *                such a candidate in the same workspace.
+ *
+ * Observation ≠ Knowledge. And Knowledge ≠ Permission: no note of any class
+ * grants authority, approval or permission to anyone or anything.
+ */
+export type NoteClassification = 'OBSERVATION' | 'PROJECTION' | 'KNOWLEDGE';
+export type PromotionStatus = 'NOT_PROMOTED' | 'CANDIDATE' | 'ADMITTED';
 
 export interface KnowledgeProvenance {
   /** Human title — becomes both the H1 and the basis of the filename. */
@@ -81,6 +100,28 @@ export interface KnowledgeProvenance {
    */
   related?: string[];
   createdAt?: string;
+  /** Defaults to OBSERVATION. KNOWLEDGE requires `admissionRef`. */
+  classification?: NoteClassification;
+  /** Defaults to NOT_PROMOTED. ADMITTED requires `admissionRef`. */
+  promotionStatus?: PromotionStatus;
+  /** knowledge_candidates.candidate_id of a promoted, verified candidate. */
+  admissionRef?: string | null;
+}
+
+/**
+ * Canonical admission check: does this reference resolve to a knowledge
+ * candidate that the KIL gate promoted and that verified, in this workspace?
+ */
+export function isAdmittedKnowledge(workspaceId: string, admissionRef: string | null | undefined): boolean {
+  if (!admissionRef) return false;
+  try {
+    const row = getDatabase().prepare(
+      "SELECT 1 FROM knowledge_candidates WHERE candidate_id = ? AND workspace_id = ? AND promotion_state = 'promoted' AND verification_state = 'verified'",
+    ).get(admissionRef, workspaceId);
+    return !!row;
+  } catch {
+    return false;
+  }
 }
 
 export interface KnowledgeWriteResult {
@@ -178,6 +219,11 @@ export function renderKnowledgeNote(p: KnowledgeProvenance, body: string): strin
   if (p.tags?.length) fm.push(`tags: ${yamlList(p.tags)}`);
   if (p.artifacts?.length) fm.push(`artifacts: ${yamlList(p.artifacts)}`);
   if (p.receipts?.length) fm.push(`receipts: ${yamlList(p.receipts)}`);
+  fm.push(`classification: ${yamlString((p.classification || 'OBSERVATION').toLowerCase())}`);
+  fm.push(`promotion_status: ${yamlString((p.promotionStatus || 'NOT_PROMOTED').toLowerCase())}`);
+  if (p.admissionRef) fm.push(`admission_ref: ${yamlString(p.admissionRef)}`);
+  // Knowledge ≠ Permission. Stated in every note so no reader has to infer it.
+  fm.push('grants_permission: false');
   fm.push('generated_by: "SynthOS"');
   fm.push('---', '');
 
@@ -217,6 +263,17 @@ export function writeKnowledgeNote(
 ): KnowledgeWriteResult {
   const status = ensureVaultRoot(env);
 
+  // No note becomes KNOWLEDGE by assertion. Only a promoted, verified
+  // knowledge candidate (the canonical admission process) can back it.
+  const classification = provenance.classification || 'OBSERVATION';
+  const promotionStatus = provenance.promotionStatus || 'NOT_PROMOTED';
+  if ((classification === 'KNOWLEDGE' || promotionStatus === 'ADMITTED') && !isAdmittedKnowledge(provenance.workspaceId, provenance.admissionRef)) {
+    return {
+      written: false, absolutePath: null, vaultRelativePath: null, fileName: null, status,
+      reason: 'A note can be classified KNOWLEDGE / ADMITTED only with an admissionRef to a promoted, verified knowledge candidate in this workspace. Write it as an OBSERVATION instead.',
+    };
+  }
+
   if (!canWriteKnowledge(status) || !status.root) {
     return {
       written: false, absolutePath: null, vaultRelativePath: null, fileName: null,
@@ -240,7 +297,7 @@ export function writeKnowledgeNote(
 
   const slug = semanticSlug(provenance.title);
   const stamp = dateStamp(createdAt);
-  const contents = renderKnowledgeNote({ ...provenance, createdAt }, body);
+  const contents = renderKnowledgeNote({ ...provenance, classification, promotionStatus, createdAt }, body);
 
   // Atomic exclusive create. 'wx' fails with EEXIST if ANYTHING is at the path
   // — including a symlink — so the name is claimed by the syscall itself rather
@@ -493,6 +550,16 @@ export interface KnowledgeNoteDetail {
   /** Receipt ids attesting the work this note describes. */
   receipts: string[];
   generatedBy: string | null;
+  /**
+   * What the note is. Notes written before classification existed carry no
+   * field and are read as OBSERVATION — never promoted by default.
+   */
+  classification: NoteClassification;
+  classificationSource: 'FRONTMATTER' | 'LEGACY_DEFAULT';
+  promotionStatus: PromotionStatus;
+  admissionRef: string | null;
+  /** Always false. Present so no consumer has to assume it. */
+  grantsPermission: false;
   /** [[wikilinks]] found in the body — real relationships only, as written. */
   wikilinks: string[];
   body: string;
@@ -616,6 +683,8 @@ export function listKnowledgeNotesDetailed(
       artifacts: fm.artifacts ? parseYamlList(fm.artifacts) : [],
       receipts: fm.receipts ? parseYamlList(fm.receipts) : [],
       generatedBy: fm.generated_by ? parseYamlScalar(fm.generated_by) : null,
+      ...readClassification(fm, fm.workspace ? parseYamlScalar(fm.workspace) : null),
+      grantsPermission: false as const,
       wikilinks: extractWikilinks(body),
       body,
       truncated,
@@ -679,6 +748,11 @@ export interface WorkspaceKnowledgeMatch {
   snippet: string | null;
   modifiedAt: string;
   createdAt: string | null;
+  /** OBSERVATION unless admitted through the canonical process. Never a permission. */
+  classification: NoteClassification;
+  promotionStatus: PromotionStatus;
+  admissionRef: string | null;
+  grantsPermission: false;
   /** Where this knowledge came from — the provenance the instruction requires. */
   provenance: {
     workspaceId: string | null;
@@ -744,6 +818,10 @@ export function searchWorkspaceKnowledge(
       snippet,
       modifiedAt: note.modifiedAt,
       createdAt: note.createdAt,
+      classification: note.classification,
+      promotionStatus: note.promotionStatus,
+      admissionRef: note.admissionRef,
+      grantsPermission: false,
       provenance: {
         workspaceId: note.workspaceId,
         source: note.source,
@@ -825,4 +903,23 @@ export function readWorkspaceKnowledgeNote(
     throw new KnowledgeAccessError('NOT_FOUND', `No knowledge note exists at "${normalised}".`);
   }
   return found;
+}
+
+/**
+ * Classification as READ. A note claiming KNOWLEDGE is honoured only if its
+ * admissionRef still resolves to a promoted, verified candidate — frontmatter
+ * alone is an assertion, and a hand-edited note must not promote itself.
+ */
+function readClassification(fm: Record<string, string>, workspaceId: string | null): { classification: NoteClassification; classificationSource: 'FRONTMATTER' | 'LEGACY_DEFAULT'; promotionStatus: PromotionStatus; admissionRef: string | null } {
+  const rawClass = fm.classification ? parseYamlScalar(fm.classification).toUpperCase() : '';
+  const rawPromo = fm.promotion_status ? parseYamlScalar(fm.promotion_status).toUpperCase() : '';
+  const admissionRef = fm.admission_ref ? parseYamlScalar(fm.admission_ref) : null;
+  if (!rawClass) return { classification: 'OBSERVATION', classificationSource: 'LEGACY_DEFAULT', promotionStatus: 'NOT_PROMOTED', admissionRef: null };
+  let classification: NoteClassification = rawClass === 'PROJECTION' ? 'PROJECTION' : rawClass === 'KNOWLEDGE' ? 'KNOWLEDGE' : 'OBSERVATION';
+  let promotionStatus: PromotionStatus = rawPromo === 'ADMITTED' ? 'ADMITTED' : rawPromo === 'CANDIDATE' ? 'CANDIDATE' : 'NOT_PROMOTED';
+  if ((classification === 'KNOWLEDGE' || promotionStatus === 'ADMITTED') && !(workspaceId && isAdmittedKnowledge(workspaceId, admissionRef))) {
+    classification = 'OBSERVATION';
+    promotionStatus = 'NOT_PROMOTED';
+  }
+  return { classification, classificationSource: 'FRONTMATTER', promotionStatus, admissionRef };
 }

@@ -188,7 +188,7 @@ describe('STEP 4 LIVE: COMPUTE node, no GEMINI_API_KEY configured — real BLOCK
     const nodeId = 'compute-1';
     const { status, json } = await executeGraph({
       workspaceId: WS, confirmed: true, runId,
-      nodes: [{ id: nodeId, type: 'agent', name: 'Native Compute Node' }],
+      nodes: [{ id: nodeId, type: 'agent', name: 'Native Compute Node', assignedModel: 'gemini-3.6-flash' }],
       edges: [],
     });
     expect(status).toBe(200);
@@ -278,7 +278,7 @@ describe('STEP 4 LIVE: mixed graph — EXTERNAL_ACTION success then COMPUTE halt
       workspaceId: WS, confirmed: true, runId,
       nodes: [
         { id: externalNodeId, type: 'agent', name: 'Windmill First', runtime: 'windmill', windmillTargetId: target.id },
-        { id: computeNodeId, type: 'agent', name: 'Compute Second' },
+        { id: computeNodeId, type: 'agent', name: 'Compute Second', assignedModel: 'gemini-3.6-flash' },
       ],
       edges: [],
     });

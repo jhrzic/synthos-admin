@@ -93,9 +93,20 @@ export interface CanonicalReceiptPayload {
    * can never be read as "completed" when content verification failed.
    * Absent on receipts signed before this field existed.
    */
-  outcome?: 'COMPLETED' | 'INCOMPLETE' | 'VERIFICATION_FAILED';
+  outcome?: 'COMPLETED' | 'INCOMPLETE' | 'VERIFICATION_FAILED' | 'INTEGRITY_FAILED';
   /** Exactly which verification scopes this receipt attests to, e.g. "integrity=PASS; completion=FAIL; …". */
   verificationScope?: string;
+  /**
+   * REGISTRY IDENTITY — the canonical provider and model the task selected,
+   * resolved once and propagated unchanged (never an alias). `modelUsed` is
+   * what the provider reported back; these are what SynthOS asked for.
+   * Absent on receipts signed before the registry existed.
+   */
+  registryProviderId?: string;
+  canonicalModelId?: string;
+  /** The immutable price version the spend guard reserved against, and that ledger row. */
+  priceVersion?: string | null;
+  usageId?: string | null;
 }
 
 export interface AegisCheckResult {

@@ -43,12 +43,20 @@ import { scrubSecrets as sharedScrubSecrets } from '../redact';
 import { guardedPaidCall, normalizeOpenAiUsage } from '../spend/guard';
 import { outputCeiling, requestKey, type SpendContext } from '../spend/adapters';
 import { openAiTermination, type ProviderTermination } from './output-contract';
+import { resolveRegistryEndpoint } from '../registry/endpoint-resolver';
 
 export const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 
+/**
+ * Where OpenAI requests go — resolved by the ONE endpoint authority
+ * (lib/registry/endpoints.ts) against the OpenAI provider manifest. An
+ * override (OPENAI_BASE_URL) to an unapproved host throws: it fails closed
+ * rather than silently using the default and sending the key elsewhere.
+ */
 export function resolveOpenAiBaseUrl(): string {
-  const configured = (process.env.OPENAI_BASE_URL || '').trim();
-  return (configured || OPENAI_DEFAULT_BASE_URL).replace(/\/+$/, '');
+  const r = resolveRegistryEndpoint('openai');
+  if (!r.ok) throw new Error(r.reason);
+  return r.baseUrl;
 }
 
 export interface GenerateViaOpenAiParams {
@@ -63,6 +71,10 @@ export interface GenerateViaOpenAiParams {
    * one-request permit. There is no unguarded variant.
    */
   spend: SpendContext;
+  /** Registry-resolved base URL. Absent → resolved for the `openai` provider. */
+  baseUrl?: string;
+  /** Registry provider id (a provider reusing this protocol). Defaults to `openai`. */
+  providerId?: string;
 }
 
 /**
@@ -150,7 +162,14 @@ export function extractOpenAiText(payload: any): string {
 export async function generateViaOpenAI(params: GenerateViaOpenAiParams): Promise<GenerateViaOpenAiResult> {
   const { apiKey, contents } = params;
   const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const baseUrl = resolveOpenAiBaseUrl();
+  const providerId = params.providerId || 'openai';
+  let baseUrl: string;
+  try {
+    baseUrl = params.baseUrl || resolveOpenAiBaseUrl();
+  } catch (e: any) {
+    // Endpoint refused before any credential or body left the process.
+    return { output: '', modelUsed: null, providerUsageMetadata: null, hadProviderError: true, lastProviderError: `ENDPOINT_NOT_APPROVED: ${e?.message || e}`, latencyMs: null };
+  }
   // NO_PAID_FALLBACK: exactly one model per logical call. A candidate list is
   // accepted for signature compatibility, but only its first entry is tried —
   // silently moving to another (possibly more expensive) model is refused.
@@ -172,7 +191,7 @@ export async function generateViaOpenAI(params: GenerateViaOpenAiParams): Promis
   let guard: GenerateViaOpenAiResult['spendGuard'];
   try {
     const r = await guardedPaidCall({
-      provider: 'openai', model: m, callSite: params.spend.callSite,
+      provider: providerId, model: m, callSite: params.spend.callSite,
       workspaceId: params.spend.workspaceId ?? null, taskId: params.spend.taskId ?? null, correlationId: params.spend.correlationId ?? null,
       idempotencyKey: params.spend.idempotencyKey || requestKey(params.spend.callSite),
       inputChars: contents.length, maxOutputTokens, approvalId: params.spend.approvalId ?? null,
@@ -183,6 +202,8 @@ export async function generateViaOpenAI(params: GenerateViaOpenAiParams): Promis
       try {
         const res = await fetch(`${baseUrl}/responses`, {
           method: 'POST',
+          // A redirect could carry the Authorization header to another host.
+          redirect: 'error',
           headers: {
             'Authorization': `Bearer ${apiKey}`,
             'Content-Type': 'application/json',

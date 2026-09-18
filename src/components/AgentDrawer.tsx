@@ -7,6 +7,8 @@ import {
   Plus, Trash2, Save, Send, Clock, Layers, Zap, Database,
   Sliders, RefreshCw, Radio, Globe, Brain, Compass
 } from 'lucide-react';
+import { RegistryModelSelect } from './registry/RegistryModelSelect';
+import { lastActiveWorkspaceId } from './registry/useModelRegistry';
 
 interface AgentDrawerProps {
   agent: AgentInfo | null | undefined;
@@ -35,7 +37,8 @@ export const AgentDrawer: React.FC<AgentDrawerProps> = ({
   
   // Sandbox State
   const [sandboxPrompt, setSandboxPrompt] = useState('');
-  const [selectedModel, setSelectedModel] = useState(agent?.assignedModel || 'claude');
+  const [selectedModel, setSelectedModel] = useState(agent?.assignedModel || '');
+  const registryWorkspaceId = lastActiveWorkspaceId();
   const [isRunningSandbox, setIsRunningSandbox] = useState(false);
   const [sandboxOutput, setSandboxOutput] = useState<string | null>(null);
   const [sandboxLatency, setSandboxLatency] = useState<number | null>(null);
@@ -345,20 +348,7 @@ export const AgentDrawer: React.FC<AgentDrawerProps> = ({
 
                   <div className="flex items-center gap-2">
                     <span className="text-[10px] font-mono text-[#6A7097]">MODEL:</span>
-                    <select
-                      value={selectedModel}
-                      onChange={(e) => setSelectedModel(e.target.value)}
-                      className="bg-[#0B0D1B] border border-[#232746] rounded-lg px-2.5 py-1 text-xs font-mono text-white focus:outline-none focus:border-[#615EFF]"
-                    >
-                      <option value="claude">Claude 3.7 Sonnet</option>
-                      <option value="claudecode">Claude Code (Terminal)</option>
-                      <option value="perplexity">Perplexity Sonar</option>
-                      <option value="deepseek">DeepSeek R1</option>
-                      <option value="chatgpt">ChatGPT o3</option>
-                      <option value="codex">Codex Engine</option>
-                      <option value="kimi3">Kimi 3 (2M Docs)</option>
-                      <option value="gemini">Gemini 2.5 Flash</option>
-                    </select>
+                    <RegistryModelSelect workspaceId={registryWorkspaceId} value={selectedModel} onChange={(v) => setSelectedModel(v)} className="min-w-[220px]" />
                   </div>
                 </div>
 

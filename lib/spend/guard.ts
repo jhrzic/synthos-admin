@@ -36,6 +36,7 @@
 import { recordRuntimeEvent } from '../runtime-events';
 import { getDatabase } from '../persistence';
 import { runWithPermit, type SpendPermit } from './network-guard';
+import { isRegistryGoverned, registryGate } from '../registry';
 import {
   getSpendPolicy, getModelPrice, costTierFor, tierRank, estimateTokensFromChars,
   type PaidProvider, type CostTier, type SpendPolicy, type ModelPrice,
@@ -212,6 +213,15 @@ export function authorizePaidCall(req: PaidCallRequest): { permitted: false; usa
   const provLimits = policy.providers[req.provider];
   if (!provLimits || !provLimits.enabled) return block(req, attempt, 'PROVIDER_DISABLED', `Paid calls to ${req.provider} are switched off.`);
 
+  // --- MODEL REGISTRY ---------------------------------------------------------
+  // A provider governed by the registry may only be called for a canonical,
+  // qualified, enabled, priced, configured model this workspace permits.
+  // Appearing in a manifest is not permission.
+  if (isRegistryGoverned(req.provider)) {
+    const gate = registryGate(req.provider, req.model, { workspaceId: req.workspaceId ?? null });
+    if (!gate.ok) return block(req, attempt, gate.code, gate.reason);
+  }
+
   if (req.inputChars > policy.task.maxInputChars) {
     return block(req, attempt, 'CONTEXT_TOO_LARGE', `Input is ${req.inputChars} characters; the limit is ${policy.task.maxInputChars}. Nothing was truncated or sent.`);
   }
@@ -223,7 +233,11 @@ export function authorizePaidCall(req: PaidCallRequest): { permitted: false; usa
   if (!price) {
     return block(req, attempt, 'PRICE_UNKNOWN', `The pricing catalog has no current price for ${req.provider}:${req.model}, so its cost cannot be bounded. PRICE UNKNOWN — EXECUTION BLOCKED.`);
   }
-  if (price.ageHours === null || price.ageHours > policy.pricing.maxAgeHours) {
+  if (price.staleAfter) {
+    if (Date.now() > Date.parse(price.staleAfter)) {
+      return block(req, attempt, 'PRICE_STALE', `The registry price for ${req.provider}:${req.model} went stale at ${price.staleAfter}. Import an updated manifest and re-qualify the model.`);
+    }
+  } else if (price.ageHours === null || price.ageHours > policy.pricing.maxAgeHours) {
     return block(req, attempt, 'PRICE_STALE', `The price for ${req.provider}:${req.model} was last confirmed ${price.ageHours === null ? 'never' : `${Math.round(price.ageHours)}h ago`}; prices older than ${policy.pricing.maxAgeHours}h are not trusted for a ceiling. Refresh pricing in Master Admin → Spend Control.`);
   }
   const tier = costTierFor(price, policy);

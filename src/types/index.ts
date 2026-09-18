@@ -390,6 +390,12 @@ export interface KanbanTask {
    * receipt's outcome and the artifact's memory (quarantine) state. Read from
    * the /api/execute-agent-task response; never computed client-side.
    */
+  /**
+   * What actually executed, from the signed receipt: the registry provider and
+   * canonical model SynthOS selected, and the model id the provider reported
+   * back. Never taken from the agent roster.
+   */
+  executedModel?: { providerId: string | null; modelId: string | null; reportedModel: string | null };
   verificationOutcome?: {
     taskStatus: string;
     scopes?: any;

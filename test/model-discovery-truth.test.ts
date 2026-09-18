@@ -232,9 +232,9 @@ describe('discovery records a diff without changing routing', () => {
     globalThis.fetch = vi.fn(async () => ({
       ok: true, status: 200, headers: new Map(), text: async () => JSON.stringify({ data: [], models: [] }),
     })) as any;
-    await refreshModelCatalog('STARTUP');
+    await refreshModelCatalog('MANUAL');
     const report = lastRefresh();
-    expect(report?.trigger).toBe('STARTUP');
+    expect(report?.trigger).toBe('MANUAL');
     expect(report?.inferenceCalls).toBe(0);
     expect(report?.providers.length).toBeGreaterThan(0);
   });

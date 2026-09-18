@@ -13,13 +13,18 @@
 // in tests without triggering server.ts's self-executing startServer().
 // ---------------------------------------------------------------------------
 
-import { classifyModelRequest, ModelRouteClassification } from './model-router';
+import { resolveRoute, evaluateModel } from './registry';
 
 // Must match the default applied to a node's assignedModel in the real
 // /api/graphs/execute node-dispatch loop in server.ts. Kept as one named
 // constant so an estimate can never silently drift from what execution
 // actually does.
-export const GRAPH_EXECUTION_DEFAULT_MODEL = 'gemini-3.6-flash';
+/**
+ * There is deliberately NO default graph model. A compute node runs on the
+ * registry model its author selected, or the run is refused before any node
+ * executes (server.ts /api/graphs/execute). A default would be a silent
+ * choice nobody made.
+ */
 
 export interface GraphExecutionNodeInput {
   id: string;
@@ -32,12 +37,26 @@ export interface GraphExecutionNodeInput {
   assignedModel?: string;
 }
 
+/** Where a node would go, from the model registry — the same routing the executor uses. */
+export interface GraphNodeRouting {
+  /** Registry provider id, or NOT_SELECTED / UNSUPPORTED when it cannot be routed. */
+  provider: string;
+  routable: boolean;
+  resolvedModel: string | null;
+  requestedModel: string;
+  code: string | null;
+  message: string | null;
+  /** Registry availability (qualified, enabled, priced, permitted…), reported separately from routing. */
+  availability: string | null;
+  executable: boolean;
+}
+
 export interface GraphNodeEstimate {
   nodeId: string;
   label: string;
   assignedAgent: string;
   requestedModel: string;
-  routing: ModelRouteClassification;
+  routing: GraphNodeRouting;
 }
 
 export interface GraphExecutionEstimate {
@@ -95,26 +114,35 @@ export function classifyGraphNode(node: GraphExecutionNodeInput): GraphNodeClass
   return isWindmillNode ? 'EXTERNAL_ACTION' : 'COMPUTE';
 }
 
-export function estimateGraphExecution(nodes: GraphExecutionNodeInput[]): GraphExecutionEstimate {
+export function estimateGraphExecution(nodes: GraphExecutionNodeInput[], workspaceId?: string): GraphExecutionEstimate {
   const agentNodes = selectLiveExecutionNodes(nodes);
   const nodeEstimates: GraphNodeEstimate[] = agentNodes.map((n) => {
-    const requestedModel = (n.assignedModel && n.assignedModel.trim()) || GRAPH_EXECUTION_DEFAULT_MODEL;
+    const requestedModel = (n.assignedModel && n.assignedModel.trim()) || '';
+    let routing: GraphNodeRouting;
+    if (!requestedModel) {
+      routing = { provider: 'NOT_SELECTED', routable: false, resolvedModel: null, requestedModel, code: 'MODEL_NOT_SELECTED', message: 'No model selected for this node.', availability: null, executable: false };
+    } else {
+      const r = resolveRoute(requestedModel);
+      if (!r.ok) {
+        routing = { provider: 'UNSUPPORTED', routable: false, resolvedModel: null, requestedModel, code: r.code, message: r.reason, availability: null, executable: false };
+      } else {
+        const view = evaluateModel(r.providerId, r.modelId, { workspaceId: workspaceId ?? null });
+        routing = { provider: r.providerId, routable: true, resolvedModel: r.modelId, requestedModel, code: null, message: null, availability: view?.availability ?? null, executable: !!view?.executable };
+      }
+    }
     return {
       nodeId: n.id,
       label: n.label || n.name || n.title || n.id,
       assignedAgent: n.assignedAgent || n.agentRole || 'dev',
       requestedModel,
-      routing: classifyModelRequest(requestedModel),
+      routing,
     };
   });
-  // PUSH 1 — "routable" means routable BY GRAPH EXECUTION, which is Gemini
-  // only (server.ts POST /api/graphs/execute holds a resolved Gemini key and
-  // calls generateViaGemini). OpenAI became an executable provider elsewhere
-  // in the platform, which made the old `=== 'UNSUPPORTED'` test wrong here:
-  // it would have reported an OpenAI node routable while the executor
-  // refused it, and an estimate that disagrees with the executor is worse
-  // than no estimate. The rule is now stated as what it actually is.
-  const unroutableNodes = nodeEstimates.filter((e) => e.routing.provider !== 'GEMINI');
+  // Routable = the executor can dispatch it (registered, a MODEL_CALL protocol
+  // adapter, a valid endpoint). Whether it may run NOW (qualified, enabled,
+  // priced, permitted) is the spend guard's decision, reported per node as
+  // availability — the two are different facts and stay apart.
+  const unroutableNodes = nodeEstimates.filter((e) => !e.routing.routable);
 
   return {
     agentNodeCount: agentNodes.length,

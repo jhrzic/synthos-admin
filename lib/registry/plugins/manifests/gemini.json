@@ -1,0 +1,1377 @@
+{
+  "schemaVersion": "synthos.registry/v1",
+  "manifestVersion": "2026.09.18-gemini-1",
+  "provenance": {
+    "publisher": "synthos-core",
+    "generatedAt": "2026-09-18T07:06:56.375Z",
+    "notes": "Model ids and prices from https://ai.google.dev/gemini-api/docs/pricing.md.txt, as stored by the SynthOS pricing catalog at 2026-09-18T05:24:20.690Z. Capabilities are recorded only where this repository has evidence; every other model is listed with empty metadata (METADATA_REQUIRED) rather than guessed. Lifecycle ACTIVE means \"listed in the provider's current pricing documentation\"."
+  },
+  "provider": {
+    "providerId": "gemini",
+    "displayName": "Google Gemini",
+    "protocol": "gemini.generate_content",
+    "adapterVersion": "1.0.0",
+    "approvedHosts": [
+      "generativelanguage.googleapis.com"
+    ],
+    "defaultBaseUrl": "https://generativelanguage.googleapis.com/v1beta",
+    "baseUrlEnvVar": "GEMINI_BASE_URL",
+    "auth": {
+      "type": "API_KEY_HEADER",
+      "credentialSlot": "gemini",
+      "envVars": [
+        "GEMINI_API_KEY"
+      ]
+    },
+    "billing": "METERED",
+    "restrictions": {
+      "regions": [],
+      "compliance": []
+    }
+  },
+  "models": [
+    {
+      "modelId": "gemini-2.5-flash",
+      "aliases": [],
+      "displayName": "gemini-2.5-flash",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.3,
+            "output": 2.5,
+            "cachedInput": 0.03
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-2.5-flash-preview-tts",
+      "aliases": [],
+      "displayName": "gemini-2.5-flash-preview-tts",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.5,
+            "output": 10,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-2.5-pro",
+      "aliases": [],
+      "displayName": "gemini-2.5-pro",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 1.25,
+            "output": 10,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [
+            {
+              "thresholdTokens": 200000,
+              "rates": {
+                "input": 2.5,
+                "output": 15,
+                "cachedInput": null
+              }
+            }
+          ],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-2.5-pro-preview-tts",
+      "aliases": [],
+      "displayName": "gemini-2.5-pro-preview-tts",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 1,
+            "output": 20,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-3-flash-preview",
+      "aliases": [],
+      "displayName": "gemini-3-flash-preview",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.5,
+            "output": 3,
+            "cachedInput": 0.05
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-3-pro-image",
+      "aliases": [],
+      "displayName": "gemini-3-pro-image",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 2,
+            "output": 120,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-3.1-flash-image",
+      "aliases": [],
+      "displayName": "gemini-3.1-flash-image",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.5,
+            "output": 60,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-3.1-flash-lite",
+      "aliases": [],
+      "displayName": "gemini-3.1-flash-lite",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "capabilities": [
+        {
+          "id": "text.input",
+          "supported": true,
+          "source": "Routed for text generation by this repository (lib/model-router.ts / lib/fabric)",
+          "verification": "DOCUMENTED",
+          "effectiveDate": null
+        },
+        {
+          "id": "text.output",
+          "supported": true,
+          "source": "Routed for text generation by this repository (lib/model-router.ts / lib/fabric)",
+          "verification": "DOCUMENTED",
+          "effectiveDate": null
+        }
+      ],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [
+        "NARRATIVE",
+        "LITERAL",
+        "JSON_OBJECT"
+      ],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.25,
+            "output": 1.5,
+            "cachedInput": 0.025
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-3.1-flash-lite-image",
+      "aliases": [],
+      "displayName": "gemini-3.1-flash-lite-image",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.25,
+            "output": 30,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-3.1-flash-live-preview",
+      "aliases": [],
+      "displayName": "gemini-3.1-flash-live-preview",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.75,
+            "output": 12,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-3.1-flash-tts-preview",
+      "aliases": [],
+      "displayName": "gemini-3.1-flash-tts-preview",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 1,
+            "output": 20,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-3.1-pro-preview",
+      "aliases": [],
+      "displayName": "gemini-3.1-pro-preview",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "capabilities": [
+        {
+          "id": "text.input",
+          "supported": true,
+          "source": "Routed for text generation by this repository (lib/model-router.ts / lib/fabric)",
+          "verification": "DOCUMENTED",
+          "effectiveDate": null
+        },
+        {
+          "id": "text.output",
+          "supported": true,
+          "source": "Routed for text generation by this repository (lib/model-router.ts / lib/fabric)",
+          "verification": "DOCUMENTED",
+          "effectiveDate": null
+        }
+      ],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [
+        "NARRATIVE",
+        "LITERAL",
+        "JSON_OBJECT"
+      ],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 2,
+            "output": 12,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [
+            {
+              "thresholdTokens": 200000,
+              "rates": {
+                "input": 4,
+                "output": 18,
+                "cachedInput": null
+              }
+            }
+          ],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-3.1-pro-preview-customtools",
+      "aliases": [],
+      "displayName": "gemini-3.1-pro-preview-customtools",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 2,
+            "output": 12,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [
+            {
+              "thresholdTokens": 200000,
+              "rates": {
+                "input": 4,
+                "output": 18,
+                "cachedInput": null
+              }
+            }
+          ],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-3.5-flash",
+      "aliases": [],
+      "displayName": "gemini-3.5-flash",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 1.5,
+            "output": 9,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-3.5-flash-lite",
+      "aliases": [],
+      "displayName": "gemini-3.5-flash-lite",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.3,
+            "output": 2.5,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-3.6-flash",
+      "aliases": [],
+      "displayName": "gemini-3.6-flash",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "capabilities": [
+        {
+          "id": "text.input",
+          "supported": true,
+          "source": "Routed for text generation by this repository (lib/model-router.ts / lib/fabric)",
+          "verification": "DOCUMENTED",
+          "effectiveDate": null
+        },
+        {
+          "id": "text.output",
+          "supported": true,
+          "source": "Routed for text generation by this repository (lib/model-router.ts / lib/fabric)",
+          "verification": "DOCUMENTED",
+          "effectiveDate": null
+        }
+      ],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [
+        "NARRATIVE",
+        "LITERAL",
+        "JSON_OBJECT"
+      ],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.75,
+            "output": 3.75,
+            "cachedInput": 0.075
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": "2026-12-31T23:59:59.000Z",
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        },
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 1.5,
+            "output": 7.5,
+            "cachedInput": 0.15
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2027-01-01T00:00:00.000Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-3.7-flash",
+      "aliases": [],
+      "displayName": "gemini-3.7-flash",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "capabilities": [
+        {
+          "id": "text.input",
+          "supported": true,
+          "source": "Routed for text generation by this repository (lib/model-router.ts / lib/fabric)",
+          "verification": "DOCUMENTED",
+          "effectiveDate": null
+        },
+        {
+          "id": "text.output",
+          "supported": true,
+          "source": "Routed for text generation by this repository (lib/model-router.ts / lib/fabric)",
+          "verification": "DOCUMENTED",
+          "effectiveDate": null
+        }
+      ],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [
+        "NARRATIVE",
+        "LITERAL",
+        "JSON_OBJECT"
+      ],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.75,
+            "output": 3.75,
+            "cachedInput": 0.075
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": "2026-12-31T23:59:59.000Z",
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        },
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 1.5,
+            "output": 7.5,
+            "cachedInput": 0.15
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2027-01-01T00:00:00.000Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-3.8-flash",
+      "aliases": [],
+      "displayName": "gemini-3.8-flash",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "capabilities": [
+        {
+          "id": "text.input",
+          "supported": true,
+          "source": "Routed for text generation by this repository (lib/model-router.ts / lib/fabric)",
+          "verification": "DOCUMENTED",
+          "effectiveDate": null
+        },
+        {
+          "id": "text.output",
+          "supported": true,
+          "source": "Routed for text generation by this repository (lib/model-router.ts / lib/fabric)",
+          "verification": "DOCUMENTED",
+          "effectiveDate": null
+        }
+      ],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [
+        "NARRATIVE",
+        "LITERAL",
+        "JSON_OBJECT"
+      ],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.75,
+            "output": 3.75,
+            "cachedInput": 0.075
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": "2026-12-31T23:59:59.000Z",
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        },
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 1.5,
+            "output": 7.5,
+            "cachedInput": 0.15
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2027-01-01T00:00:00.000Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-3.8-live",
+      "aliases": [],
+      "displayName": "gemini-3.8-live",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.75,
+            "output": 12,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-3.8-live-extended-thinking",
+      "aliases": [],
+      "displayName": "gemini-3.8-live-extended-thinking",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.75,
+            "output": 12,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-omni-1.1-flash",
+      "aliases": [],
+      "displayName": "gemini-omni-1.1-flash",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 1.5,
+            "output": 17.5,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gemini-omni-flash-preview",
+      "aliases": [],
+      "displayName": "gemini-omni-flash-preview",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "generationConfig.maxOutputTokens",
+        "generationConfig.temperature"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 1.5,
+            "output": 17.5,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.690Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.690Z",
+          "staleAfter": "2026-11-17T05:24:20.690Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.generate_content",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    }
+  ]
+}

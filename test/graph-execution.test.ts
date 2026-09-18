@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import {
   estimateGraphExecution,
   selectLiveExecutionNodes,
-  GRAPH_EXECUTION_DEFAULT_MODEL,
 } from '../lib/graph-execution';
 
 describe('lib/graph-execution: real routing estimate, never a fabricated dollar figure', () => {
@@ -28,10 +27,11 @@ describe('lib/graph-execution: real routing estimate, never a fabricated dollar 
     expect(est.costEstimateReason.length).toBeGreaterThan(0);
   });
 
-  it('a node with no assignedModel is estimated against the real execution default, not a guess', () => {
+  it('a node with no assignedModel is NOT_SELECTED — there is no default model to fall back to', () => {
     const est = estimateGraphExecution([{ id: 'n1', type: 'agent', label: 'A' }]);
-    expect(est.nodes[0].requestedModel).toBe(GRAPH_EXECUTION_DEFAULT_MODEL);
-    expect(est.nodes[0].routing.provider).toBe('GEMINI');
+    expect(est.nodes[0].requestedModel).toBe('');
+    expect(est.nodes[0].routing).toMatchObject({ provider: 'NOT_SELECTED', routable: false, code: 'MODEL_NOT_SELECTED' });
+    expect(est.allNodesRoutable).toBe(false);
   });
 
   it('a node requesting a provider no one can run is flagged UNSUPPORTED and drives allNodesRoutable=false', () => {
@@ -44,24 +44,27 @@ describe('lib/graph-execution: real routing estimate, never a fabricated dollar 
     expect(est.unroutableNodes[0].routing.provider).toBe('UNSUPPORTED');
   });
 
-  // PUSH 1 — the case this test previously covered with 'gpt-4o', restated
-  // now that OpenAI is genuinely executable elsewhere in the platform. The
-  // node is still unroutable, and for the honest reason: graph execution
-  // holds a Gemini key and calls generateViaGemini, so a provider it cannot
-  // dispatch to is unroutable HERE even though SynthOS can run it via
-  // POST /api/execute-agent-task. The estimate must agree with the executor
-  // — reporting it routable would be an estimate that lies.
-  it('a node requesting a provider SynthOS can run but graph execution cannot is still unroutable', () => {
+  // Graph nodes now route through the model registry exactly like the
+  // kernel, so any registered model on a MODEL_CALL protocol is routable here
+  // too. Routable is not the same as runnable: availability (qualification,
+  // enablement, pricing, policy) is reported separately and is decided by the
+  // spend guard at dispatch.
+  it('a registered model on another dispatchable protocol is routable; its availability is reported separately', () => {
     const est = estimateGraphExecution([
       { id: 'n1', type: 'agent', label: 'A', assignedModel: 'gemini-3.1-flash-lite' },
       { id: 'n2', type: 'agent', label: 'B', assignedModel: 'gpt-4o' },
     ]);
+    expect(est.allNodesRoutable).toBe(true);
+    expect(est.nodes[1].routing).toMatchObject({ provider: 'openai', routable: true, resolvedModel: 'gpt-4o' });
+    // Installed but not qualified in a fresh registry: routable, not executable.
+    expect(est.nodes[1].routing.executable).toBe(false);
+    expect(est.nodes[1].routing.availability).not.toBe('AVAILABLE');
+  });
+
+  it('a registered model on a protocol this build cannot dispatch is unroutable', () => {
+    const est = estimateGraphExecution([{ id: 'n1', type: 'agent', label: 'A', assignedModel: 'claude-opus-5' }]);
     expect(est.allNodesRoutable).toBe(false);
-    expect(est.unroutableNodes.map((n) => n.nodeId)).toEqual(['n2']);
-    // Classified honestly as OpenAI — never mislabelled UNSUPPORTED just to
-    // make it unroutable. Unroutable-here and unsupported-anywhere are two
-    // different facts and the estimate keeps them apart.
-    expect(est.unroutableNodes[0].routing.provider).toBe('OPENAI');
+    expect(est.unroutableNodes[0].routing).toMatchObject({ provider: 'UNSUPPORTED', code: 'UNSUPPORTED_BY_ADAPTER' });
   });
 
   it('non-agent nodes are excluded from the estimate entirely (agentNodeCount != totalNodeCount)', () => {

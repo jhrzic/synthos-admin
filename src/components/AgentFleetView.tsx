@@ -212,7 +212,7 @@ export const AgentFleetView: React.FC<AgentFleetViewProps> = ({
               : 'bg-[#090A15] text-[#8E94B8] hover:bg-[#121426] border border-[#181B2E]'
           }`}
         >
-          Frontier Models (Claude 3.7, DeepSeek R1, ChatGPT o3)
+          Frontier models (from the model registry)
         </button>
       </div>
 

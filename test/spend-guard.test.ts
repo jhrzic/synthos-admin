@@ -126,10 +126,10 @@ describe('DEFAULTS — nothing is spendable until a platform admin says so', () 
     expect(saveSpendPolicy({ global: { dailyUsd: -1, monthlyUsd: 1, maxConcurrent: 1 } }, 't').ok).toBe(false);
   });
 
-  it('a model the catalog does not price is BLOCKED (PRICE_UNKNOWN) — new models are not spendable by default', async () => {
+  it('a model the registry does not know is BLOCKED (MODEL_NOT_REGISTERED) — new models are not spendable by default', async () => {
     policy();
     const r = await call(key(), 'gpt-brand-new-model');
-    expect(r.lastProviderError).toMatch(/PRICE_UNKNOWN/);
+    expect(r.lastProviderError).toMatch(/MODEL_NOT_REGISTERED/);
     expect(calls).toBe(0);
   });
 });

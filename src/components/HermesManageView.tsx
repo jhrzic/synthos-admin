@@ -6,6 +6,7 @@ import {
   AlertTriangle, ExternalLink, ArrowRight, Play, Layers, ShieldCheck,
   Download, Clock, ChevronRight, ShieldAlert
 } from 'lucide-react';
+import { useModelRegistry, lastActiveWorkspaceId } from './registry/useModelRegistry';
 import { VoiceConfig } from '../services/voiceEngine';
 
 interface HermesManageViewProps {
@@ -75,6 +76,7 @@ export const HermesManageView: React.FC<HermesManageViewProps> = ({
   const [mcpAutoDiscovery, setMcpAutoDiscovery] = useState(true);
   const [voiceWakeWord, setVoiceWakeWord] = useState('Jarvis');
   const [activePromptIndex, setActivePromptIndex] = useState(0);
+  const swarmRegistry = useModelRegistry(lastActiveWorkspaceId());
 
   // Hermes Upstream Watcher State
   const [upstreamData, setUpstreamData] = useState<HermesUpstreamData>({
@@ -709,7 +711,8 @@ export const HermesManageView: React.FC<HermesManageViewProps> = ({
               <div className="p-4 bg-[#111326] border border-[#1F233C] rounded-xl">
                 <div className="text-xs font-bold text-white mb-2">Primary Swarm Coordination Model</div>
                 <div className="grid grid-cols-3 gap-2">
-                  {['Nous Hermes 3 (OpenRouter)', 'Claude 3.7 Sonnet', 'GPT-4o Reasoning'].map((modelName, i) => (
+                  {/* From the model registry — no model named in this view. */}
+                  {swarmRegistry.models.filter((m) => m.executable).slice(0, 3).map((m) => m.displayName).concat(swarmRegistry.models.some((m) => m.executable) ? [] : ['No executable registry model']).map((modelName, i) => (
                     <button
                       key={i}
                       onClick={() => setActivePromptIndex(i)}

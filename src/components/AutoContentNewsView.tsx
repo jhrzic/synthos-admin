@@ -5,6 +5,8 @@ import {
   ExternalLink, ArrowRight, RefreshCw, FileText, Database, MessageSquare,
   TrendingUp, Flame, Radio, Clock, Eye, Layers
 } from 'lucide-react';
+import { RegistryModelSelect } from './registry/RegistryModelSelect';
+import { lastActiveWorkspaceId } from './registry/useModelRegistry';
 
 interface AutoContentNewsViewProps {
   agents: Record<string, AgentInfo>;
@@ -50,7 +52,8 @@ export const AutoContentNewsView: React.FC<AutoContentNewsViewProps> = ({
 
   const [selectedNews, setSelectedNews] = useState<NewsItem | null>(null);
   const [contentFormat, setContentFormat] = useState<'substack' | 'twitter' | 'linkedin' | 'obsidian'>('substack');
-  const [targetModel, setTargetModel] = useState<string>('claude');
+  const [targetModel, setTargetModel] = useState<string>('');
+  const registryWorkspaceId = lastActiveWorkspaceId();
   const [generatedDraft, setGeneratedDraft] = useState<string>('');
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
@@ -272,17 +275,7 @@ export const AutoContentNewsView: React.FC<AutoContentNewsViewProps> = ({
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <span className="text-xs font-mono text-[#8E94B8]">Inference Model:</span>
-                <select
-                  value={targetModel}
-                  onChange={(e) => setTargetModel(e.target.value)}
-                  className="bg-[#05060B] border border-[#1E223D] rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[#615EFF]"
-                >
-                  <option value="claude">Claude 3.7 Sonnet (Hybrid CoT)</option>
-                  <option value="chatgpt">ChatGPT o3 (Viral Distribution)</option>
-                  <option value="deepseek">DeepSeek R1 (Deep Tech Analysis)</option>
-                  <option value="perplexity">Perplexity (Grounded Research)</option>
-                  <option value="kimi3">Kimi 3 (Long Context Digest)</option>
-                </select>
+                <RegistryModelSelect workspaceId={registryWorkspaceId} value={targetModel} onChange={(v) => setTargetModel(v)} className="min-w-[220px]" />
               </div>
 
               <button

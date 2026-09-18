@@ -98,14 +98,19 @@ describe('F1: /api/execute-agent-task never claims a tool ran (originally server
     expect(kernelContent).toContain('await ctx.invoke(invocationName, async () => {');
     // The name is computed from the classified provider, and from nothing
     // else — not from the agent role, not from a caller-supplied string.
-    expect(kernelContent).toContain('const invocationName = provider === "OPENAI" ? "model.openai" : "model.gemini";');
+    expect(kernelContent).toContain('const invocationName = `model.${provider}`;');
+    expect(kernelContent).toContain('const provider = route.providerId;');
 
     // The wrapped block calls the shared real adapters — one per provider,
     // neither inlining its own retry loop nor inventing a mechanism.
     const invokeIdx = kernelContent.indexOf('await ctx.invoke(invocationName');
     const wrappedBlock = kernelContent.slice(invokeIdx, invokeIdx + 2000);
-    expect(wrappedBlock).toContain('generateViaGemini({');
-    expect(wrappedBlock).toContain('generateViaOpenAI({');
+    // Dispatch goes through the provider's shared protocol adapter, resolved
+    // by the registry — one call, one model, no per-provider branch here.
+    expect(wrappedBlock).toContain('await route.adapter.call!({');
+    const protocols = fs.readFileSync(path.resolve(process.cwd(), 'lib/registry/protocols.ts'), 'utf-8');
+    expect(protocols).toContain('generateViaGemini({');
+    expect(protocols).toContain('generateViaOpenAI({');
 
     // The real Gemini mechanics, now under the spend guard: ONE model per
     // logical call (NO_PAID_FALLBACK), sent through guardedGeminiGenerate.

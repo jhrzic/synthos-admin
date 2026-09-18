@@ -156,7 +156,9 @@ describe('1. MISSING CREDENTIAL — the failure names the provider that was actu
       WS_A,
       createExecutionContext({ workspaceId: WS_A })
     );
-    expect(result.body.reason).toBe('MODEL_MAPPING_NOT_FOUND');
+    // Routing is registry-driven now: an id no installed provider plugin
+    // declares is not registered, and nothing is dispatched.
+    expect(result.body.reason).toBe('MODEL_NOT_REGISTERED');
     expect(dbActivityEvents(taskId).map((e) => e.event_type)).toContain('PROVIDER_UNSUPPORTED');
   });
 });

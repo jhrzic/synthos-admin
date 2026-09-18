@@ -22,10 +22,18 @@
 
 import { resolvePlatformSetting, setPlatformSetting } from '../platform-settings';
 import { getCatalogPrice } from '../pricing/catalog';
+import { isRegistryGoverned, registryPrice } from '../registry';
 import { ratesAt } from '../pricing/parse';
 
+/**
+ * Providers that always have a policy entry. Any other provider installed in
+ * the model registry (lib/registry) may be given limits too; a provider with
+ * no entry is disabled — fail closed, never unlimited.
+ */
 export const PAID_PROVIDERS = ['openai', 'gemini', 'antigravity', 'openai_tts', 'elevenlabs', 'fish_audio'] as const;
-export type PaidProvider = (typeof PAID_PROVIDERS)[number];
+export type BuiltInPaidProvider = (typeof PAID_PROVIDERS)[number];
+/** Any provider id. Built-ins plus registry-installed providers. */
+export type PaidProvider = string;
 
 export const COST_TIERS = ['LOW_COST', 'STANDARD', 'PREMIUM'] as const;
 export type CostTier = (typeof COST_TIERS)[number];
@@ -41,7 +49,7 @@ export interface SpendPolicy {
   /** Master switch. OFF means no paid provider request leaves the process. */
   paidExecutionEnabled: boolean;
   global: { dailyUsd: number; monthlyUsd: number; maxConcurrent: number };
-  providers: Record<PaidProvider, ProviderLimits>;
+  providers: Record<string, ProviderLimits>;
   workspaceDefault: { dailyUsd: number; maxConcurrent: number };
   workspaceOverrides: Record<string, { dailyUsd: number; maxConcurrent: number }>;
   task: {
@@ -110,6 +118,9 @@ export interface ModelPrice {
   /** Hours since the source last refreshed successfully; null = never. */
   ageHours: number | null;
   derivedFrom?: string | null;
+  /** Registry prices carry their own expiry; when set it replaces the maxAgeHours rule. */
+  staleAfter?: string | null;
+  source?: 'REGISTRY' | 'PRICING_CATALOG';
 }
 
 const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
@@ -126,7 +137,9 @@ export function validateSpendPolicy(p: any): string[] {
   if (!p || typeof p !== 'object') return ['policy must be an object'];
   if (typeof p.paidExecutionEnabled !== 'boolean') errors.push('paidExecutionEnabled must be true or false');
   num('global.dailyUsd', p.global?.dailyUsd); num('global.monthlyUsd', p.global?.monthlyUsd); int('global.maxConcurrent', p.global?.maxConcurrent);
-  for (const prov of PAID_PROVIDERS) {
+  const provIds = [...new Set([...PAID_PROVIDERS, ...Object.keys(p.providers || {})])];
+  for (const prov of provIds) {
+    if (!/^[a-z][a-z0-9_-]{1,39}$/.test(prov)) { errors.push(`providers.${prov} is not a valid provider id`); continue; }
     const l = p.providers?.[prov];
     if (!l) { errors.push(`providers.${prov} is required`); continue; }
     if (typeof l.enabled !== 'boolean') errors.push(`providers.${prov}.enabled must be true or false`);
@@ -168,8 +181,13 @@ export function getSpendPolicy(): SpendPolicy & { source: 'default' | 'platform_
 
 export function mergePolicy(partial: any): SpendPolicy {
   const d = DEFAULT_SPEND_POLICY;
-  const providers = {} as Record<PaidProvider, ProviderLimits>;
+  const providers: Record<string, ProviderLimits> = {};
   for (const prov of PAID_PROVIDERS) providers[prov] = { ...d.providers[prov], ...(partial?.providers?.[prov] || {}) };
+  // Registry providers added by an operator: kept only when complete.
+  for (const [prov, l] of Object.entries(partial?.providers || {})) {
+    if ((PAID_PROVIDERS as readonly string[]).includes(prov) || !l || typeof l !== 'object') continue;
+    providers[prov] = { enabled: false, dailyUsd: 0, monthlyUsd: 0, maxConcurrent: 0, ...(l as object) } as ProviderLimits;
+  }
   return {
     paidExecutionEnabled: partial?.paidExecutionEnabled ?? d.paidExecutionEnabled,
     global: { ...d.global, ...(partial?.global || {}) },
@@ -200,6 +218,31 @@ export function saveSpendPolicy(partial: any, actorUserId: string): { ok: true; 
  * when the catalog does not price the model, or has no window covering the date.
  */
 export function getModelPrice(provider: string, model: string, atIso: string = new Date().toISOString()): ModelPrice | null {
+  // Registry-governed providers are priced ONLY from their manifest. The older
+  // documentation-scraped catalog is not consulted for them, so there is one
+  // price, never two that could disagree.
+  let governed = false;
+  try { governed = isRegistryGoverned(provider); } catch { governed = false; }
+  if (governed) {
+    const r = registryPrice(provider, model, atIso);
+    if (!r || (r.state !== 'CURRENT' && r.state !== 'STALE')) return null;
+    const rec = r.record;
+    const tier = rec.tiers.length
+      ? rec.tiers.reduce((a, t) => ({ thresholdTokens: Math.min(a.thresholdTokens, t.thresholdTokens), rates: { input: Math.max(a.rates.input, t.rates.input), output: Math.max(a.rates.output, t.rates.output), cachedInput: a.rates.cachedInput === null || t.rates.cachedInput === null ? null : Math.max(a.rates.cachedInput, t.rates.cachedInput) } }))
+      : null;
+    return {
+      unit: rec.unit,
+      inputPerMillion: rec.rates.input,
+      outputPerMillion: rec.rates.output,
+      cachedInputPerMillion: rec.rates.cachedInput,
+      long: tier ? { thresholdTokens: tier.thresholdTokens, inputPerMillion: tier.rates.input, outputPerMillion: tier.rates.output, cachedInputPerMillion: tier.rates.cachedInput } : null,
+      versionKey: r.versionKey,
+      ageHours: (Date.parse(atIso) - Date.parse(rec.verifiedAt)) / 3_600_000,
+      derivedFrom: null,
+      staleAfter: rec.staleAfter,
+      source: 'REGISTRY',
+    };
+  }
   let lookup;
   try { lookup = getCatalogPrice(provider, model); } catch { return null; }
   if (!lookup) return null;

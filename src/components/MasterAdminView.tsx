@@ -11,6 +11,8 @@ import {
   Search, Eye, FileText, CheckSquare, BarChart3, AlertCircle,
   Clock, GitMerge, FileCode, CheckCircle, Flame, HelpCircle, Plus, Activity, Network
 } from 'lucide-react';
+import { useModelRegistry } from './registry/useModelRegistry';
+import { ProviderModelCatalog } from './ProviderModelCatalog';
 import { synthosControl } from '../services/synthosControlService';
 import { AntigravityControlPanel } from './AntigravityControlPanel';
 import { SpendControlPanel } from './SpendControlPanel';
@@ -155,6 +157,7 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
   onExecutePrompt
 }) => {
   const workspaceId = activeWorkspaceId || 'ws-synthos-primary';
+  const modelRegistry = useModelRegistry(workspaceId);
 
   // Real, workspace-scoped skill registry summary — see lib/skills.ts /
   // GET /api/skills. No fabricated "installed"/"READY" claims: enabled and
@@ -1657,19 +1660,19 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
                 <tr className="border-b border-[#1A1D34] text-slate-500 uppercase text-[10px]">
                   <th className="pb-3">Provider</th>
                   <th className="pb-3">Credentials</th>
-                  <th className="pb-3">Default Model</th>
+                  <th className="pb-3">Models (registry)</th>
                   <th className="pb-3">Live Status</th>
                   <th className="pb-3 text-right">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#15172C]">
-                {[
-                  { key: 'gemini', name: 'Google Gemini', defaultModel: 'gemini-3.1-flash-lite', configured: diagnostics?.providers?.gemini?.configured },
-                  { key: 'openrouter', name: 'OpenRouter', defaultModel: 'nousresearch/hermes-3-llama-3.1-405b', configured: diagnostics?.providers?.openrouter?.configured },
-                  { key: 'anthropic', name: 'Anthropic Claude', defaultModel: 'claude-3-7-sonnet', configured: diagnostics?.providers?.anthropic?.configured },
-                  { key: 'nous', name: 'Nous Research', defaultModel: 'Hermes-3-Llama-3.1-405B', configured: diagnostics?.providers?.nous?.configured },
-                  { key: 'ollama', name: 'Ollama (Local)', defaultModel: 'hermes-3-8b-q4', configured: diagnostics?.providers?.ollama?.configured }
-                ].map((p) => {
+                {/* Providers from the model registry — no provider or model name is
+                    typed here. There is no "default model": a task names its model. */}
+                {modelRegistry.providers.map((rp) => ({
+                  key: rp.providerId, name: rp.displayName,
+                  defaultModel: `${rp.executableCount}/${rp.modelCount} executable · ${rp.protocol}`,
+                  configured: rp.credential.ready,
+                })).map((p) => {
                   const testRes = providerTestResults[p.key];
                   return (
                     <tr key={p.key} className="hover:bg-[#0D0F22]/50 transition">
@@ -1710,19 +1713,8 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
                     </tr>
                   );
                 })}
-                {/* Pass V / H2 — Hermes MODEL and Hermes dedicated RUNTIME are
-                    architecturally different things (rule 1/9) and must never
-                    be shown as one combined "Hermes" row. */}
-                <tr className="hover:bg-[#0D0F22]/50 transition border-t-2 border-[#1A1D34]">
-                  <td className="py-3 font-bold text-white flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-slate-600" />
-                    Hermes MODEL (via OpenRouter alias)
-                  </td>
-                  <td className="py-3"><span className="text-slate-500">NOT CONFIGURED</span></td>
-                  <td className="py-3 text-slate-300">nousresearch/hermes-3-llama-3.1-405b</td>
-                  <td className="py-3"><span className="text-slate-600">UNSUPPORTED — no execution mapping wired (lib/model-router.ts)</span></td>
-                  <td className="py-3 text-right text-slate-600">N/A</td>
-                </tr>
+                {/* The Hermes dedicated RUNTIME is a service, not a model; models are
+                    listed from the registry above, never typed into this table. */}
                 <tr className="hover:bg-[#0D0F22]/50 transition">
                   <td className="py-3 font-bold text-white flex items-center gap-2">
                     <span className={`w-2 h-2 rounded-full ${diagnostics?.hermes?.status === 'UP' ? 'bg-[#00D26A]' : 'bg-slate-600'}`} />
@@ -1746,6 +1738,11 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
                 </tr>
               </tbody>
             </table>
+          </div>
+          {/* The model registry: every registered model, its state and reasons,
+              and the operator actions (qualify, enable, import, policy). */}
+          <div className="mt-4">
+            <ProviderModelCatalog workspaceId={workspaceId} />
           </div>
         </div>
       )}

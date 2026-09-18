@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "synthos.registry/v1",
+  "manifestVersion": "2026.09.18-openrouter-1",
+  "provenance": {
+    "publisher": "synthos-core",
+    "generatedAt": "2026-09-18T00:00:00.000Z",
+    "notes": "An aggregator of other vendors; not mirrored from static metadata. Empty until a manifest is imported."
+  },
+  "provider": {
+    "providerId": "openrouter",
+    "displayName": "OpenRouter",
+    "protocol": "openai.chat_completions",
+    "adapterVersion": "1.0.0",
+    "approvedHosts": [
+      "openrouter.ai"
+    ],
+    "defaultBaseUrl": "https://openrouter.ai/api/v1",
+    "baseUrlEnvVar": null,
+    "auth": {
+      "type": "BEARER",
+      "credentialSlot": null,
+      "envVars": [
+        "OPENROUTER_API_KEY"
+      ]
+    },
+    "billing": "METERED",
+    "restrictions": {
+      "regions": [],
+      "compliance": []
+    }
+  },
+  "models": []
+}

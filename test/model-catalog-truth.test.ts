@@ -233,36 +233,18 @@ describe('model ids are sourced, never invented', () => {
   });
 });
 
-describe('the stale one-model-per-provider registry labels are gone', () => {
-  const REGISTRY = 'src/data/mockData.ts';
-
-  function registryBlock(): string {
-    const src = fs.readFileSync(path.join(process.cwd(), REGISTRY), 'utf8');
-    const start = src.indexOf('export const INITIAL_MODELS');
-    const end = src.indexOf('export const', start + 10);
-    return src.slice(start, end);
-  }
-
-  it('no seat name asserts a model version', () => {
-    const block = registryBlock();
-    for (const stale of [
-      'Claude 3.7 Sonnet / Opus',
-      'Claude Code (3.7 Sonnet)',
-      'Gemini 3.7 / 3.6 Flash',
-      'ChatGPT o3 / GPT-4.5',
-      'DeepSeek R1 / V3',
-      'Nous Hermes 3 (405B / 70B)',
-    ]) {
-      expect(block, stale).not.toContain(stale);
-    }
+describe('the UI-only model array is gone — models come from the registry', () => {
+  it('src/data/mockData.ts no longer defines INITIAL_MODELS (seat names, versions and prices typed into the client)', () => {
+    const src = fs.readFileSync(path.join(process.cwd(), 'src/data/mockData.ts'), 'utf8');
+    expect(src).not.toContain('export const INITIAL_MODELS');
+    // No agent in the roster claims a fixed model — the model is chosen per task, from the registry.
+    expect([...src.matchAll(/assignedModel: '([^']*)'/g)].every((m) => m[1] === '')).toBe(true);
   });
 
-  it('the registry reports no performance for providers that never ran', () => {
-    const block = registryBlock();
-    const latency = [...block.matchAll(/latency:\s*(\d+)/g)].map((m) => Number(m[1]));
-    const throughput = [...block.matchAll(/tokensPerSec:\s*(\d+)/g)].map((m) => Number(m[1]));
-    expect(latency.length).toBeGreaterThan(0);
-    expect(latency.every((n) => n === 0), `latency: ${latency.join(',')}`).toBe(true);
-    expect(throughput.every((n) => n === 0), `tokensPerSec: ${throughput.join(',')}`).toBe(true);
+  it('App builds its models map from the registry, not from a constant', () => {
+    const app = fs.readFileSync(path.join(process.cwd(), 'src/App.tsx'), 'utf8');
+    expect(app).toContain('const modelRegistry = useModelRegistry(activeWorkspaceId);');
+    expect(app).toContain('registryModelInfo(modelRegistry)');
+    expect(app).not.toContain('INITIAL_MODELS');
   });
 });

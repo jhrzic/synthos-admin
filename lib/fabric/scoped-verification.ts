@@ -117,6 +117,8 @@ export function commitContentFailure(params: {
   scoped: ScopedAegisResult;
   artifact: { artifact_id: string; content_hash: string };
   identity: { assignedAgent: string; provider: string; modelUsed: string };
+  /** Canonical registry identity and the ledger price, when a model call produced the artifact. */
+  registry?: Pick<CanonicalReceiptPayload, 'registryProviderId' | 'canonicalModelId' | 'priceVersion' | 'usageId'>;
   nowIso: string;
 }): { receiptId: string | null; status: 'INCOMPLETE' | 'VERIFICATION_FAILED' } {
   const { taskId, workspaceId, scoped, nowIso } = params;
@@ -135,7 +137,7 @@ export function commitContentFailure(params: {
     assignedAgent: params.identity.assignedAgent, provider: params.identity.provider, modelUsed: params.identity.modelUsed,
     artifactId: params.artifact.artifact_id, artifactHash: params.artifact.content_hash,
     aegisDecision: scoped.review.decision, aegisMethod: scoped.review.method,
-    outcome, verificationScope: scoped.content.scopeStatement, createdAt: nowIso,
+    outcome, verificationScope: scoped.content.scopeStatement, ...(params.registry || {}), createdAt: nowIso,
   };
   const str = canonicalizePayload(payload);
   const signed = signReceiptPayload(str);
@@ -161,19 +163,21 @@ export function commitContentFailure(params: {
 }
 
 /**
- * GRAPH NODE — the evidence a failed native node leaves behind.
+ * GRAPH NODE ARTIFACT — every native node output, passing or failing, is
+ * persisted as its own artifact with its own content hash and its own real
+ * scoped Aegis review (integrity + completion + instruction compliance).
  *
- * A passing native (COMPUTE) node deliberately gets no task of its own: its
- * output is attested once, in the graph run's aggregate artifact and receipt.
- * A node whose output fails its contract never reaches that aggregate — the
- * graph halts — so without this its bad output would exist only as a trace
- * string. Instead it goes through the same lifecycle as every other artifact:
- * task, Vault artifact, scoped Aegis review and, for a content failure, the
- * shared failure branch (audit receipt stating the outcome, quarantine,
- * terminal INCOMPLETE / VERIFICATION_FAILED). Integrity is re-run for real
- * here, so the node's recorded integrity scope is an actual audit result.
+ *   passing node  → review VERIFIED, task AWAITING_RECEIPT. Its receipt is the
+ *                   graph run's aggregate receipt, whose signed artifact lists
+ *                   this node's artifact id and content hash — so the receipt
+ *                   cryptographically identifies it. Not indexed on its own.
+ *   failing node  → the shared failure branch: audit receipt stating the
+ *                   outcome, artifact quarantined, terminal status.
+ *
+ * The artifact content IS the node output, so what the next node receives is
+ * exactly the bytes that were hashed and verified.
  */
-export function commitFailedNodeEvidence(params: {
+export function commitNodeArtifact(params: {
   taskId: string;
   workspaceId: string;
   title: string;
@@ -185,7 +189,8 @@ export function commitFailedNodeEvidence(params: {
   contract: OutputContract;
   graphRunId: string;
   graphNodeId: string;
-}): { taskId: string; status: string; scoped: ScopedAegisResult; reviewId: string; artifact: { id: string; filePath: string; contentHash: string }; receiptId: string | null } {
+  registry?: Pick<CanonicalReceiptPayload, 'registryProviderId' | 'canonicalModelId' | 'priceVersion' | 'usageId'>;
+}): { taskId: string; status: string; verified: boolean; scoped: ScopedAegisResult; reviewId: string; artifact: { id: string; filePath: string; contentHash: string }; receiptId: string | null } {
   const { taskId, workspaceId } = params;
   const nowIso = new Date().toISOString();
   createInitialTask({ taskId, workspaceId, title: params.title, description: params.description, assignedAgent: params.assignedAgent, assignedModel: params.modelUsed, createdAt: nowIso });
@@ -193,7 +198,7 @@ export function commitFailedNodeEvidence(params: {
   updateTaskStatus(taskId, 'READY', undefined, workspaceId);
   updateTaskStatus(taskId, 'RUNNING', undefined, workspaceId);
   recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: 'EXECUTION_STARTED', agentId: params.assignedAgent, payload: { status: 'RUNNING', graphRunId: params.graphRunId, graphNodeId: params.graphNodeId } });
-  recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: 'PROVIDER_COMPLETED', agentId: params.assignedAgent, payload: { model: params.modelUsed, outputLength: params.output.length, termination: params.termination, outputContract: params.contract }, createdAt: nowIso });
+  recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: 'PROVIDER_COMPLETED', agentId: params.assignedAgent, payload: { model: params.modelUsed, outputLength: params.output.length, termination: params.termination, outputContract: params.contract, ...(params.registry || {}) }, createdAt: nowIso });
 
   const artifact = writeWorkspaceArtifact({ workspaceId, taskId, content: params.output, folder: 'Graph-Runs', extension: 'md', createdAt: nowIso });
   recordActivityEvent({
@@ -205,27 +210,70 @@ export function commitFailedNodeEvidence(params: {
   updateTaskStatus(taskId, 'AWAITING_VERIFICATION', undefined, workspaceId);
   const scoped = runScopedAegis({ taskId, output: params.output, termination: params.termination, contract: params.contract });
   const review = recordQualityReview({ taskId, reviewer: scoped.review.reviewer, method: scoped.review.method, score: scoped.review.score, decision: scoped.review.decision, checks: scoped.review.checks, evidence: scoped.review.evidence, createdAt: nowIso });
+  const art = { id: artifact.artifact_id, filePath: artifact.relative_path, contentHash: artifact.content_hash };
 
-  let receiptId: string | null = null;
-  let status: string;
+  if (scoped.content.decision === 'VERIFIED') {
+    updateTaskStatus(taskId, 'AWAITING_RECEIPT', undefined, workspaceId);
+    recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: 'AEGIS_REVIEWED', agentId: 'aegis', payload: { reviewId: review.review_id, decision: 'VERIFIED', verificationScopes: scoped.content.scopes, receiptPending: 'graph-run aggregate' }, createdAt: nowIso });
+    return { taskId, status: 'AWAITING_RECEIPT', verified: true, scoped, reviewId: review.review_id, artifact: art, receiptId: null };
+  }
+
   if (isContentFailure(scoped.content)) {
     const failure = commitContentFailure({
       taskId, workspaceId, reviewId: review.review_id, scoped, artifact,
-      identity: { assignedAgent: params.assignedAgent, provider: 'synthos-graph-runtime', modelUsed: params.modelUsed }, nowIso,
+      identity: { assignedAgent: params.assignedAgent, provider: 'synthos-graph-runtime', modelUsed: params.modelUsed }, registry: params.registry, nowIso,
     });
-    receiptId = failure.receiptId;
-    status = failure.status;
-  } else {
-    // Integrity itself failed (or was inconclusive): FAILED, no receipt,
-    // and the artifact is quarantined so it cannot surface in retrieval.
-    status = 'FAILED';
-    updateTaskStatus(taskId, 'FAILED', undefined, workspaceId);
-    recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: 'AEGIS_REVIEWED', agentId: 'aegis', payload: { reviewId: review.review_id, decision: scoped.review.decision, verificationScopes: scoped.content.scopes }, createdAt: nowIso });
-    try {
-      quarantineArtifact({ workspaceId, artifactId: artifact.artifact_id, actor: 'aegis', reason: `Aegis ${scoped.review.decision}: ${scoped.content.scopeStatement}` });
-    } catch (err: any) {
-      console.warn('[Memory Index] Quarantine failed:', err?.message || err);
-    }
+    return { taskId, status: failure.status, verified: false, scoped, reviewId: review.review_id, artifact: art, receiptId: failure.receiptId };
   }
-  return { taskId, status, scoped, reviewId: review.review_id, artifact: { id: artifact.artifact_id, filePath: artifact.relative_path, contentHash: artifact.content_hash }, receiptId };
+  // Integrity itself failed (or was inconclusive): FAILED, no receipt,
+  // quarantined so it cannot surface in retrieval.
+  updateTaskStatus(taskId, 'FAILED', undefined, workspaceId);
+  recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: 'AEGIS_REVIEWED', agentId: 'aegis', payload: { reviewId: review.review_id, decision: scoped.review.decision, verificationScopes: scoped.content.scopes }, createdAt: nowIso });
+  try {
+    quarantineArtifact({ workspaceId, artifactId: artifact.artifact_id, actor: 'aegis', reason: `Aegis ${scoped.review.decision}: ${scoped.content.scopeStatement}` });
+  } catch (err: any) {
+    console.warn('[Memory Index] Quarantine failed:', err?.message || err);
+  }
+  return { taskId, status: 'FAILED', verified: false, scoped, reviewId: review.review_id, artifact: art, receiptId: null };
+}
+
+/**
+ * BEFORE ADVANCEMENT — re-check an already-verified node artifact. The node's
+ * bytes may have been verified moments ago, but the graph is about to build on
+ * them, so the integrity audit (which re-hashes the file on disk against the
+ * recorded content hash) runs again. A mismatch is an INTEGRITY failure: an
+ * audit receipt stating INTEGRITY_FAILED, the artifact quarantined, the node
+ * task FAILED. The caller halts the graph.
+ */
+export function reverifyNodeArtifact(params: { taskId: string; workspaceId: string; artifact: { id: string; contentHash: string } }): { ok: true } | { ok: false; reason: string; receiptId: string | null; reviewId: string } {
+  const { taskId, workspaceId } = params;
+  const integrity = runDeterministicAegisVerification(taskId);
+  if (integrity.decision === 'VERIFIED') return { ok: true };
+  const nowIso = new Date().toISOString();
+  const failed = integrity.checks.filter((c) => c.status === 'FAIL').map((c) => `${c.check}: ${c.evidence}`).join('; ');
+  const scopeStatement = `integrity=FAIL before graph advancement (${failed || integrity.decision}); completion and instruction compliance were verified earlier but no longer attest this artifact`;
+  const review = recordQualityReview({ taskId, reviewer: integrity.reviewer, method: `${integrity.method}+PRE_ADVANCEMENT_REVERIFY`, score: 0, decision: 'FAILED', checks: integrity.checks, evidence: { ...integrity.evidence, scopeStatement }, createdAt: nowIso });
+  recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: 'AEGIS_INTEGRITY_FAILED', agentId: 'aegis', payload: { reviewId: review.review_id, checks: integrity.checks }, createdAt: nowIso });
+
+  let receiptId: string | null = `rcpt-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+  const payload: CanonicalReceiptPayload = {
+    receiptId, taskId, reviewId: review.review_id, workspaceId, assignedAgent: 'graph-runtime', provider: 'synthos-graph-runtime', modelUsed: 'integrity-reverify',
+    artifactId: params.artifact.id, artifactHash: params.artifact.contentHash, aegisDecision: 'FAILED', aegisMethod: review.method,
+    outcome: 'INTEGRITY_FAILED', verificationScope: scopeStatement, createdAt: nowIso,
+  };
+  const str = canonicalizePayload(payload);
+  const signed = signReceiptPayload(str);
+  if (verifyReceiptSignature(str, signed.signature, signed.publicKeyPem)) {
+    recordReceipt({ receiptId, taskId, reviewId: review.review_id, algorithm: signed.algorithm, publicKey: signed.publicKeyPem, payloadJson: str, signature: signed.signature, createdAt: nowIso });
+    recordActivityEvent({ taskId, expectedWorkspaceId: workspaceId, eventType: 'AUDIT_RECEIPT_CREATED', agentId: 'guardian', payload: { receiptId, outcome: 'INTEGRITY_FAILED', verified: true }, createdAt: nowIso });
+  } else {
+    receiptId = null;
+  }
+  try {
+    quarantineArtifact({ workspaceId, artifactId: params.artifact.id, actor: 'aegis', reason: `Aegis INTEGRITY_FAILED: ${failed || 'artifact no longer verifies'}` });
+  } catch (err: any) {
+    console.warn('[Memory Index] Quarantine failed:', err?.message || err);
+  }
+  updateTaskStatus(taskId, 'FAILED', undefined, workspaceId);
+  return { ok: false, reason: `Node artifact ${params.artifact.id} failed integrity before advancement: ${failed || integrity.decision}`, receiptId, reviewId: review.review_id };
 }

@@ -1518,6 +1518,9 @@ async function executeBrainWriteSessionNote(input: ExecutionEnvelopeInput): Prom
           ? ((input.parameters as any).topics as unknown[]).filter((t): t is string => typeof t === 'string').slice(0, 8)
           : [],
         tags: ['tool-pack-1'],
+        // A session note is an operator/agent record, not admitted knowledge.
+        classification: 'OBSERVATION',
+        promotionStatus: 'NOT_PROMOTED',
       },
       bounded,
     );

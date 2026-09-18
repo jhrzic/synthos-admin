@@ -11,6 +11,8 @@
 import { saveSpendPolicy, DEFAULT_SPEND_POLICY, PAID_PROVIDERS } from '../../lib/spend/policy';
 import { applyPriceRecords, type PricingSourceId } from '../../lib/pricing/catalog';
 import type { PriceRecord } from '../../lib/pricing/parse';
+import { ensureRegistry, isRegistryGoverned, registerModelViaAdmin, qualifyModel, enableModel } from '../../lib/registry';
+import { getProviderBody } from '../../lib/registry/store';
 
 /**
  * Seed the pricing catalog through the SAME write path a real refresh uses,
@@ -30,6 +32,42 @@ export function seedFixturePrices(entries: Array<{ provider: PriceRecord['provid
     bySource.set(source, [...(bySource.get(source) || []), rec]);
   }
   for (const [source, records] of bySource) applyPriceRecords(source, 'test-fixture', records, `fixture-${Date.now()}`, 'TEST', 'fixture');
+  // Registry-governed providers are priced ONLY from the model registry, and a
+  // model must be qualified and enabled there before it can run. Register each
+  // fixture model through the same Admin path an operator uses, in this test's
+  // own database, with the fixture price — then qualify and enable it.
+  for (const e of entries) registerFixtureModel(e.provider, e.modelId, { input: e.input ?? 1, output: e.output ?? 2, cachedInput: e.cachedInput ?? null }, e.longContext ?? null, e.unit ?? 'tokens');
+}
+
+export function registerFixtureModel(provider: string, modelId: string, rates: { input: number; output: number; cachedInput: number | null }, longContext: PriceRecord['longContext'] = null, unit: 'tokens' | 'chars' = 'tokens'): void {
+  ensureRegistry();
+  if (!isRegistryGoverned(provider)) return;
+  const now = new Date();
+  const tiers = longContext && longContext.thresholdTokens
+    ? longContext.windows.slice(0, 1).map((w) => ({ thresholdTokens: longContext.thresholdTokens!, rates: { input: w.rates.input, output: w.rates.output, cachedInput: w.rates.cachedInput ?? null } }))
+    : [];
+  const body = getProviderBody(provider)!;
+  const r = registerModelViaAdmin(provider, {
+    modelId, aliases: [], displayName: `${modelId} (test fixture)`, lifecycle: 'ACTIVE',
+    releaseDate: null, deprecationDate: null, shutdownDate: null,
+    limits: { contextTokens: null, outputTokens: null }, modalities: { input: ['text'], output: ['text'] },
+    capabilities: [
+      { id: 'text.input', supported: true, source: 'test fixture', verification: 'ADMIN_ASSERTED', effectiveDate: null },
+      { id: 'text.output', supported: true, source: 'test fixture', verification: 'ADMIN_ASSERTED', effectiveDate: null },
+    ],
+    supportedParameters: [], outputContracts: ['NARRATIVE', 'LITERAL', 'JSON_OBJECT'],
+    pricing: [{
+      currency: 'USD', unit, rates, reasoningTokens: 'BILLED_AS_OUTPUT', tiers, toolCharges: [], modalityCharges: [],
+      effectiveFrom: new Date(now.getTime() - 86_400_000).toISOString(), effectiveUntil: null, source: 'test-fixture',
+      verifiedAt: now.toISOString(), staleAfter: new Date(now.getTime() + 30 * 86_400_000).toISOString(), approval: 'APPROVED',
+    }],
+    adapterCompatibility: { protocol: body.protocol, minAdapterVersion: '1.0.0' }, restrictions: { regions: [], compliance: [] },
+  }, 'test-fixture');
+  if (!r.ok) throw new Error(`fixture registration failed: ${(r as any).errors?.join('; ')}`);
+  const q = qualifyModel(provider, modelId, 'test-fixture');
+  if (!q.ok) throw new Error(`fixture qualification failed: ${q.error}`);
+  const en = enableModel(provider, modelId, 'test-fixture');
+  if (!en.ok) throw new Error(`fixture enable failed: ${en.error}`);
 }
 
 export function allowPaidExecutionForTest(models: Array<[string, string]>, overrides: Record<string, unknown> = {}) {

@@ -10,6 +10,8 @@ import {
   Network, Kanban, Clock, DollarSign, ExternalLink, PlayCircle,
   HelpCircle, Monitor, AlertCircle
 } from 'lucide-react';
+import { RegistryModelSelect } from './registry/RegistryModelSelect';
+import { lastActiveWorkspaceId } from './registry/useModelRegistry';
 import { RunDetailModal } from './RunDetailModal';
 
 interface HermesCoreViewProps {
@@ -39,7 +41,8 @@ export const HermesCoreView: React.FC<HermesCoreViewProps> = ({
   const [activeTab, setActiveTab] = useState<'console' | 'runs' | 'sessions' | 'agents' | 'tools' | 'memory' | 'activity' | 'browser'>('console');
   const [isDispatching, setIsDispatching] = useState(false);
   const [showOverride, setShowOverride] = useState(false);
-  const [selectedOverrideModel, setSelectedOverrideModel] = useState('hermes');
+  const [selectedOverrideModel, setSelectedOverrideModel] = useState('');
+  const registryWorkspaceId = lastActiveWorkspaceId();
   const [selectedRunModal, setSelectedRunModal] = useState<SynthOSRun | null>(null);
 
   // Update Watcher state
@@ -236,16 +239,7 @@ export const HermesCoreView: React.FC<HermesCoreViewProps> = ({
           {showOverride && (
             <div className="bg-[#070811] p-4 rounded-xl border border-[#1A1E36] flex flex-wrap items-center gap-4 text-xs animate-in fade-in">
               <span className="text-[#8E94B8] font-bold">Override Model Binding:</span>
-              <select
-                value={selectedOverrideModel}
-                onChange={(e) => setSelectedOverrideModel(e.target.value)}
-                className="bg-[#121424] border border-[#272B48] text-white rounded-lg px-3 py-1.5 outline-hidden"
-              >
-                <option value="hermes">Hermes Agent Kernel (Auto-Router)</option>
-                <option value="gemini">Gemini 2.5 Flash</option>
-                <option value="deepseek">DeepSeek R1 Reasoning</option>
-                <option value="claude">Claude 3.7 Sonnet</option>
-              </select>
+              <RegistryModelSelect workspaceId={registryWorkspaceId} value={selectedOverrideModel} onChange={(v) => setSelectedOverrideModel(v)} className="min-w-[240px]" />
             </div>
           )}
         </form>

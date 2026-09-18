@@ -61,8 +61,11 @@ export const AgentView: React.FC<AgentViewProps> = ({
   const [taskDesc, setTaskDesc] = useState('');
   const [taskPriority, setTaskPriority] = useState<'low' | 'medium' | 'high' | 'critical'>('high');
 
-  const assignedModelInfo = models[editPrimaryModel] || models.gemini;
-  const secondaryModelInfo = models[editSecondaryModel] || models.chatgpt;
+  // Models come from the registry; an agent has no fixed model. When none is
+  // selected the view says so — it never substitutes another model's identity.
+  const unassigned = (id: string): AIModelInfo => ({ id, name: id ? `${id} (not in registry)` : 'No model selected', provider: 'UNKNOWN', version: 'UNKNOWN', status: 'unconfigured', latency: 0, tokensPerSec: 0, contextWindow: 'UNKNOWN', specialty: 'UNKNOWN', description: '', color: '#7E8BB5', iconName: 'Layers' });
+  const assignedModelInfo = models[editPrimaryModel] || unassigned(editPrimaryModel);
+  const secondaryModelInfo = models[editSecondaryModel] || unassigned(editSecondaryModel);
   const agentTasks = tasks.filter(t => t.assignedAgent === agent.role);
 
   const getAgentIcon = () => {
@@ -275,8 +278,9 @@ export const AgentView: React.FC<AgentViewProps> = ({
                   onChange={(e) => setEditPrimaryModel(e.target.value)}
                   className="w-full bg-[#080A16] border border-[#1E223D] rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-[#615EFF]"
                 >
+                  <option value="">No model (select per task)</option>
                   {Object.entries(models).map(([key, m]) => (
-                    <option key={key} value={key}>{m.name} ({m.provider})</option>
+                    <option key={key} value={key} disabled={m.status !== 'active'}>{m.name} ({m.provider}){m.status !== 'active' ? ` — ${m.description}` : ''}</option>
                   ))}
                 </select>
               </div>
@@ -289,8 +293,9 @@ export const AgentView: React.FC<AgentViewProps> = ({
                   onChange={(e) => setEditSecondaryModel(e.target.value)}
                   className="w-full bg-[#080A16] border border-[#1E223D] rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-[#615EFF]"
                 >
+                  <option value="">No model (select per task)</option>
                   {Object.entries(models).map(([key, m]) => (
-                    <option key={key} value={key}>{m.name} ({m.provider})</option>
+                    <option key={key} value={key} disabled={m.status !== 'active'}>{m.name} ({m.provider}){m.status !== 'active' ? ` — ${m.description}` : ''}</option>
                   ))}
                 </select>
               </div>

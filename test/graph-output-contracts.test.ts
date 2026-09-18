@@ -49,6 +49,7 @@ let gemini: http.Server;
 type Reply = { text: string; finishReason: string | null };
 let replies: Record<string, Reply> = {};
 let requests: Array<{ path: string; prompt: string; maxOut: number | undefined }> = [];
+let tamperOn: { whenMarker: string; nodeId: string } | null = null;
 
 const freePort = () => new Promise<number>((resolve) => {
   const s = net.createServer();
@@ -75,6 +76,13 @@ beforeAll(async () => {
       const p = JSON.parse(body || '{}');
       const prompt = JSON.stringify(p.contents ?? '');
       requests.push({ path: req.url || '', prompt, maxOut: p.generationConfig?.maxOutputTokens });
+      // TAMPER HOOK: while the SECOND node's call is in flight, alter the FIRST
+      // node's already-verified artifact on disk (the DB file is shared).
+      if (tamperOn && prompt.includes(tamperOn.whenMarker)) {
+        const row = getDatabase().prepare('SELECT disk_path FROM artifacts WHERE task_id LIKE ? ORDER BY created_at DESC, rowid DESC LIMIT 1').get(`task-%-${tamperOn.nodeId}`) as any;
+        if (row?.disk_path) fs.appendFileSync(row.disk_path, '\nTAMPERED AFTER VERIFICATION');
+        tamperOn = null;
+      }
       const key = Object.keys(replies).find((k) => prompt.includes(k));
       const r = key ? replies[key] : { text: 'unscripted', finishReason: 'STOP' };
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -110,7 +118,7 @@ afterAll(async () => {
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}
 });
 
-beforeEach(() => { requests = []; replies = {}; });
+beforeEach(() => { requests = []; replies = {}; tamperOn = null; });
 
 async function run(nodes: any[]) {
   const runId = `run-contract-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -245,5 +253,50 @@ describe('graph contracts are validated before anything runs', () => {
     expect(listUsageForKey(`graph:${runId}:r1`)).toHaveLength(1);
     expect(listUsageForKey(`graph:${runId}:r2`)).toHaveLength(1);
     expect(listUsageForKey(`graph:${runId}:r3`)).toHaveLength(0);
+  });
+});
+
+// ============================================================================
+describe('graph node integrity — every node artifact has its own hash and is re-verified before advancement', () => {
+  it('each passing native node persists its own hashed artifact with a real scoped review; the aggregate receipt names every node hash', async () => {
+    replies = { MK_I1: { text: 'First node output.', finishReason: 'STOP' }, MK_I2: { text: 'Second node output.', finishReason: 'STOP' } };
+    const { runId, json } = await run([node('i1', 'MK_I1'), node('i2', 'MK_I2')]);
+    expect(json.status).toBe('COMPLETED');
+    for (const n of json.nodes) {
+      expect(n.verification.integrity).toBe('PASS');       // its own integrity audit, not the aggregate's
+      expect(n.artifact.contentHash).toMatch(/^sha256:/);
+      expect(getTaskWithHistory(n.taskId).task!.status).toBe('DONE');
+    }
+    const agg = getTaskArtifacts(`task-${runId}`)[0];
+    const aggText = fs.readFileSync(agg.disk_path, 'utf8');
+    for (const n of json.nodes) expect(aggText).toContain(n.artifact.contentHash);
+    expect(json.graphRunReceipt.nodeArtifacts.map((x: any) => x.contentHash)).toEqual(json.nodes.map((n: any) => n.artifact.contentHash));
+  });
+
+  it('tampering with a passing node\'s artifact: integrity fails, the graph does not advance, the artifact is quarantined, the failure is receipted, no extra provider call', async () => {
+    replies = { MK_T1: { text: 'Verified first output.', finishReason: 'STOP' }, MK_T2: { text: 'Second output.', finishReason: 'STOP' }, MK_T3: { text: 'never', finishReason: 'STOP' } };
+    tamperOn = { whenMarker: 'MK_T2', nodeId: 'tamp1' };
+    const { runId, json } = await run([node('tamp1', 'MK_T1'), node('tamp2', 'MK_T2'), node('tamp3', 'MK_T3')]);
+    expect(json.success).toBe(false);
+    expect(json.failedAtNode).toBe('tamp1');
+    expect(json.integrityFailure.reason).toMatch(/artifact_hash_match/);
+    // The third node was never called; the second was verified but NOT advanced.
+    expect(requests).toHaveLength(2);
+    const byId = Object.fromEntries(json.nodes.map((n: any) => [n.nodeId, n]));
+    expect(byId.tamp2.status).toBe('NOT_ADVANCED');
+    expect(byId.tamp1).toMatchObject({ status: 'FAILED', receiptOutcome: 'INTEGRITY_FAILED', quarantined: true });
+    // Evidence: the node task is FAILED, its artifact QUARANTINED, and a signed audit receipt states INTEGRITY_FAILED.
+    const t1 = `task-${runId}-tamp1`;
+    expect(getTaskWithHistory(t1).task!.status).toBe('FAILED');
+    expect(getArtifactRetrievalStatus(getTaskArtifacts(t1)[0].artifact_id)!.status).toBe('QUARANTINED');
+    const audit = receipts(t1).find((r) => r.outcome === 'INTEGRITY_FAILED')!;
+    expect(audit).toBeTruthy();
+    expect(audit.verified).toBe(true);
+    // No aggregate was built from a tampered input.
+    expect(getTaskWithHistory(`task-${runId}`).task).toBeFalsy();
+    // The failure stays visible on the persisted run.
+    const persisted = getDatabase().prepare('SELECT status, state_json FROM graph_runs WHERE run_id = ?').get(runId) as any;
+    expect(persisted.status).toBe('FAILED');
+    expect(JSON.parse(persisted.state_json).nodeResults.tamp1.failure.reason).toBe('INTEGRITY_FAILED');
   });
 });

@@ -18,6 +18,12 @@ import { GoogleGenAI } from '@google/genai';
 import { guardedGeminiGenerate, outputCeiling, type SpendContext } from '../spend/adapters';
 import { geminiTermination, type ProviderTermination } from './output-contract';
 import { SpendBlockedError } from '../spend/guard';
+import { resolveRegistryEndpoint } from '../registry/endpoint-resolver';
+
+/** Manifest base URLs carry the version path (…/v1beta); the SDK wants the origin. */
+function sdkBaseUrl(baseUrl: string): string {
+  return baseUrl.replace(/\/v1(beta|alpha)?\/?$/, '');
+}
 
 export interface GenerateViaGeminiParams {
   apiKey: string;
@@ -25,6 +31,8 @@ export interface GenerateViaGeminiParams {
   candidateModels: string[];
   /** SPEND GUARD — required. Every Gemini generation is a paid call; see lib/spend/guard.ts. */
   spend: SpendContext;
+  /** Registry-resolved base URL. Absent → resolved for the spend context's provider (default `gemini`). */
+  baseUrl?: string;
 }
 
 export interface GenerateViaGeminiResult {
@@ -54,13 +62,22 @@ export async function generateViaGemini(params: GenerateViaGeminiParams): Promis
   if (!m) return { output, modelUsed, providerUsageMetadata, hadProviderError: true, lastProviderError: 'No model was selected for this Gemini call.' };
 
   try {
-    // GEMINI_BASE_URL — optional gateway / test-double override, same contract
-    // as OPENAI_BASE_URL. lib/spend/network-guard.ts treats its host as paid,
-    // so an override can never route around the spend guard.
-    const baseUrl = (process.env.GEMINI_BASE_URL || '').trim();
+    // Base URL from the ONE endpoint authority (lib/registry/endpoints.ts):
+    // GEMINI_BASE_URL is honoured only for an approved/allow-listed host or an
+    // authorized loopback test double, and an invalid override fails closed
+    // here — before the credential is handed to the SDK.
+    let baseUrl = params.baseUrl;
+    if (!baseUrl) {
+      const ep = resolveRegistryEndpoint(params.spend.providerId || 'gemini');
+      if (!ep.ok) {
+        return { output, modelUsed, providerUsageMetadata, hadProviderError: true, lastProviderError: `ENDPOINT_NOT_APPROVED: ${ep.reason}`, termination };
+      }
+      baseUrl = ep.baseUrl;
+    }
     const ai = new GoogleGenAI({
       apiKey,
-      httpOptions: { headers: { "User-Agent": "aistudio-build" }, ...(baseUrl ? { baseUrl } : {}) },
+      // The SDK appends its own API version path to the host.
+      httpOptions: { headers: { "User-Agent": "aistudio-build" }, baseUrl: sdkBaseUrl(baseUrl) },
     });
     const resp = await guardedGeminiGenerate(ai, { model: m, contents, config: { temperature: 0.2 } }, params.spend);
     termination = geminiTermination(resp, outputCeiling(params.spend));

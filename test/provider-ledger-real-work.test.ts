@@ -214,7 +214,9 @@ describe('both providers use the same mechanism', () => {
     // shape of the original bug.
     expect(sites.length).toBe(1);
     // And it derives the provider id rather than hardcoding one.
-    expect(src).toMatch(/provider: provider === "OPENAI" \? "openai" : "gemini"/);
+    // The registry provider id is the ledger key — the same lowercase id the credential probe uses.
+    expect(src).toMatch(/recordProviderAttempt\(\{[\s\S]{0,400}?\n\s+provider,\n/);
+    expect(src).toContain('const provider = route.providerId;');
   });
 
   it('the provider id matches what the credential probe writes, so one ledger serves both', () => {

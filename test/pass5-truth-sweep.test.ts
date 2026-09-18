@@ -110,14 +110,18 @@ describe('Rule 7/8: CONFIGURED never means CONNECTED, REGISTERED never means EXE
   });
 });
 
-describe('H2: the Provider Capability Matrix shows Hermes MODEL and Hermes RUNTIME as two separate rows, never combined', () => {
-  it('MasterAdminView.tsx renders both a Hermes MODEL row and a Hermes Dedicated Runtime row in the Providers & Models table', () => {
+describe('H2: the Provider Capability Matrix never combines a model with the Hermes RUNTIME', () => {
+  it('MasterAdminView.tsx keeps the Hermes Dedicated Runtime as its own row; models (Hermes or otherwise) come only from the model registry', () => {
     const masterAdminContent = fs.readFileSync(path.resolve(process.cwd(), 'src/components/MasterAdminView.tsx'), 'utf-8');
     const idx = masterAdminContent.indexOf("activeSection === 'models'");
     const nextSection = masterAdminContent.indexOf('SECTION 7: HERMES ADMIN');
     const slice = masterAdminContent.slice(idx, nextSection);
-    expect(slice).toContain('Hermes MODEL');
+    // The runtime is a service row, never combined with a model.
     expect(slice).toContain('Hermes Dedicated Runtime');
+    // Model rows are the registry's providers — no model id typed into this table.
+    expect(slice).toContain('modelRegistry.providers.map(');
+    expect(slice).toContain('<ProviderModelCatalog workspaceId={workspaceId} />');
+    expect(slice).not.toMatch(/defaultModel: '[a-z]/i);
     expect(slice).not.toMatch(/process\.env\./); // Pass IV's process.version crash class of bug — never again in this file
   });
 });

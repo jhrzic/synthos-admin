@@ -207,7 +207,7 @@ afterAll(async () => {
 describe('LIVE 1: authentication is required — no cookie, zero side effects', () => {
   it('no session cookie -> 401, and the handler never runs (no task row created)', async () => {
     const taskId = `char-noauth-${Date.now()}`;
-    const { status, json } = await postExecuteAgentTask({ taskId, taskTitle: 'char test', workspaceId: WS_A });
+    const { status, json } = await postExecuteAgentTask({ taskId, assignedModel: 'gemini-3.6-flash', taskTitle: 'char test', workspaceId: WS_A });
     expect(status).toBe(401);
     expect(json).toMatchObject({ success: false });
     expect(dbTaskRow(taskId)).toBeUndefined();
@@ -218,7 +218,7 @@ describe('LIVE 2: workspace membership is required — real session, wrong works
   it('user B (member of WS_B only) claiming WS_A -> 403, and the handler never runs', async () => {
     const taskId = `char-forbidden-${Date.now()}`;
     const { status, json } = await postExecuteAgentTask(
-      { taskId, taskTitle: 'char test', workspaceId: WS_A },
+      { taskId, assignedModel: 'gemini-3.6-flash', taskTitle: 'char test', workspaceId: WS_A },
       cookieHeader(userBToken)
     );
     expect(status).toBe(403);
@@ -246,7 +246,7 @@ describe('LIVE 3: BLOCKED_MISSING_CREDENTIAL — the only reachable execution ou
 
   it('task status transitions: TODO -> READY -> FAILED, in that exact order, timestamps non-decreasing', async () => {
     const taskId = `char-blocked-history-${Date.now()}`;
-    await postExecuteAgentTask({ taskId, taskTitle: 't', workspaceId: WS_A }, cookieHeader(userAToken));
+    await postExecuteAgentTask({ taskId, assignedModel: 'gemini-3.6-flash', taskTitle: 't', workspaceId: WS_A }, cookieHeader(userAToken));
 
     const row = dbTaskRow(taskId);
     expect(row.status).toBe('FAILED');
@@ -276,7 +276,7 @@ describe('LIVE 3: BLOCKED_MISSING_CREDENTIAL — the only reachable execution ou
 
   it('partial-failure state (Section 6 item 9): no artifact, no quality_review, no receipt row exist — nothing orphaned past what the failed path is supposed to leave', async () => {
     const taskId = `char-blocked-noartifact-${Date.now()}`;
-    await postExecuteAgentTask({ taskId, taskTitle: 't', workspaceId: WS_A }, cookieHeader(userAToken));
+    await postExecuteAgentTask({ taskId, assignedModel: 'gemini-3.6-flash', taskTitle: 't', workspaceId: WS_A }, cookieHeader(userAToken));
 
     expect(dbArtifacts(taskId)).toEqual([]);
     expect(dbQualityReviews(taskId)).toEqual([]);
@@ -293,19 +293,17 @@ describe('LIVE 3: BLOCKED_MISSING_CREDENTIAL — the only reachable execution ou
   });
 });
 
-describe('LIVE 4 (DEFERRED — Phase 0b, item A: deferred to capability-registry/intent-classifier work, not fixed here): gate ordering makes the model-support check unreachable whenever the API key is missing', () => {
-  it('an UNSUPPORTED model (e.g. "gpt-4") still returns BLOCKED_MISSING_CREDENTIAL, never PROVIDER_UNSUPPORTED, because the API-key check runs first', async () => {
+describe('LIVE 4 (Phase 0b item A — CLOSED by the model registry): the model-support check now runs before the credential check', () => {
+  it('an unregistered model (e.g. "gpt-4") returns MODEL_NOT_REGISTERED even with no API key — the credential check no longer masks it', async () => {
     const taskId = `char-gate-order-${Date.now()}`;
     const { status, json } = await postExecuteAgentTask(
       { taskId, taskTitle: 't', assignedModel: 'gpt-4', workspaceId: WS_A },
       cookieHeader(userAToken)
     );
     expect(status).toBe(400);
-    expect(json.reason).toBe('BLOCKED_MISSING_CREDENTIAL');
-    expect(json.reason).not.toBe('PROVIDER_UNSUPPORTED');
-    // The task still reaches FAILED via the credential gate, not the model
-    // gate — same terminal state, different (and in this environment, only
-    // ever the credential) reason.
+    expect(json.reason).toBe('MODEL_NOT_REGISTERED');
+    expect(json.reason).not.toBe('BLOCKED_MISSING_CREDENTIAL');
+    // Same terminal state; the real reason.
     expect(dbTaskRow(taskId).status).toBe('FAILED');
   });
 });
@@ -318,7 +316,7 @@ describe('LIVE 5 (PHASE 0b FIX — was SURPRISING/UNSAFE in e2f0697, now closed)
     // Unchanged from e2f0697 — this is the same real BLOCKED_MISSING_CREDENTIAL
     // path characterized there.
     const first = await postExecuteAgentTask(
-      { taskId: sharedTaskId, taskTitle: 'Original A Title', description: 'owned by A', assignedAgent: 'scout', workspaceId: WS_A },
+      { taskId: sharedTaskId, assignedModel: 'gemini-3.6-flash', taskTitle: 'Original A Title', description: 'owned by A', assignedAgent: 'scout', workspaceId: WS_A },
       cookieHeader(userAToken)
     );
     expect(first.status).toBe(400); // BLOCKED_MISSING_CREDENTIAL
@@ -340,7 +338,7 @@ describe('LIVE 5 (PHASE 0b FIX — was SURPRISING/UNSAFE in e2f0697, now closed)
     // workspace_id (WS_A) does not match resolvedWorkspaceId (WS_B), so the
     // request is rejected before any write.
     const second = await postExecuteAgentTask(
-      { taskId: sharedTaskId, taskTitle: 'Hijacked By B', description: 'reassigned by B', assignedAgent: 'dev', workspaceId: WS_B },
+      { taskId: sharedTaskId, assignedModel: 'gemini-3.6-flash', taskTitle: 'Hijacked By B', description: 'reassigned by B', assignedAgent: 'dev', workspaceId: WS_B },
       cookieHeader(userBToken)
     );
     expect(second.status).toBe(403);
@@ -377,7 +375,7 @@ describe('LIVE 5 (PHASE 0b FIX — was SURPRISING/UNSAFE in e2f0697, now closed)
   it('a brand-new task_id (never seen before) is completely unaffected by the workspace-ownership gate — normal same-workspace creation still works', async () => {
     const freshTaskId = `char-normal-${Date.now()}`;
     const { status, json } = await postExecuteAgentTask(
-      { taskId: freshTaskId, taskTitle: 'Normal task', workspaceId: WS_A },
+      { taskId: freshTaskId, assignedModel: 'gemini-3.6-flash', taskTitle: 'Normal task', workspaceId: WS_A },
       cookieHeader(userAToken)
     );
     expect(status).toBe(400); // BLOCKED_MISSING_CREDENTIAL — the gate never engages for a fresh id
@@ -388,12 +386,12 @@ describe('LIVE 5 (PHASE 0b FIX — was SURPRISING/UNSAFE in e2f0697, now closed)
   it('the SAME user, SAME workspace, reusing their own existing task_id (a real retry) is still allowed through the gate', async () => {
     const retryTaskId = `char-retry-${Date.now()}`;
     const first = await postExecuteAgentTask(
-      { taskId: retryTaskId, taskTitle: 'Retry Task', workspaceId: WS_A },
+      { taskId: retryTaskId, assignedModel: 'gemini-3.6-flash', taskTitle: 'Retry Task', workspaceId: WS_A },
       cookieHeader(userAToken)
     );
     expect(first.status).toBe(400);
     const second = await postExecuteAgentTask(
-      { taskId: retryTaskId, taskTitle: 'Retry Task Updated', workspaceId: WS_A },
+      { taskId: retryTaskId, assignedModel: 'gemini-3.6-flash', taskTitle: 'Retry Task Updated', workspaceId: WS_A },
       cookieHeader(userAToken)
     );
     // Same workspace as the existing task -> gate passes, UPSERT proceeds
@@ -562,7 +560,7 @@ describe('LIVE 6 (PHASE 0b — new regression): the receipt\'s workspaceId match
     // with the authenticated caller's real workspace, LIVE 5's
     // WORKSPACE_MISMATCH assertions above would already be failing.
     const taskId = `char-receipt-scope-${Date.now()}`;
-    await postExecuteAgentTask({ taskId, taskTitle: 't', workspaceId: WS_A }, cookieHeader(userAToken));
+    await postExecuteAgentTask({ taskId, assignedModel: 'gemini-3.6-flash', taskTitle: 't', workspaceId: WS_A }, cookieHeader(userAToken));
     expect(dbTaskRow(taskId).workspace_id).toBe(WS_A);
   });
 });

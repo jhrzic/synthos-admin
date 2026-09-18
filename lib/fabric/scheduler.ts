@@ -418,14 +418,14 @@ let schedulerTimer: ReturnType<typeof setInterval> | null = null;
  * line-ups move on the order of weeks, so six hours is frequent enough to
  * notice a new or retired model and infrequent enough to be nearly free.
  */
-const CATALOG_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
 /** Pricing refresh cadence. Well inside the 72h staleness limit, so one or two failed refreshes do not block spending. */
-export const PRICING_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000;
+
 // Set at start so the scheduler's first refresh is 12h after the startup refresh in server.ts, not a duplicate of it.
-let lastPricingRefreshAt = Date.now();
+
 
 /** Epoch of the last catalog refresh attempt. 0 so the first tick runs one. */
-let lastCatalogRefreshAt = 0;
+
 
 // ---------------------------------------------------------------------------
 // ALWAYS-ON RUNTIME — the scheduler's own liveness, recorded rather than
@@ -566,35 +566,13 @@ export function startScheduler(intervalMs = 10000): void {
     // import inside the callback resolves after both modules are fully
     // initialised — the same technique lib/model-credentials.ts already uses
     // to reach the provider adapters.
-    // MODEL CATALOG SYNC — the fourth thing this ONE timer drives.
+    // MODEL CATALOG / PRICING — deliberately NOT driven by this timer.
     //
-    // Time-gated rather than given its own interval, for exactly the reason
-    // stated above about a second scheduler. A provider's model list changes
-    // on the order of weeks, so running it every 10s would be thousands of
-    // pointless metadata calls a day; CATALOG_REFRESH_INTERVAL_MS gates it.
-    //
-    // This spends NO generation tokens. lib/model-discovery.ts issues GET
-    // metadata requests only and never touches a generation path, so a
-    // catalog refresh cannot quietly become a billable inference call.
-    if (Date.now() - lastCatalogRefreshAt >= CATALOG_REFRESH_INTERVAL_MS) {
-      lastCatalogRefreshAt = Date.now();
-      import('../model-discovery')
-        .then((m) => m.refreshModelCatalog('SCHEDULED'))
-        .then((report) => {
-          schedulerHealth.lastCatalogRefreshAt = report.finishedAt;
-          schedulerHealth.lastCatalogRefreshStale = report.anyStale;
-        })
-        .catch((err) => {
-          // A failed refresh preserves the last-known catalog; it must never
-          // stop scheduled work or orchestration.
-          schedulerHealth.lastCatalogRefreshError = {
-            at: new Date().toISOString(),
-            message: err?.message || String(err),
-          };
-          // eslint-disable-next-line no-console
-          console.error('[scheduler] model catalog refresh failed:', err);
-        });
-    }
+    // They used to be time-gated refreshes (every 6h / 12h). That is a
+    // recurring outbound connection whose only purpose is to notice new
+    // models or prices. The model registry (lib/registry) is populated from
+    // versioned manifests instead; discovery and pricing refresh exist only as
+    // manual, audited Admin operations that are OFF by default.
 
     // SPEND — crash recovery for the usage ledger. A synchronous paid call left
     // in flight by a process that died becomes UNKNOWN (never auto-retried),
@@ -602,15 +580,6 @@ export function startScheduler(intervalMs = 10000): void {
     import('../spend/ledger')
       .then((m) => m.reconcileStaleUsage())
       .catch(() => { /* bookkeeping must never stop scheduled work */ });
-
-    // PRICING CATALOG — time-gated like the model catalog; GET-only
-    // documentation fetch, zero inference.
-    if (Date.now() - lastPricingRefreshAt >= PRICING_REFRESH_INTERVAL_MS) {
-      lastPricingRefreshAt = Date.now();
-      import('../pricing/catalog')
-        .then((m) => m.refreshPricingCatalog('SCHEDULED'))
-        .catch((err) => console.error('[scheduler] pricing refresh failed:', err?.message || err));
-    }
 
     import('./orchestrator')
       .then((m) => m.orchestrationTickForScheduler())

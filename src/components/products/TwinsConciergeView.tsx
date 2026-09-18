@@ -7,6 +7,8 @@ import {
   ExternalLink, Layers, Send, Check, Flame, BookOpen, ShieldAlert,
   Radio, Clock, Play, Database, FileText, Activity, Lock
 } from 'lucide-react';
+import { RegistryModelSelect } from '../registry/RegistryModelSelect';
+import { lastActiveWorkspaceId } from '../registry/useModelRegistry';
 
 interface TwinsConciergeViewProps {
   onSendQuery: (query: string, model: string) => Promise<string>;
@@ -21,6 +23,7 @@ export const TwinsConciergeView: React.FC<TwinsConciergeViewProps> = ({
   onOpenVoiceService,
   onOpenApollo
 }) => {
+  const [synthModel, setSynthModel] = useState('');
   const [activeTab, setActiveTab] = useState<'overview' | 'concierge' | 'sessions' | 'voice' | 'memory' | 'knowledge' | 'actions' | 'demo' | 'settings' | 'content-factory'>('overview');
   const [isListening, setIsListening] = useState(false);
 
@@ -400,14 +403,10 @@ export const TwinsConciergeView: React.FC<TwinsConciergeViewProps> = ({
                   <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-[#EC4899]">
                     <Crown className="w-4 h-4" />
                   </div>
-                  <select 
-                    defaultValue="claude-3-7-sonnet"
-                    className="w-full bg-[#05060C] border border-[#1E233D] rounded-xl pl-10 pr-4 py-3 text-xs text-[#C5C9E0] font-mono outline-none focus:border-[#EC4899]"
-                  >
-                    <option value="claude-3-7-sonnet">Claude 3.7 Sonnet (Optimal Creative Synthesis)</option>
-                    <option value="gemini-2.5-pro">Gemini 2.5 Pro (Deep Context Extraction)</option>
-                    <option value="deepseek-r1">DeepSeek R1 (Deep Chain-of-Thought Reasoning)</option>
-                  </select>
+                  <div className="pl-10">
+                    {/* The synthesizer model comes from the model registry. */}
+                    <RegistryModelSelect workspaceId={lastActiveWorkspaceId()} value={synthModel} onChange={(v) => setSynthModel(v)} />
+                  </div>
                 </div>
               </div>
             </div>

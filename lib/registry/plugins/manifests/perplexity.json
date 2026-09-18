@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "synthos.registry/v1",
+  "manifestVersion": "2026.09.18-perplexity-1",
+  "provenance": {
+    "publisher": "synthos-core",
+    "generatedAt": "2026-09-18T00:00:00.000Z",
+    "notes": "No documented model list is held here; the catalog is empty rather than guessed."
+  },
+  "provider": {
+    "providerId": "perplexity",
+    "displayName": "Perplexity",
+    "protocol": "openai.chat_completions",
+    "adapterVersion": "1.0.0",
+    "approvedHosts": [
+      "api.perplexity.ai"
+    ],
+    "defaultBaseUrl": "https://api.perplexity.ai",
+    "baseUrlEnvVar": null,
+    "auth": {
+      "type": "BEARER",
+      "credentialSlot": null,
+      "envVars": [
+        "PERPLEXITY_API_KEY"
+      ]
+    },
+    "billing": "METERED",
+    "restrictions": {
+      "regions": [],
+      "compliance": []
+    }
+  },
+  "models": []
+}

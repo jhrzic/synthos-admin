@@ -10,6 +10,8 @@ import {
   Sliders, ArrowUpRight, FileCode, ShieldCheck, HardDrive, Filter, Server,
   Rocket, DollarSign, Loader2
 } from 'lucide-react';
+import { RegistryModelSelect, reasonFor } from './registry/RegistryModelSelect';
+import { useModelRegistry, modelKey } from './registry/useModelRegistry';
 
 // ============================================================================
 // SYSTEM PROMPTS FOR COMPILER & RESEARCH ASSISTANT (PER SPEC)
@@ -52,7 +54,7 @@ PROCESS FOR EACH MISSING FIELD:
 - role_purpose — Derive from current_description; compress to one unambiguous sentence with a clear success boundary distinct from sibling agents.
 - trigger_condition — Inspect graph_context for the nearest upstream TRIGGER or AGENT edge label; if none exists, recommend standard trigger (webhook, cron, queue).
 - inputs / outputs — Trace edge labels; propose a labeled artifact schema (fields + types).
-- model_assignment — Compare task reasoning depth, latency sensitivity, and cost against available models (Claude 3.7 Sonnet, DeepSeek R1, Gemini 2.5 Flash, OpenRouter free tiers). State tradeoffs explicitly.
+- model_assignment — Leave empty. The operator selects the node's model from the workspace model registry; do not name or recommend a model.
 - tools_required — Map job to integrations (Obsidian Vectorizer, Telegram Dispatcher, Guardian Gate).
 - guardrails — Research risk profile (e.g., scraping = rate-limit; Dev agent = sandboxed execution).
 - success_criteria — Define measurable, falsifiable output check.
@@ -169,7 +171,7 @@ interface LiveNodeEstimate {
   label: string;
   assignedAgent: string;
   requestedModel: string;
-  routing: { provider: 'GEMINI' | 'UNSUPPORTED'; message?: string };
+  routing: { provider: string; routable: boolean; resolvedModel: string | null; requestedModel: string; code: string | null; message: string | null; availability: string | null; executable: boolean };
 }
 
 interface LiveExecutionEstimate {
@@ -231,7 +233,7 @@ const TEMPLATES = [
           trigger_condition: 'Inbound edge from arXiv Harvester trigger.',
           inputs: ['unstructured_text', 'html_body'],
           outputs: ['structured_repo_data', 'extracted_pain_points'],
-          model_assignment: 'DeepSeek R1 / Gemini 2.5 Flash',
+          model_assignment: '', // selected from the model registry per node
           tools_required: ['Web Scraper', 'arXiv API', 'JSON Normalizer'],
           guardrails: 'Guardian Gate Rule #4: Rate-limit + robots.txt compliance',
           success_criteria: 'Returns >= 10 distinct frameworks with source URLs',
@@ -258,7 +260,7 @@ const TEMPLATES = [
           trigger_condition: 'Inbound prompt payload from Scout Agent',
           inputs: ['extracted_pain_points', 'structured_repo_data'],
           outputs: ['tam_model_json', 'unit_economics_breakdown'],
-          model_assignment: 'DeepSeek R1 (OpenRouter)',
+          model_assignment: '', // selected from the model registry per node
           tools_required: ['Reasoning Sandbox', 'Math Calculator'],
           guardrails: 'Zero hallucination constraint on financial formulas',
           success_criteria: 'Generates valid TAM calculation with assumptions',
@@ -285,7 +287,7 @@ const TEMPLATES = [
           trigger_condition: 'Inbound payload from DeepSeek R1 Reasoning Engine',
           inputs: ['tam_model_json', 'extracted_pain_points'],
           outputs: ['markdown_note_file', 'wikilinks_mesh_updates'],
-          model_assignment: 'Claude 3.7 Sonnet / Gemini 2.5 Flash',
+          model_assignment: '', // selected from the model registry per node
           tools_required: ['Obsidian Vectorizer', 'Wikilink Mesh Generator'],
           guardrails: 'Guardian Gate Rule #12: Immutable vault write verification',
           success_criteria: 'Created note in [[Startup-Theses/]] with >= 5 [[wikilinks]]',
@@ -324,7 +326,7 @@ const TEMPLATES = [
           trigger_condition: 'Git webhook or manual dispatch',
           inputs: ['source_code_files', 'tsconfig_json'],
           outputs: ['build_artifacts', 'test_results'],
-          model_assignment: 'Claude 3.7 Sonnet (Code Mode)',
+          model_assignment: '', // selected from the model registry per node
           tools_required: ['Container Sandbox', 'AST Compiler'],
           guardrails: 'Guardian Gate Rule #1: Sandboxed container execution only',
           success_criteria: 'Zero compilation errors (0 exit code)',
@@ -400,6 +402,12 @@ export const GraphBuilderView: React.FC<GraphBuilderViewProps> = ({
   activeWorkspaceId,
 }) => {
   const workspaceId = activeWorkspaceId || 'ws-synthos-primary';
+  const modelRegistry = useModelRegistry(workspaceId);
+  // Palette: the registry's models, executable first. Nothing hardcoded.
+  const paletteModels = [...modelRegistry.models]
+    .filter((m) => m.outputContracts.length > 0)
+    .sort((a, b) => Number(b.executable) - Number(a.executable) || a.displayName.localeCompare(b.displayName))
+    .slice(0, 12);
   const [nodes, setNodes] = useState<GraphNode[]>(TEMPLATES[0].nodes);
   const [edges, setEdges] = useState<GraphEdge[]>(TEMPLATES[0].edges);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>('n2');
@@ -710,7 +718,7 @@ export const GraphBuilderView: React.FC<GraphBuilderViewProps> = ({
     setExecutionLogs((prev) => [...prev, `[GraphBuilder]: Added capability node ${capabilityKey}.`]);
   };
 
-  const handleAddNode = (type: GraphNode['type'], label: string, subType: string) => {
+  const handleAddNode = (type: GraphNode['type'], label: string, subType: string, modelId?: string) => {
     const newNodeId = `node-${Date.now().toString().slice(-4)}`;
     const isAgent = type === 'agent';
     const newNode: GraphNode = {
@@ -721,6 +729,7 @@ export const GraphBuilderView: React.FC<GraphBuilderViewProps> = ({
       x: 160 + (nodes.length % 3) * 220,
       y: 140 + Math.floor(nodes.length / 3) * 160,
       status: isAgent ? 'draft' : 'ready',
+      ...(modelId ? { modelId } : {}),
       description: `Newly initialized ${label} node.`,
       requiredFields: isAgent ? {
         role_purpose: `Execute operational payload for ${label}`,
@@ -890,9 +899,9 @@ export const GraphBuilderView: React.FC<GraphBuilderViewProps> = ({
     ]);
 
     let resolvedData: Partial<AgentRequiredFields> = {};
+    // No model benchmark or price citations: model identity and pricing come
+    // only from the model registry, never from text in this view.
     let customCitations: string[] = [
-      'https://openrouter.ai/models/deepseek/deepseek-r1 (DeepSeek R1 $0.55/1M Benchmark)',
-      'https://anthropic.com/claude/3.7-sonnet (Claude 3.7 Sonnet $3.00/1M Reasoning Spec)',
       'https://hermes-agentos.org/docs/guardian-rules (Guardian Gate Security Specification)'
     ];
 
@@ -958,7 +967,8 @@ Please research and resolve all missing fields according to the Required Field S
       trigger_condition: resolvedData.trigger_condition || targetNode.requiredFields.trigger_condition || (upstreamNodeNames.length > 0 ? `Inbound signal from ${upstreamNodeNames[0]}` : 'Webhook trigger or scheduled cron pulse'),
       inputs: resolvedData.inputs || targetNode.requiredFields.inputs || ['unstructured_payload', 'context_tokens'],
       outputs: resolvedData.outputs || targetNode.requiredFields.outputs || ['structured_json_schema', 'obsidian_note_bytes'],
-      model_assignment: resolvedData.model_assignment || targetNode.requiredFields.model_assignment || (targetNode.subType === 'dev' ? 'Claude 3.7 Sonnet (Code Mode)' : targetNode.subType === 'scout' ? 'DeepSeek R1 / Gemini 2.5 Flash' : 'Claude 3.7 Sonnet'),
+      // Never invented: the node keeps the registry model the operator selected, or none.
+      model_assignment: targetNode.modelId || targetNode.requiredFields.model_assignment || '',
       tools_required: resolvedData.tools_required || targetNode.requiredFields.tools_required || ['Obsidian Vectorizer', 'Telegram Dispatcher', 'Guardian Gate'],
       guardrails: resolvedData.guardrails || targetNode.requiredFields.guardrails || 'Guardian Gate Rule #8: Sandboxed memory & rate-limit check',
       success_criteria: resolvedData.success_criteria || targetNode.requiredFields.success_criteria || 'Returns valid JSON payload with 0 schema violations',
@@ -1126,7 +1136,7 @@ Please research and resolve all missing fields according to the Required Field S
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           workspaceId,
-          nodes: agentNodes.map((n) => ({ id: n.id, label: n.label, type: n.type, assignedAgent: n.agentRole })),
+          nodes: agentNodes.map((n) => ({ id: n.id, label: n.label, type: n.type, assignedAgent: n.agentRole, ...(n.modelId ? { assignedModel: n.modelId } : {}) })),
         }),
       });
       const data = await res.json();
@@ -1166,6 +1176,9 @@ Please research and resolve all missing fields according to the Required Field S
             name: n.label,
             description: n.description,
             assignedAgent: n.agentRole || 'dev',
+            // The node's registry model (canonical provider/model id), exactly
+            // as selected. The server refuses a compute node without one.
+            ...(n.modelId ? { assignedModel: n.modelId } : {}),
             // Capability nodes carry their key + params; layout travels too so
             // a reload restores exactly what the author positioned.
             ...(n.capability ? { capability: n.capability } : {}),
@@ -1525,36 +1538,24 @@ Please research and resolve all missing fields according to the Required Field S
                 <Sparkles className="w-3 h-3 text-[#38BDF8]" />
                 Frontier AI Models
               </div>
-              <button
-                onClick={() => handleAddNode('model', 'Claude 3.7 Sonnet', 'claude')}
-                className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-[#121424] hover:bg-[#1C1F38] border border-[#222642] text-xs text-[#E2E6F8] transition cursor-pointer group"
-              >
-                <div className="flex items-center gap-2">
-                  <Sparkles className="w-3 h-3 text-[#F97316]" />
-                  <span>Claude 3.7 Sonnet</span>
-                </div>
-                <Plus className="w-3 h-3 text-[#636B95] group-hover:text-white" />
-              </button>
-              <button
-                onClick={() => handleAddNode('model', 'DeepSeek R1', 'deepseek')}
-                className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-[#121424] hover:bg-[#1C1F38] border border-[#222642] text-xs text-[#E2E6F8] transition cursor-pointer group"
-              >
-                <div className="flex items-center gap-2">
-                  <Cpu className="w-3 h-3 text-[#3B82F6]" />
-                  <span>DeepSeek R1</span>
-                </div>
-                <Plus className="w-3 h-3 text-[#636B95] group-hover:text-white" />
-              </button>
-              <button
-                onClick={() => handleAddNode('model', 'Gemini 2.5 Flash', 'gemini')}
-                className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-[#121424] hover:bg-[#1C1F38] border border-[#222642] text-xs text-[#E2E6F8] transition cursor-pointer group"
-              >
-                <div className="flex items-center gap-2">
-                  <Radio className="w-3 h-3 text-[#00D26A]" />
-                  <span>Gemini 2.5 Flash</span>
-                </div>
-                <Plus className="w-3 h-3 text-[#636B95] group-hover:text-white" />
-              </button>
+              {/* From the model registry — no model is named in this view. */}
+              {paletteModels.length === 0 && (
+                <div className="px-2.5 py-1.5 text-[10px] text-[#636B95]">{modelRegistry.loading ? 'Loading the model registry…' : 'No registered model can run in this workspace yet.'}</div>
+              )}
+              {paletteModels.map((m) => (
+                <button
+                  key={modelKey(m)}
+                  onClick={() => handleAddNode('model', m.displayName, m.providerId, modelKey(m))}
+                  title={m.executable ? m.availability : reasonFor(m)}
+                  className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-[#121424] hover:bg-[#1C1F38] border border-[#222642] text-xs text-[#E2E6F8] transition cursor-pointer group"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Sparkles className={`w-3 h-3 ${m.executable ? 'text-[#00D26A]' : 'text-[#636B95]'}`} />
+                    <span className="truncate">{m.displayName}</span>
+                  </div>
+                  <Plus className="w-3 h-3 text-[#636B95] group-hover:text-white" />
+                </button>
+              ))}
             </div>
 
             {/* Tools & Integrations */}
@@ -1872,7 +1873,7 @@ Please research and resolve all missing fields according to the Required Field S
                     <div className="mb-3 flex items-center justify-between text-[10px] bg-[#121424] p-1.5 rounded-lg border border-[#1E223D]">
                       <span className="text-[#8E94B8]">Model:</span>
                       <span className="text-[#38BDF8] font-bold truncate max-w-[120px]">
-                        {node.requiredFields.model_assignment || 'Unassigned'}
+                        {node.modelId ? (models[node.modelId]?.name ?? node.modelId) : 'Unassigned'}
                       </span>
                     </div>
                   )}
@@ -2069,26 +2070,23 @@ Please research and resolve all missing fields according to the Required Field S
                     <label className="text-[10px] text-[#8E94B8] font-bold block mb-1">
                       3. Model Assignment & Tradeoff
                     </label>
-                    <select
-                      value={selectedNode.requiredFields.model_assignment || ''}
-                      onChange={(e) => {
-                        const val = e.target.value;
+                    {/* The node's model comes from the model registry only. The value is
+                        the canonical provider/model id sent to /api/graphs/execute. */}
+                    <RegistryModelSelect
+                      workspaceId={workspaceId}
+                      value={selectedNode.modelId || ''}
+                      outputContract="NARRATIVE"
+                      showFilters
+                      onChange={(val) => {
                         setNodes((prev) =>
                           prev.map((n) =>
                             n.id === selectedNode.id
-                              ? { ...n, requiredFields: { ...n.requiredFields, model_assignment: val } }
+                              ? { ...n, modelId: val || undefined, requiredFields: { ...n.requiredFields, model_assignment: val } }
                               : n
                           )
                         );
                       }}
-                      className="w-full bg-[#121424] border border-[#232742] text-white text-xs rounded-lg p-2 focus:border-[#615EFF]"
-                    >
-                      <option value="">Select Grounded Model...</option>
-                      <option value="Claude 3.7 Sonnet (Code Mode)">Claude 3.7 Sonnet ($3.00/1M tokens, High Reasoning)</option>
-                      <option value="DeepSeek R1 / Gemini 2.5 Flash">DeepSeek R1 ($0.55/1M tokens, Math & Audit)</option>
-                      <option value="Gemini 2.5 Flash">Gemini 2.5 Flash ($0.075/1M tokens, Low Latency)</option>
-                      <option value="OpenRouter Free Tier (Llama 3)">OpenRouter Free Tier ($0.00/1M tokens)</option>
-                    </select>
+                    />
                   </div>
 
                   {/* 4. inputs & outputs */}
@@ -2800,8 +2798,8 @@ Please research and resolve all missing fields according to the Required Field S
                   {liveEstimate.nodes.map((n) => (
                     <div key={n.nodeId} className="flex items-center justify-between gap-2">
                       <span className="truncate">{n.label} <span className="text-[#7A82A6]">({n.assignedAgent})</span></span>
-                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${n.routing.provider === 'GEMINI' ? 'bg-[#00D26A]/20 text-[#00D26A]' : 'bg-[#FF5E8E]/20 text-[#FF5E8E]'}`}>
-                        {n.routing.provider === 'GEMINI' ? n.requestedModel : 'UNROUTABLE'}
+                      <span title={n.routing.message || n.routing.availability || ''} className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${n.routing.routable && n.routing.executable ? 'bg-[#00D26A]/20 text-[#00D26A]' : n.routing.routable ? 'bg-[#E8A845]/20 text-[#E8A845]' : 'bg-[#FF5E8E]/20 text-[#FF5E8E]'}`}>
+                        {n.routing.routable ? `${n.routing.provider}/${n.routing.resolvedModel} · ${n.routing.availability}` : n.routing.code || 'UNROUTABLE'}
                       </span>
                     </div>
                   ))}

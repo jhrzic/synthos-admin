@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from 'react';
+import { useModelRegistry, modelKey, type RegistryState } from './components/registry/useModelRegistry';
 import { 
   ActiveTab, AIModelInfo, ObsidianNote, ObsidianVault, 
   BotTask, JarvisSettings, AgentInfo, KanbanTask, ModelRouterRule, AgentRole,
@@ -6,7 +7,7 @@ import {
   KanbanColumnId
 } from './types';
 import { 
-  INITIAL_MODELS, INITIAL_VAULTS, INITIAL_NOTES, 
+  INITIAL_VAULTS, INITIAL_NOTES, 
   INITIAL_BOT_TASKS, INITIAL_JARVIS_SETTINGS,
   INITIAL_AGENTS, INITIAL_KANBAN_TASKS, INITIAL_ROUTER_RULES,
   INITIAL_TELEGRAM_MESSAGES, INITIAL_CRON_JOBS, INITIAL_GUIDE_STEPS,
@@ -121,6 +122,12 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
     return authorizedWorkspaces[0]?.workspace_id || 'ws-synthos-primary';
   });
 
+  // MODELS — from the persisted local model registry only. No UI-only model
+  // list; a model installed by a plugin, signed manifest or Admin registration
+  // appears everywhere this map is used, with no client change.
+  const modelRegistry = useModelRegistry(activeWorkspaceId);
+  const models = useMemo(() => registryModelInfo(modelRegistry), [modelRegistry.models, modelRegistry.providers]);
+
   useEffect(() => {
     try { localStorage.setItem(LAST_WORKSPACE_STORAGE_KEY, activeWorkspaceId); } catch { /* best effort */ }
   }, [activeWorkspaceId]);
@@ -136,7 +143,6 @@ export default function App({ currentUser, authorizedWorkspaces = [], onLogout }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authorizedWorkspaces]);
-  const [models, setModels] = useState<Record<string, AIModelInfo>>(INITIAL_MODELS);
   const [agents, setAgents] = useState<Record<string, AgentInfo>>(AGENT_DEFINITIONS);
   const [kanbanTasks, setKanbanTasks] = useState<KanbanTask[]>(() => {
     try {
@@ -960,17 +966,14 @@ provenance: "${finalMeta.provenance}"
     const startTime = Date.now();
 
     try {
-      // Execute via specialized agent endpoint or fallback query
-      let reply: string;
-      let toolCalls: string[] = [];
-      let verificationReceiptData: any = null;
-
+      // ONE dispatch to the canonical execution endpoint. Its decision is final.
       try {
         const execRes = await fetch('/api/execute-agent-task', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             taskId: task.id,
+            taskTitle: task.title,
             title: task.title,
             description: task.description,
             assignedAgent: task.assignedAgent,
@@ -1017,171 +1020,78 @@ provenance: "${finalMeta.provenance}"
           });
           return;
         }
-        if (verificationOutcome) handleUpdateKanbanTask(taskId, { verificationOutcome });
-        if (execRes.ok && execData) {
-          if (execData.success && execData.artifact) {
-            reply = execData.artifact.content;
-            toolCalls = execData.artifact.toolsUsed || [];
-            verificationReceiptData = execData.verificationReceipt;
-          } else {
-            reply = await handleSendQuery(
-              `Execute Kanban Directive: "${task.title}"\nDescription: ${task.description}`,
-              task.assignedModel,
-              systemPrompt
-            );
-          }
-        } else {
-          reply = await handleSendQuery(
-            `Execute Kanban Directive: "${task.title}"\nDescription: ${task.description}`,
-            task.assignedModel,
-            systemPrompt
-          );
+        if (!execRes.ok || !execData || !execData.success || !execData.artifact) {
+          // The canonical endpoint did not return a decision (unreachable,
+          // non-JSON, or an unexpected shape). NOTHING else is run in its
+          // place: no chat fallback, no second model, no judge.
+          handleUpdateKanbanTask(taskId, {
+            column: 'blocked',
+            outputLog: `[Execution]: the canonical execution endpoint returned no decision (HTTP ${execRes.status}). Nothing was run in its place.`,
+            updatedAt: 'Just now (Blocked)',
+          });
+          return;
         }
-      } catch {
-        reply = await handleSendQuery(
-          `Execute Kanban Directive: "${task.title}"\nDescription: ${task.description}`,
-          task.assignedModel,
-          systemPrompt
-        );
-      }
 
-      const latencyMs = Date.now() - startTime;
-      const isSimulated = reply.includes('simulated') || reply.includes('Simulated') || reply.includes('Autonomous local reasoning');
+        // SUCCESS is the canonical fabric's own verdict: scoped Aegis passed in
+        // every required scope and a signed receipt exists. That is the success
+        // gate. Reaching DONE triggers NO further model call — the legacy
+        // "Aegis Judge" second call (and its local score, local receipt and
+        // duplicate vault note) is gone. A model-based evaluation is still
+        // possible, but only as its own explicitly requested, separately
+        // guarded, separately receipted execution (Request evaluation).
+        const receiptPayload = execData.receipt?.payload || {};
+        const executedModel = {
+          providerId: receiptPayload.registryProviderId ?? null,
+          modelId: receiptPayload.canonicalModelId ?? null,
+          reportedModel: execData.modelUsed ?? null,
+        };
+        const done = execData.status === 'DONE';
+        handleUpdateKanbanTask(taskId, {
+          column: done ? 'done' : 'blocked',
+          verificationOutcome,
+          executedModel,
+          outputs: execData.artifact.content,
+          toolCalls: execData.artifact.toolsUsed || execData.toolCalls || [],
+          outputLog: `[Aegis]: ${execData.status}${verificationOutcome?.scopeStatement ? ` — ${verificationOutcome.scopeStatement}` : ''}`,
+          executionLogs: [
+            `[Runtime]: ${task.assignedAgent.toUpperCase()} → ${executedModel.providerId ?? 'UNKNOWN'}/${executedModel.modelId ?? 'UNKNOWN'} (provider reported ${executedModel.reportedModel ?? 'UNKNOWN'})`,
+            `[Aegis]: ${execData.review?.decision ?? 'UNKNOWN'} — receipt ${execData.receipt?.receiptId ?? 'none'} (${receiptPayload.outcome ?? 'outcome not stated'})`,
+          ],
+          verificationReceipt: execData.receipt ? {
+            id: execData.receipt.receiptId,
+            score: typeof execData.review?.score === 'number' ? execData.review.score : 0,
+            signature: execData.receipt.signature,
+            status: execData.receipt.verified ? 'VERIFIED' : 'SIGNATURE_FAILED',
+            verifiedAt: execData.receipt.createdAt,
+          } : undefined,
+          subtasks: done ? task.subtasks.map(s => ({ ...s, completed: true })) : task.subtasks,
+          updatedAt: `Just now (${execData.status})`,
+        });
+        synthosControl.logEvent({
+          taskId: task.id,
+          eventType: done ? 'AEGIS_VERIFIED' : 'CANONICAL_EXECUTION_FAILED',
+          actorRole: 'orchestrator',
+          actorModel: `${executedModel.providerId ?? 'UNKNOWN'}/${executedModel.modelId ?? 'UNKNOWN'}`,
+          summary: `Canonical execution of "${task.title}" ended ${execData.status}. Receipt ${execData.receipt?.receiptId ?? 'none'}. No second model call was made.`,
+          payload: { taskId: execData.taskId, status: execData.status, receiptId: execData.receipt?.receiptId ?? null, latencyMs: Date.now() - startTime },
+          isSimulated: false,
+        });
 
-      // 3. Post-execution Aegis Verification (Initial score)
-      const aegisScore = synthosControl.verifyWithAegis(task, reply, task.assignedModel);
-
-      // 4. Store Builder Draft Artifact
-      const artifact = synthosControl.storeVaultArtifact(task, reply, 'markdown', isSimulated);
-      
-      // Log Builder's decision and artifact output
-      synthosControl.logEvent({
-        taskId: task.id,
-        eventType: 'BUILDER_ARTIFACT_PRODUCED',
-        actorRole: task.assignedAgent,
-        actorModel: task.assignedModel,
-        summary: `Builder agent '${task.assignedAgent}' produced draft artifact with ${reply.split(/\s+/).length} tokens.`,
-        payload: { artifactId: artifact.id, title: task.title },
-        isSimulated
-      });
-
-      // 5. Advance Task to 'REVIEW' state (Canonical state machine progression)
-      handleUpdateKanbanTask(taskId, {
-        column: 'review',
-        outputLog: `[Builder Draft Generated]: Awaiting independent Aegis Judge evaluation.`,
-        executionLogs: [
-          `[Runtime]: Dispatched to ${task.assignedAgent.toUpperCase()} (${task.assignedModel})`,
-          `[Sandbox]: Allocated isolated container with sub-50ms execution context`,
-          ...(toolCalls.map(tc => `[Tool Invocation]: Executed ${tc}`)),
-          `[Builder Out]: Draft artifact generated (ID: ${artifact.id})`,
-          `[State Machine]: Transitioned task to REVIEW column. Dispatching independent Judge model...`
-        ],
-        updatedAt: 'Just now (In Review)'
-      });
-
-      // 6. Independent Judge Evaluation (Builder -> Judge Pattern)
-      // We load an independent model family as Judge (e.g. if builder was Gemini/Perplexity, Judge is Claude or vice-versa)
-      const judgeModel = task.assignedAgent === 'dev' || task.assignedModel.includes('gemini') ? 'claude-3.5-sonnet' : 'gemini-3.7-flash';
-      
-      const judgeSystemPrompt = `You are the Aegis Audit Sentinel. Your job is to strictly evaluate the draft artifact generated by the Builder.
-Choose one of the following decisions:
-- APPROVE: The content matches the requirements, is well-structured, and meets strict corporate quality guidelines.
-- REVISE: The content requires minor edits or lacks sufficient substance.
-- BLOCK: The content violates safety rules, is corrupted, or fails to meet functional requirements.
-
-Output your audit in markdown with your exact decision at the very top.`;
-
-      const judgeResponse = await handleSendQuery(
-        `Audit this generated artifact for directive: "${task.title}"\nDescription: ${task.description}\n\nDraft Content:\n${reply}`,
-        judgeModel,
-        judgeSystemPrompt
-      );
-
-      const judgeDecision = judgeResponse.toUpperCase().includes('APPROVE') 
-        ? 'APPROVE' 
-        : judgeResponse.toUpperCase().includes('REVISE') 
-        ? 'REVISE' 
-        : 'BLOCK';
-
-      // Record Judge's Decision & frontmatter sync
-      const finalApproved = judgeDecision === 'APPROVE' && aegisScore.passed;
-      const targetCol: KanbanColumnId = finalApproved ? 'done' : judgeDecision === 'REVISE' ? 'todo' : 'blocked';
-      
-      // Sync verified note to Obsidian
-      handleAddNoteToVault(
-        `Deliverable-${task.title.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 30)}`,
-        `# ${task.title}\n\n**Agent Builder**: ${task.assignedAgent}\n**Model Builder**: ${task.assignedModel}\n**Judge Model**: ${judgeModel}\n**Judge Verdict**: ${judgeDecision}\n\n## Output\n${reply}\n\n## Judge Evaluation Critique\n${judgeResponse}\n\n## Aegis Quality Score\nScore: ${(aegisScore.score * 100).toFixed(0)}%\n\n${(task.obsidianWikilinks || []).map(w => `- [[${w}]]`).join('\n')}`,
-        ['synthos-deliverable', task.assignedAgent, `judge-${judgeDecision.toLowerCase()}`],
-        'artifacts'
-      );
-
-      // Issue Cryptographic Receipt
-      const receipt = synthosControl.issueReceipt(
-        task,
-        guardianCheck,
-        aegisScore,
-        task.assignedModel,
-        latencyMs,
-        reply.split(/\s+/).length,
-        isSimulated,
-        artifact.id
-      );
-
-      synthosControl.logEvent({
-        taskId: task.id,
-        eventType: 'JUDGE_EVALUATED',
-        actorRole: 'orchestrator',
-        actorModel: judgeModel,
-        summary: `Aegis Judge evaluated artifact for "${task.title}": Verdict is ${judgeDecision}.`,
-        payload: { verdict: judgeDecision, score: aegisScore.score },
-        isSimulated
-      });
-
-      // 7. Transition Task to Final State (Done, Back to Todo for Revision, or Blocked)
-      handleUpdateKanbanTask(taskId, {
-        column: targetCol,
-        outputLog: `[${task.assignedAgent.toUpperCase()}]: ${judgeDecision === 'APPROVE' ? 'Completed & approved by Aegis Judge' : 'Rejected / held for revision'}. Receipt: ${receipt.id}`,
-        executionLogs: [
-          `[Runtime]: Dispatched to ${task.assignedAgent.toUpperCase()} (${task.assignedModel})`,
-          `[Sandbox]: Allocated isolated container with sub-50ms execution context`,
-          ...(toolCalls.map(tc => `[Tool Invocation]: Executed ${tc}`)),
-          `[Builder Out]: Draft artifact generated`,
-          `[Aegis Sentinel]: Initial quality score verified: ${(aegisScore.score * 100).toFixed(0)}/100`,
-          `[Aegis Judge]: Loaded independent model ${judgeModel.toUpperCase()} for audit`,
-          `[Judge Verdict]: Decision = ${judgeDecision}`,
-          `[Judge Comment]: ${judgeResponse.split('\n')[0]}`,
-          `[Obsidian Sync]: Generated verified artifact [[artifacts/Deliverable-${task.title.slice(0, 20)}]]`,
-          `[Receipt]: Issued cryptographic proof ${receipt.id}`
-        ],
-        verificationReceipt: verificationReceiptData || {
-          id: receipt.id,
-          score: Math.round(aegisScore.score * 100),
-          signature: receipt.signatureHash,
-          status: receipt.status,
-          verifiedAt: new Date().toISOString()
-        },
-        subtasks: task.subtasks.map(s => ({ ...s, completed: true })),
-        updatedAt: `Just now (${judgeDecision === 'APPROVE' ? 'Approved' : 'Revision Required'})`
-      });
-
-      // 8. Check if any downstream tasks in 'todo' can now be promoted to 'ready'
-      if (targetCol === 'done') {
-        setKanbanTasks(prevTasks => {
-          return prevTasks.map(t => {
+        if (done) {
+          setKanbanTasks(prevTasks => prevTasks.map(t => {
             if (t.column === 'todo' && t.dependencies?.includes(taskId)) {
-              const allDepsDone = (t.dependencies || []).every(depId => 
-                depId === taskId || prevTasks.find(pt => pt.id === depId)?.column === 'done'
-              );
-              if (allDepsDone) {
-                return {
-                  ...t,
-                  column: 'ready' as KanbanColumnId,
-                  updatedAt: 'Just now (Dependencies Met)'
-                };
-              }
+              const allDepsDone = (t.dependencies || []).every(depId => depId === taskId || prevTasks.find(pt => pt.id === depId)?.column === 'done');
+              if (allDepsDone) return { ...t, column: 'ready' as KanbanColumnId, updatedAt: 'Just now (Dependencies Met)' };
             }
             return t;
-          });
+          }));
+        }
+      } catch (fetchErr: any) {
+        // Network failure reaching the canonical endpoint. No fallback.
+        handleUpdateKanbanTask(taskId, {
+          column: 'blocked',
+          outputLog: `[Execution]: could not reach the canonical execution endpoint (${fetchErr?.message || 'network error'}). Nothing was run in its place.`,
+          updatedAt: 'Just now (Blocked)',
         });
       }
     } catch (err: any) {
@@ -1842,6 +1752,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               onPushTaskToObsidian={handlePushTaskToObsidian}
               onSelectAgent={(agentRole) => setDrawerAgentRole(agentRole)}
               onOpenJulianAudit={() => setIsJulianAuditOpen(true)}
+              activeWorkspaceId={activeWorkspaceId}
             />
           )}
 
@@ -2072,6 +1983,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
               onPushTaskToObsidian={handlePushTaskToObsidian}
               onSelectAgent={(agentRole) => setDrawerAgentRole(agentRole)}
               onOpenJulianAudit={() => setIsJulianAuditOpen(true)}
+              activeWorkspaceId={activeWorkspaceId}
             />
           )}
 
@@ -2334,7 +2246,7 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
           {/* Individual Model Dashboards */}
           {isModelTab(activeTab) && (
             <ModelDashboardView
-              model={models[activeTab]}
+              model={seatInfo(activeTab, modelRegistry)}
               workspaceId={activeWorkspaceId}
               onSendQuery={handleSendQuery}
               onAddNoteToVault={(title, content, tags) => handleAddNoteToVault(title, content, tags, 'Model-Syntheses')}
@@ -2470,4 +2382,56 @@ Highlight blockades, priority targets, and today's GTM sprints.`;
       />
     </div>
   );
+}
+
+
+// ---------------------------------------------------------------------------
+// Registry → the AIModelInfo shape existing views consume. Truthful fields
+// only: no latency, throughput or pricing is invented; unknowns say UNKNOWN.
+// ---------------------------------------------------------------------------
+function registryModelInfo(reg: Pick<RegistryState, 'models' | 'providers'>): Record<string, AIModelInfo> {
+  const out: Record<string, AIModelInfo> = {};
+  for (const m of reg.models) {
+    const p = m.pricing.current;
+    out[modelKey(m)] = {
+      id: modelKey(m),
+      name: m.displayName,
+      provider: m.providerDisplayName,
+      version: m.modelId,
+      status: m.executable ? 'active' : m.availability === 'NOT_CONFIGURED' ? 'requires_key' : 'unconfigured',
+      latency: 0,
+      tokensPerSec: 0,
+      contextWindow: m.limits.contextTokens ? `${m.limits.contextTokens} tokens` : 'UNKNOWN',
+      specialty: m.capabilities.filter((c) => c.supported).map((c) => c.id).join(', ') || 'No capabilities declared',
+      description: m.executable ? `${m.availability} in the model registry.` : `${m.availability}: ${m.blockers[0]?.reason ?? ''}`,
+      color: m.executable ? '#00D26A' : '#7E8BB5',
+      iconName: 'Layers',
+      pricing: p ? { prompt: `${p.rates.input} ${p.currency} / 1M ${p.unit}`, completion: `${p.rates.output} ${p.currency} / 1M ${p.unit}` } : undefined,
+    };
+  }
+  return out;
+}
+
+/** Seat dashboard (a nav tab) → its registry provider, or an honest "not installed". */
+const SEAT_PROVIDER: Record<string, string> = {
+  chatgpt: 'openai', codex: 'openai', gemini: 'gemini', antigravity: 'antigravity',
+  claude: 'anthropic', claudecode: 'anthropic', deepseek: 'deepseek', perplexity: 'perplexity',
+};
+function seatInfo(seat: string, reg: Pick<RegistryState, 'models' | 'providers'>): AIModelInfo {
+  const providerId = SEAT_PROVIDER[seat];
+  const p = providerId ? reg.providers.find((x) => x.providerId === providerId) : undefined;
+  return {
+    id: seat,
+    name: p?.displayName ?? seat,
+    provider: p?.displayName ?? 'Not in the model registry',
+    version: p ? `${p.modelCount} registered · ${p.executableCount} executable` : 'No provider plugin installed',
+    status: p ? (p.executableCount > 0 ? 'active' : p.credential.ready ? 'partial' : 'requires_key') : 'unconfigured',
+    latency: 0,
+    tokensPerSec: 0,
+    contextWindow: 'UNKNOWN',
+    specialty: p ? `${p.protocol} · ${p.adapterDispatch}` : 'UNKNOWN',
+    description: p ? `Registry provider ${p.providerId}; endpoint ${p.endpoint.ok ? p.endpoint.host : 'REFUSED'}; credential ${p.credential.ready ? 'ready' : 'not configured'}.` : 'This seat has no provider plugin in the model registry.',
+    color: '#7E8BB5',
+    iconName: 'Layers',
+  };
 }

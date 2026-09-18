@@ -72,7 +72,12 @@ const LIVE_DISCOVERY: Partial<Record<CatalogProviderId, {
   },
 };
 
-export type RefreshTrigger = 'STARTUP' | 'SCHEDULED' | 'MANUAL';
+/**
+ * MANUAL only. Discovery is an explicitly initiated, audited Admin operation
+ * that is OFF by default (lib/registry/discovery.ts). It never runs at
+ * startup, on a timer, when a page renders or when a selector opens.
+ */
+export type RefreshTrigger = 'MANUAL';
 
 export type ProviderRefreshOutcome =
   /** A live model-list call succeeded. */

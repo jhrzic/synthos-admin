@@ -78,7 +78,7 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     id: 'task-1',
     title: 'DISCOVER RECENT VIDEOS',
     agent: 'Research Agent (Scout)',
-    model: 'gemini-3.7-flash',
+    model: 'selected per task (model registry)',
     whyModel: 'Optimized for long context & real-time Google/YouTube Search grounding',
     fallbackModel: 'perplexity-sonar-huge',
     column: 'backlog'
@@ -87,7 +87,7 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     id: 'task-2',
     title: 'FETCH VIDEO METADATA',
     agent: 'Research Agent (Scout)',
-    model: 'gemini-3.7-flash',
+    model: 'selected per task (model registry)',
     whyModel: 'Fast JSON schema extraction for durations & publish dates',
     fallbackModel: 'openai-gpt4o-mini',
     column: 'backlog'
@@ -105,7 +105,7 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     id: 'task-4',
     title: 'SUMMARIZE EACH VIDEO',
     agent: 'Analyst Agent (Scribe)',
-    model: 'gemini-3.7-flash',
+    model: 'selected per task (model registry)',
     whyModel: 'High throughput fast summarization with bullet points',
     fallbackModel: 'claude-3-5-haiku',
     column: 'backlog'
@@ -114,7 +114,7 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     id: 'task-5',
     title: 'EXTRACT KEY IDEAS',
     agent: 'Analyst Agent (Scribe)',
-    model: 'deepseek-r1',
+    model: 'selected per task (model registry)',
     whyModel: 'Deep chain-of-thought analysis for semantic claim extraction',
     fallbackModel: 'gemini-3.1-pro-preview',
     column: 'backlog'
@@ -123,7 +123,7 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     id: 'task-6',
     title: 'EXTRACT TOOLS / PRODUCTS / REPOS',
     agent: 'Engineering Agent (Dev)',
-    model: 'claudecode-3.7',
+    model: 'selected per task (model registry)',
     whyModel: 'Specialized in technical repo, SDK, and API tool parsing',
     fallbackModel: 'codex-o3-mini',
     column: 'backlog'
@@ -134,14 +134,14 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     agent: 'SEO / Growth Agent (Reach)',
     model: 'chatgpt-o3-mini',
     whyModel: 'High precision strategy classification for AEO & GEO content loops',
-    fallbackModel: 'gemini-3.7-flash',
+    fallbackModel: 'selected per task (model registry)',
     column: 'backlog'
   },
   {
     id: 'task-8',
     title: 'EXTRACT AGENTIC WORKFLOW IDEAS',
     agent: 'SynthOS Strategy Agent',
-    model: 'claude-3-7-sonnet',
+    model: 'selected per task (model registry)',
     whyModel: 'Architectural reasoning for multi-agent browser patterns',
     fallbackModel: 'gemini-3.1-pro-preview',
     column: 'backlog'
@@ -150,16 +150,16 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     id: 'task-9',
     title: 'COMPARE WITH SYNTHOS CURRENT CAPABILITIES',
     agent: 'SynthOS Strategy Agent',
-    model: 'claude-3-7-sonnet',
+    model: 'selected per task (model registry)',
     whyModel: 'Full system context mapping across Graph Builder, Model Router & Vaults',
-    fallbackModel: 'deepseek-r1',
+    fallbackModel: 'selected per task (model registry)',
     column: 'backlog'
   },
   {
     id: 'task-10',
     title: 'IDENTIFY DUPLICATES',
     agent: 'SynthOS Strategy Agent',
-    model: 'gemini-3.7-flash',
+    model: 'selected per task (model registry)',
     whyModel: 'Fast feature matrix deduplication',
     fallbackModel: 'chatgpt-4o-mini',
     column: 'backlog'
@@ -168,7 +168,7 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     id: 'task-11',
     title: 'IDENTIFY MISSING CAPABILITIES',
     agent: 'Engineering Agent (Dev)',
-    model: 'claudecode-3.7',
+    model: 'selected per task (model registry)',
     whyModel: 'Deep codebase gap analysis',
     fallbackModel: 'codex-o3-mini',
     column: 'backlog'
@@ -177,7 +177,7 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     id: 'task-12',
     title: 'ASSESS TECHNICAL FEASIBILITY',
     agent: 'Engineering Agent (Dev)',
-    model: 'claude-3-7-sonnet',
+    model: 'selected per task (model registry)',
     whyModel: 'Precise effort vs complexity estimation',
     fallbackModel: 'gemini-3.1-pro-preview',
     column: 'backlog'
@@ -186,16 +186,16 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     id: 'task-13',
     title: 'RANK INTEGRATION OPPORTUNITIES',
     agent: 'SynthOS Strategy Agent',
-    model: 'deepseek-r1',
+    model: 'selected per task (model registry)',
     whyModel: 'Reasoning prioritization framework for P0/P1 items',
-    fallbackModel: 'claude-3-7-sonnet',
+    fallbackModel: 'selected per task (model registry)',
     column: 'backlog'
   },
   {
     id: 'task-14',
     title: 'CREATE FINAL RECOMMENDATIONS',
     agent: 'Orchestrator (Hermes 3)',
-    model: 'claude-3-7-sonnet',
+    model: 'selected per task (model registry)',
     whyModel: 'Executive synthesis and decision sign-off',
     fallbackModel: 'gemini-3.1-pro-preview',
     column: 'backlog'
@@ -204,7 +204,7 @@ const INITIAL_TASK_STEPS: TaskStep[] = [
     id: 'task-15',
     title: 'GENERATE IMPLEMENTATION BACKLOG',
     agent: 'Orchestrator (Hermes 3)',
-    model: 'gemini-3.7-flash',
+    model: 'selected per task (model registry)',
     whyModel: 'Structured Kanban task payload generation',
     fallbackModel: 'openai-gpt4o',
     column: 'backlog'

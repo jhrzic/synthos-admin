@@ -113,14 +113,96 @@ function hostOf(raw: string | undefined): string | null {
   try { return new URL(raw).host.toLowerCase(); } catch { return null; }
 }
 
-/** Real paid hosts plus any configured provider base-URL override (proxy, gateway or test double). */
+// ---------------------------------------------------------------------------
+// PROVIDER ENDPOINT SOURCE — supplied by the model registry (lib/registry).
+//
+// The registry is the one authority for where each provider's requests and
+// credentials may go. It registers itself here (instead of this module
+// importing it) so the fetch boundary has no import cycle with the spend
+// guard. Until it registers, only the canonical paid hosts are known.
+// ---------------------------------------------------------------------------
+export interface ProviderEndpointInfo {
+  /** Hosts (with port) this provider's requests are resolved to right now — validated. */
+  endpointHosts: string[];
+  /** Every host a credential for this provider may be sent to. */
+  credentialHosts: string[];
+  /** The resolved credential values. Compared in memory only; never logged. */
+  credentials: string[];
+}
+let endpointSource: (() => ProviderEndpointInfo[]) | null = null;
+let endpointCache: { at: number; value: ProviderEndpointInfo[] } | null = null;
+
+export function setProviderEndpointSource(fn: () => ProviderEndpointInfo[]): void {
+  endpointSource = fn;
+  endpointCache = null;
+}
+
+function providerEndpoints(): ProviderEndpointInfo[] {
+  if (!endpointSource) return [];
+  if (endpointCache && Date.now() - endpointCache.at < 2_000) return endpointCache.value;
+  let value: ProviderEndpointInfo[] = [];
+  try { value = endpointSource(); } catch { value = []; }
+  endpointCache = { at: Date.now(), value };
+  return value;
+}
+
+/** Test hook: drop the cached endpoint view after changing env or credentials. */
+export function invalidateProviderEndpointCache(): void {
+  endpointCache = null;
+}
+
+/** Real paid hosts plus every registry-validated provider endpoint (proxy, gateway or test double). */
 export function paidHosts(env: NodeJS.ProcessEnv = process.env): Set<string> {
   const set = new Set(REAL_PAID_HOSTS);
+  for (const p of providerEndpoints()) for (const h of p.endpointHosts) set.add(h);
+  // An override the registry REJECTED is still a paid host: a request aimed at
+  // it must be refused by this boundary, never treated as free traffic.
   for (const v of [env.OPENAI_BASE_URL, env.ANTIGRAVITY_BASE_URL, env.GEMINI_BASE_URL]) {
     const h = hostOf(v);
     if (h) set.add(h);
   }
   return set;
+}
+
+const CREDENTIAL_HEADERS = ['authorization', 'x-goog-api-key', 'x-api-key', 'api-key'];
+
+function headerValues(input: any, init: any): string[] {
+  const out: string[] = [];
+  const read = (h: any) => {
+    if (!h) return;
+    if (typeof h.forEach === 'function' && typeof h.get === 'function') {
+      h.forEach((v: string, k: string) => { if (CREDENTIAL_HEADERS.includes(k.toLowerCase())) out.push(String(v)); });
+    } else if (Array.isArray(h)) {
+      for (const [k, v] of h) if (CREDENTIAL_HEADERS.includes(String(k).toLowerCase())) out.push(String(v));
+    } else if (typeof h === 'object') {
+      for (const [k, v] of Object.entries(h)) if (CREDENTIAL_HEADERS.includes(k.toLowerCase())) out.push(String(v));
+    }
+  };
+  read(input && typeof input === 'object' && 'headers' in input ? input.headers : null);
+  read(init?.headers);
+  return out;
+}
+
+/**
+ * CREDENTIAL PROTECTION. If a request carries a provider credential (header or
+ * `key=` query) to a host that provider is not approved for, it is refused
+ * here, before it leaves the process. Returns the refusal reason or null.
+ */
+export function credentialDestinationViolation(url: URL, input: any, init: any): string | null {
+  const endpoints = providerEndpoints();
+  if (endpoints.length === 0) return null;
+  const sent = [...headerValues(input, init).map((v) => v.replace(/^Bearer\s+/i, '').trim()), ...(url.searchParams.get('key') ? [url.searchParams.get('key')!] : [])].filter((v) => v.length >= 8);
+  if (sent.length === 0) return null;
+  const host = url.host.toLowerCase();
+  const hostname = url.hostname.toLowerCase();
+  // One credential can belong to several providers (Antigravity falls back to
+  // the Gemini key). It may go to a host if ANY provider holding it approves it.
+  const holders = endpoints.filter((p) => p.credentials.some((c) => c && sent.includes(c)));
+  if (holders.length === 0) return null;
+  // Loopback is matched on host:port only; other hosts on their hostname too.
+  const loopback = hostname === 'localhost' || hostname === '::1' || hostname === '[::1]' || /^127\./.test(hostname);
+  if (holders.some((p) => p.credentialHosts.includes(host) || (!loopback && p.credentialHosts.includes(hostname)))) return null;
+  return `a provider credential was about to be sent to ${host}, which is not an approved host for any provider holding it`;
 }
 
 export function isRealPaidHost(host: string): boolean {
@@ -176,6 +258,14 @@ export function verifyPricedRequest(url: URL, bodyText: string | null, priced: P
     if (typeof body.max_output_tokens !== 'number') return 'no max_output_tokens was sent';
     if (priced.maxOutputTokens !== null && body.max_output_tokens > priced.maxOutputTokens) return `max_output_tokens ${body.max_output_tokens} exceeds the priced ${priced.maxOutputTokens}`;
     return tooLong(typeof body.input === 'string' ? body.input.length : JSON.stringify(body.input ?? '').length);
+  }
+  if (/\/chat\/completions$/.test(p)) {
+    // OpenAI-compatible chat completions (any provider speaking that protocol).
+    if (body.model !== priced.model) return `model "${body.model}" differs from the priced "${priced.model}"`;
+    const out = body.max_tokens ?? body.max_completion_tokens;
+    if (typeof out !== 'number') return 'no max_tokens was sent';
+    if (priced.maxOutputTokens !== null && out > priced.maxOutputTokens) return `max_tokens ${out} exceeds the priced ${priced.maxOutputTokens}`;
+    return tooLong(sumTextFields({ messages: (body.messages || []).map((m: any) => ({ text: typeof m?.content === 'string' ? m.content : JSON.stringify(m?.content ?? '') })) }));
   }
   if (/\/audio\/speech$/.test(p)) {
     if (body.model !== priced.model) return `model "${body.model}" differs from the priced "${priced.model}"`;
@@ -247,6 +337,18 @@ export function installPaidEndpointGuard(): void {
           `Provider host ${url.host} is unreachable under test. Set SYNTHOS_LIVE_METADATA_TESTS=true to run live metadata tests (free GETs only).`,
         );
       }
+    }
+
+    // Credentials never go to an unapproved host — checked for EVERY request,
+    // paid or not, before anything leaves the process.
+    const violation = credentialDestinationViolation(url, input, init);
+    if (violation) throw new PaidEndpointBlockedError('CREDENTIAL_HOST_NOT_APPROVED', `Refused before sending: ${violation}.`);
+
+    // A redirect from a provider endpoint could carry its credential to
+    // another host; provider requests never follow redirects.
+    if (paidHosts().has(url.host.toLowerCase()) || isRealPaidHost(url.hostname)) {
+      if (input instanceof Request) input = new Request(input, { redirect: 'error' });
+      init = { ...(init || {}), redirect: 'error' };
     }
 
     if (!isPaidRequest(url, method)) return original(input, init);

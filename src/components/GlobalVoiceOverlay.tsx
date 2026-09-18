@@ -122,24 +122,21 @@ export const GlobalVoiceOverlay: React.FC<GlobalVoiceOverlayProps> = ({
 
     // Determine target agent based on directive keywords
     let target = 'orchestrator';
-    let chosenModel = 'hermes-3-llama-3.1-70b';
+    // The directive picks an AGENT role. It never picks a model: a task runs on
+    // the registry model an operator selects for it, and none is inferred here.
+    const chosenModel = '';
     const lower = directiveText.toLowerCase();
     
     if (lower.includes('scout') || lower.includes('find') || lower.includes('search') || lower.includes('research')) {
       target = 'scout';
-      chosenModel = 'sonar-pro';
     } else if (lower.includes('scribe') || lower.includes('note') || lower.includes('vault') || lower.includes('document')) {
       target = 'scribe';
-      chosenModel = 'claude-3-7-sonnet';
     } else if (lower.includes('reach') || lower.includes('growth') || lower.includes('tweet') || lower.includes('marketing')) {
       target = 'reach';
-      chosenModel = 'chatgpt-o3-mini';
     } else if (lower.includes('dev') || lower.includes('code') || lower.includes('build') || lower.includes('patch')) {
       target = 'dev';
-      chosenModel = 'claude-3-7-sonnet';
     } else if (lower.includes('analytics') || lower.includes('metric') || lower.includes('token') || lower.includes('cost')) {
       target = 'analytics';
-      chosenModel = 'deepseek-r1';
     }
 
     // Step-by-step pipeline execution

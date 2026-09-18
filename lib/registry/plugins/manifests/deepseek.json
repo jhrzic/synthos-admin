@@ -1,0 +1,108 @@
+{
+  "schemaVersion": "synthos.registry/v1",
+  "manifestVersion": "2026.09.18-deepseek-1",
+  "provenance": {
+    "publisher": "synthos-core",
+    "generatedAt": "2026-09-18T00:00:00.000Z",
+    "notes": "OpenAI-compatible chat completions — reuses the shared protocol adapter with its own hosts and credential. Price from a project document, marked UNREVIEWED."
+  },
+  "provider": {
+    "providerId": "deepseek",
+    "displayName": "DeepSeek",
+    "protocol": "openai.chat_completions",
+    "adapterVersion": "1.0.0",
+    "approvedHosts": [
+      "api.deepseek.com"
+    ],
+    "defaultBaseUrl": "https://api.deepseek.com/v1",
+    "baseUrlEnvVar": null,
+    "auth": {
+      "type": "BEARER",
+      "credentialSlot": null,
+      "envVars": [
+        "DEEPSEEK_API_KEY"
+      ]
+    },
+    "billing": "METERED",
+    "restrictions": {
+      "regions": [],
+      "compliance": []
+    }
+  },
+  "models": [
+    {
+      "modelId": "deepseek-chat",
+      "aliases": [],
+      "displayName": "DeepSeek Chat",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "capabilities": [
+        {
+          "id": "text.input",
+          "supported": true,
+          "source": "docs/synthos/CLAUDE.md model routing table (project document, not a provider source)",
+          "verification": "UNVERIFIED",
+          "effectiveDate": null
+        },
+        {
+          "id": "text.output",
+          "supported": true,
+          "source": "docs/synthos/CLAUDE.md model routing table (project document, not a provider source)",
+          "verification": "UNVERIFIED",
+          "effectiveDate": null
+        }
+      ],
+      "supportedParameters": [
+        "max_tokens"
+      ],
+      "outputContracts": [
+        "NARRATIVE",
+        "LITERAL",
+        "JSON_OBJECT"
+      ],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.27,
+            "output": 1.1,
+            "cachedInput": null
+          },
+          "reasoningTokens": "UNKNOWN",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T00:00:00.000Z",
+          "effectiveUntil": null,
+          "source": "docs/synthos/CLAUDE.md model routing table (project document, not a provider source)",
+          "verifiedAt": "2026-09-18T00:00:00.000Z",
+          "staleAfter": "2026-11-17T00:00:00.000Z",
+          "approval": "UNREVIEWED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.chat_completions",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    }
+  ]
+}

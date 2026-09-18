@@ -151,7 +151,7 @@ describe('THE CANONICAL PATH — one bounded call, usage reconciled, receipt sig
     expect(row).toMatchObject({ status: 'SUCCESS', provider: 'openai', model: MODEL, input_tokens: 150, output_tokens: 40, reasoning_tokens: 20, total_tokens: 190, actual_cost_state: 'KNOWN' });
     expect(row.actual_cost_usd).toBeCloseTo((150 * 2 + 40 * 12) / 1e6, 9);
     expect(row.estimated_cost_usd!).toBeLessThanOrEqual(0.01);
-    expect(row.price_version).toMatch(/^openai:gpt-5\.6-terra#v1:/);
+    expect(row.price_version).toMatch(/^registry:openai:gpt-5\.6-terra#/);
     expect(getOrchestratorTask(taskId, WS)!.status).toBe('DONE');
     const receipts = getTaskReceipts(taskId);
     expect(receipts).toHaveLength(1);

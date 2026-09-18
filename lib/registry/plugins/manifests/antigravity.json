@@ -1,0 +1,144 @@
+{
+  "schemaVersion": "synthos.registry/v1",
+  "manifestVersion": "2026.09.18-antigravity-1",
+  "provenance": {
+    "publisher": "synthos-core",
+    "generatedAt": "2026-09-18T07:06:56.382Z",
+    "notes": "Model ids and prices from https://ai.google.dev/gemini-api/docs/antigravity-agent.md.txt, as stored by the SynthOS pricing catalog at 2026-09-18T05:24:20.955Z. Capabilities are recorded only where this repository has evidence; every other model is listed with empty metadata (METADATA_REQUIRED) rather than guessed. Lifecycle ACTIVE means \"listed in the provider's current pricing documentation\"."
+  },
+  "provider": {
+    "providerId": "antigravity",
+    "displayName": "Google Antigravity (managed agent)",
+    "protocol": "gemini.interactions",
+    "adapterVersion": "1.0.0",
+    "approvedHosts": [
+      "generativelanguage.googleapis.com"
+    ],
+    "defaultBaseUrl": "https://generativelanguage.googleapis.com/v1beta",
+    "baseUrlEnvVar": "ANTIGRAVITY_BASE_URL",
+    "auth": {
+      "type": "API_KEY_HEADER",
+      "credentialSlot": "antigravity",
+      "envVars": [
+        "ANTIGRAVITY_API_KEY"
+      ]
+    },
+    "billing": "MANAGED_AGENT",
+    "restrictions": {
+      "regions": [],
+      "compliance": []
+    }
+  },
+  "models": [
+    {
+      "modelId": "antigravity-preview-05-2026",
+      "aliases": [],
+      "displayName": "antigravity-preview-05-2026",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "capabilities": [
+        {
+          "id": "text.input",
+          "supported": true,
+          "source": "Provider documentation: managed agent API",
+          "verification": "DOCUMENTED",
+          "effectiveDate": null
+        },
+        {
+          "id": "text.output",
+          "supported": true,
+          "source": "Provider documentation: managed agent API",
+          "verification": "DOCUMENTED",
+          "effectiveDate": null
+        },
+        {
+          "id": "agent.managed_loop",
+          "supported": true,
+          "source": "Provider documentation: managed agent API",
+          "verification": "DOCUMENTED",
+          "effectiveDate": null
+        }
+      ],
+      "supportedParameters": [
+        "agent_config.max_total_tokens"
+      ],
+      "outputContracts": [
+        "NARRATIVE",
+        "LITERAL",
+        "JSON_OBJECT"
+      ],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.75,
+            "output": 3.75,
+            "cachedInput": 0.075
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.955Z",
+          "effectiveUntil": "2026-12-31T23:59:59.000Z",
+          "source": "https://ai.google.dev/gemini-api/docs/antigravity-agent.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.955Z",
+          "staleAfter": "2026-11-17T05:24:20.955Z",
+          "approval": "APPROVED"
+        },
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 1.5,
+            "output": 7.5,
+            "cachedInput": 0.15
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2027-01-01T00:00:00.000Z",
+          "effectiveUntil": null,
+          "source": "https://ai.google.dev/gemini-api/docs/antigravity-agent.md.txt",
+          "verifiedAt": "2026-09-18T05:24:20.955Z",
+          "staleAfter": "2026-11-17T05:24:20.955Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "gemini.interactions",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      },
+      "extensions": {
+        "x.antigravity.pricing_notes": [
+          "Inference is billed at Gemini 3.8 Flash list rates, including intermediate tokens generated during the agent loop.",
+          "max_total_tokens is best-effort: the provider says actual usage may slightly exceed it.",
+          "Cached tokens do not count toward max_total_tokens and are billed separately.",
+          "Tool fees (e.g. Search grounding) are billed separately and are not included in this estimate.",
+          "Sandbox compute is not billed during the preview."
+        ],
+        "x.antigravity.derived_from": "gemini:gemini-3.8-flash"
+      }
+    }
+  ]
+}

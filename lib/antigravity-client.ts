@@ -38,6 +38,7 @@
 import { resolveModelApiKey, resolveRuntimeCredential } from './model-credentials';
 import { resolvePlatformSetting } from './platform-settings';
 import { scrubSecrets as sharedScrubSecrets } from './redact';
+import { resolveRegistryEndpoint } from './registry/endpoint-resolver';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -64,9 +65,16 @@ export const ANTIGRAVITY_DEFAULT_BASE_URL = 'https://generativelanguage.googleap
  */
 export const ANTIGRAVITY_DEFAULT_AGENT = 'antigravity-preview-05-2026';
 
+/**
+ * Resolved by the ONE endpoint authority (lib/registry/endpoints.ts) against
+ * the Antigravity provider manifest. ANTIGRAVITY_BASE_URL is honoured only
+ * for an approved / allow-listed host or an authorized loopback test double;
+ * anything else throws, so no credential is sent to it.
+ */
 export function resolveAntigravityBaseUrl(): string {
-  const configured = (process.env.ANTIGRAVITY_BASE_URL || '').trim();
-  return (configured || ANTIGRAVITY_DEFAULT_BASE_URL).replace(/\/+$/, '');
+  const r = resolveRegistryEndpoint('antigravity');
+  if (!r.ok) throw new Error(r.reason);
+  return r.baseUrl;
 }
 
 export function resolveAntigravityAgent(): string {
@@ -186,11 +194,18 @@ async function call(path: string, init: RequestInit, timeoutMs: number): Promise
     return { ok: false, httpStatus: null, payload: null, truncated: false, error: 'No Antigravity credential is configured.', latencyMs: 0 };
   }
 
+  let baseUrl: string;
+  try {
+    baseUrl = resolveAntigravityBaseUrl();
+  } catch (e: any) {
+    return { ok: false, httpStatus: null, payload: null, truncated: false, error: `ENDPOINT_NOT_APPROVED: ${e?.message || e}`, latencyMs: 0 };
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`${resolveAntigravityBaseUrl()}${path}`, {
+    const res = await fetch(`${baseUrl}${path}`, {
       ...init,
+      redirect: 'error',
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey, ...(init.headers || {}) },
       signal: controller.signal,
     });

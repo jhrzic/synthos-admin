@@ -22,7 +22,7 @@ import {
   indexExternalVaultSources, searchExternalSources, readExternalSource,
   summarizeExternalSources, buildExternalSourceGraph, searchBrainAndSources,
   resolveRetrievalScope, parseObservedFields,
-  ExternalSourceAccessError, EXTERNAL_TRUST_NOTE, CANONICAL_TRUST_NOTE,
+  ExternalSourceAccessError, EXTERNAL_TRUST_NOTE, CANONICAL_TRUST_NOTE, OBSERVATION_TRUST_NOTE,
 } from '../lib/brain-sources';
 import { writeKnowledgeNote } from '../lib/knowledge-vault';
 import { executeEnvelope } from '../lib/fabric/envelope';
@@ -174,25 +174,33 @@ describe('search retains classification', () => {
     const found = searchBrainAndSources({ workspaceId: WS, query: 'voice', scope: 'ALL', limit: 20 });
     expect(found.results.length).toBeGreaterThan(0);
     for (const r of found.results) {
-      expect(['CANONICAL_KNOWLEDGE', 'EXTERNAL_SOURCE']).toContain(r.classification);
+      expect(['CANONICAL_KNOWLEDGE', 'OBSERVATION', 'EXTERNAL_SOURCE']).toContain(r.classification);
       expect(r.trustNote.length).toBeGreaterThan(20);
       if (r.classification === 'EXTERNAL_SOURCE') {
         expect(r.admission).toBe('UNADMITTED');
         expect(r.trustNote).toBe(EXTERNAL_TRUST_NOTE);
         expect(r.provenance).toBeNull();
+      } else if (r.classification === 'OBSERVATION') {
+        // A managed note that was never admitted: provenance, but not knowledge.
+        expect(r.admission).toBe('UNADMITTED');
+        expect(r.trustNote).toBe(OBSERVATION_TRUST_NOTE);
+        expect(r.provenance).not.toBeNull();
       } else {
+        expect(r.admission).toBe('ADMITTED');
         expect(r.trustNote).toBe(CANONICAL_TRUST_NOTE);
       }
     }
-    // Canonical knowledge is never buried below source material.
+    // Managed records are never buried below outside source material.
     const firstExternal = found.results.findIndex((r) => r.classification === 'EXTERNAL_SOURCE');
-    const lastCanonical = found.results.map((r) => r.classification).lastIndexOf('CANONICAL_KNOWLEDGE');
+    const lastCanonical = Math.max(...found.results.map((r, i) => (r.classification === 'EXTERNAL_SOURCE' ? -1 : i)));
     if (firstExternal >= 0 && lastCanonical >= 0) expect(lastCanonical).toBeLessThan(firstExternal);
   });
 
   it('BRAIN_ONLY returns no external material', () => {
     const found = searchBrainAndSources({ workspaceId: WS, query: 'voice', scope: 'BRAIN_ONLY' });
-    expect(found.results.every((r) => r.classification === 'CANONICAL_KNOWLEDGE')).toBe(true);
+    expect(found.results.every((r) => r.classification !== 'EXTERNAL_SOURCE')).toBe(true);
+    // These fixture notes were written without admission: observations.
+    expect(found.results.every((r) => r.classification === 'OBSERVATION' && r.admission === 'UNADMITTED')).toBe(true);
     expect(found.externalCount).toBe(0);
   });
 

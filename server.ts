@@ -66,7 +66,14 @@ import { getVaultStatus, SYNTHOS_VAULT_SUBDIR } from "./lib/vault-config";
 import {
   CATALOG_PROVIDERS, defaultModelForProvider, resolveModelState, catalogAgreesWithRouter,
 } from "./lib/model-catalog";
-import { effectiveModelsForProvider, lastRefresh, refreshModelCatalog } from "./lib/model-discovery";
+import { effectiveModelsForProvider, lastRefresh } from "./lib/model-discovery";
+import { installBundledPlugins } from "./lib/registry/install";
+import { listProviderViews, listModelViews, registerModelViaAdmin, qualifyModel, enableModel, disableModel } from "./lib/registry";
+import { ALL_STATES } from "./lib/registry/types";
+import { importManifest, listImports, listTrustedKeys, addTrustedKey, getWorkspacePolicy, setWorkspacePolicy, modelHistory } from "./lib/registry/store";
+import { applyCatalogPricesToRegistry } from "./lib/registry/catalog-bridge";
+import { previewEvaluation, runEvaluation } from "./lib/fabric/evaluation";
+import { runManualDiscovery, runManualPricingRefresh, isManualDiscoveryEnabled, setManualDiscoveryEnabled, listDiscoveryCandidates } from "./lib/registry/discovery";
 import { listKnowledgeNotes, searchKnowledgeNotes, listKnowledgeNotesDetailed } from "./lib/knowledge-vault";
 import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory, listWorkspaceMemory, getArtifactRetrievalStatus } from "./lib/memory-index";
 import { runAeoAudit, createAuditMissionTasks, resolveGeoProvider } from "./lib/aeo/service";
@@ -192,11 +199,13 @@ import { recordAdminAuditEvent, listRecentAdminAuditEvents } from "./lib/audit";
 import { guardedGeminiGenerate, guardedSpeech, requestKey } from "./lib/spend/adapters";
 import { getSpendStatus } from "./lib/spend/status";
 import { getSpendPolicy, saveSpendPolicy, PAID_PROVIDERS, type PaidProvider } from "./lib/spend/policy";
-import { refreshPricingCatalog, listCatalogPrices, priceHistory } from "./lib/pricing/catalog";
+import { listCatalogPrices, priceHistory } from "./lib/pricing/catalog";
 import { clearAmbiguousUsage } from "./lib/spend/guard";
 import { executeAgentTask, buildAgentRolePrompt } from "./lib/fabric/kernel";
 import { normalizeOutputContract, buildContractPrompt, verifyContent, type OutputContract, type ProviderTermination } from "./lib/fabric/output-contract";
-import { runScopedAegis, receiptOutcomeFields, commitContentFailure, isContentFailure, commitFailedNodeEvidence } from "./lib/fabric/scoped-verification";
+import { runScopedAegis, receiptOutcomeFields, commitContentFailure, isContentFailure, commitNodeArtifact, reverifyNodeArtifact } from "./lib/fabric/scoped-verification";
+import { resolveRoute, credentialForTarget, credentialHint, primaryCredentialEnvVar, evaluateModel } from "./lib/registry";
+import { listUsageForKey } from "./lib/spend/ledger";
 import { createExecutionContext } from "./lib/fabric/context";
 import { generateViaGemini } from "./lib/fabric/model-gemini";
 import { classifyIntent } from "./lib/fabric/intent";
@@ -530,7 +539,15 @@ async function startServer() {
   // paid provider call), not an invented workspace/billing role.
   app.post(["/api/generate"], requireAuth, rateLimit("EXPENSIVE_EXECUTION", byUserOrIp, "generate"), async (req, res) => {
     try {
-      const { model = "gemini-3.7-flash", prompt = "", systemInstruction, temperature = 0.7 } = req.body || {};
+      const { model: requestedModel = "gemini-3.7-flash", prompt = "", systemInstruction, temperature = 0.7 } = req.body || {};
+      // Registry selectors send canonical "provider/model" ids. This chat route
+      // dispatches Gemini only; a registry Gemini id is unwrapped to its model
+      // id, and any other provider's id is refused below by the same classifier.
+      if (typeof requestedModel === "string" && !requestedModel.trim()) {
+        return res.status(200).json({ success: false, status: "DEGRADED", reason: "MODEL_NOT_SELECTED", error: "No model selected. Choose one from the model registry; nothing was run.", modelUsed: null, timestamp: new Date().toISOString() });
+      }
+      const registryRoute = typeof requestedModel === "string" && requestedModel.includes("/") ? resolveRoute(requestedModel) : null;
+      const model = registryRoute && registryRoute.ok && registryRoute.protocol === "gemini.generate_content" ? registryRoute.modelId : requestedModel;
       const apiKey = process.env.GEMINI_API_KEY;
 
       if (!apiKey) {
@@ -2177,7 +2194,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       if (!Array.isArray(nodes) || nodes.length === 0) {
         return res.status(400).json({ success: false, error: "Graph must contain at least one node to estimate." });
       }
-      const estimate = estimateGraphExecution(nodes);
+      const estimate = estimateGraphExecution(nodes, resolved.workspaceId);
       return res.json({ success: true, workspaceId: resolved.workspaceId, estimate });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to estimate graph execution" });
@@ -2233,6 +2250,12 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       // rather than silently ignored.
       const nodeContracts = new Map<string, OutputContract>();
       for (const n of nodes) {
+        // A native COMPUTE node must name its model. There is no default: a
+        // model nobody selected would be a silent fallback.
+        const isNative = n.type !== "capability" && !(n.runtime === "windmill" && typeof n.windmillTargetId === "string" && n.windmillTargetId.trim());
+        if (isNative && !String(n.assignedModel || "").trim()) {
+          return res.status(400).json({ success: false, code: "MODEL_NOT_SELECTED", nodeId: n.id, error: `Node "${n.id}" has no model selected. Choose one from the model registry; nothing was run.` });
+        }
         const parsed = normalizeOutputContract(n.outputContract);
         if (!parsed.ok) {
           return res.status(400).json({ success: false, code: "INVALID_OUTPUT_CONTRACT", nodeId: n.id, error: `Node "${n.id}": ${parsed.error}` });
@@ -2291,7 +2314,9 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       // graph-run artifact built after every node succeeds. Never persisted
       // or signed per COMPUTE node individually (that was the
       // N-nodes-to-N-receipts problem this step fixes).
-      const nativeNodeOutputs: Array<{ nodeId: string; nodeLabel: string; order: number; agent: string; modelUsed: string | null; output: string; termination?: ProviderTermination | null }> = [];
+      const nativeNodeOutputs: Array<{ nodeId: string; nodeLabel: string; order: number; agent: string; modelUsed: string | null; output: string; termination?: ProviderTermination | null; taskId?: string | null; artifactId?: string | null; contentHash?: string | null; reviewId?: string | null }> = [];
+      // Node artifacts accepted so far — re-verified before every advancement.
+      const acceptedNodeArtifacts: Array<{ nodeId: string; taskId: string; artifact: { id: string; contentHash: string } }> = [];
       // Shared state threaded between capability nodes in one run: the audit a
       // downstream review/mission/schedule node needs, and the artefacts each
       // produced. Scoped to this run only — never global.
@@ -2320,7 +2345,8 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
 
         const taskTitle = currentNode.name || currentNode.title || `Node ${i + 1}: ${currentNode.id}`;
         const nodeAgent = currentNode.assignedAgent || (currentNode.type === "scout" ? "scout" : "dev");
-        const nodeModel = currentNode.assignedModel || "gemini-3.6-flash";
+        // The node's selected model, or nothing — validated before any node ran.
+        const nodeModel = String(currentNode.assignedModel || "");
         const nodeDescription = `${currentNode.description || taskTitle}${previousOutput ? `\n\nUpstream Context from previous step:\n${previousOutput.slice(0, 1000)}` : ""}`;
         const nodeStartedAt = new Date().toISOString();
 
@@ -2493,6 +2519,7 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
               status: receiptOutcome === "COMPLETED" ? "DONE" : "FAILED",
               ...(receiptOutcome === "COMPLETED" ? {} : { reason: "RECEIPT_NOT_COMPLETED", error: `Windmill node receipt outcome is ${receiptOutcome ?? "absent"}, not COMPLETED.` }),
               outputs: artifactContentText,
+              taskId: execution.task_id,
               artifact: nodeArtifact ? {
                 id: nodeArtifact.artifact_id,
                 filePath: nodeArtifact.relative_path,
@@ -2524,93 +2551,76 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
             };
           }
         } else {
-          // STEP 4 — COMPUTE: a real model call through the shared
-          // graph-run ExecutionContext (ctx.invoke("model.gemini", ...)),
-          // reusing the exact same persona-prompt builder and retry
-          // mechanics /api/execute-agent-task uses (lib/fabric/kernel.ts's
-          // buildAgentRolePrompt, lib/fabric/model-gemini.ts's
-          // generateViaGemini) — so node output is unchanged from before
-          // this step. No per-node task, artifact, Aegis run, or receipt:
-          // this is the fix for the N-COMPUTE-nodes-to-N-receipts problem.
-          // The same BLOCKED_MISSING_CREDENTIAL / unsupported-provider
-          // gates the kernel enforces are preserved here verbatim.
-          const apiKey = process.env.GEMINI_API_KEY || "";
-          if (!apiKey) {
+          // COMPUTE — one real model call per node, routed by the model
+          // registry exactly like the kernel (canonical provider/model and its
+          // protocol adapter; no name-prefix routing, no substitute model).
+          // Every output — passing or failing — is persisted as the node's own
+          // artifact, hashed, and given its own scoped Aegis review before the
+          // graph may build on it.
+          const route = resolveRoute(nodeModel);
+          const nodeCredential = route.ok ? credentialForTarget(route.providerId) : "";
+          const nodeContractMode = (nodeContracts.get(currentNode.id) || { mode: "NARRATIVE" as const }).mode;
+          const nodeModelView = route.ok ? evaluateModel(route.providerId, route.modelId, { workspaceId }) : null;
+          if (!route.ok) {
+            nodeExecData = { success: false, status: "FAILED", reason: route.code, error: route.reason };
+          } else if (nodeModelView && !nodeModelView.outputContracts.includes(nodeContractMode)) {
+            nodeExecData = { success: false, status: "FAILED", reason: "MODEL_TASK_INCOMPATIBLE", error: `${route.providerId}/${route.modelId} does not declare the ${nodeContractMode} output contract this node requires. It was not run.` };
+          } else if (!nodeCredential) {
             nodeExecData = {
               success: false,
               status: "BLOCKED",
               reason: "BLOCKED_MISSING_CREDENTIAL",
-              error: "GEMINI_API_KEY environment variable is not configured on the server",
+              error: `${primaryCredentialEnvVar(route.providerId) ?? credentialHint(route.providerId)} environment variable is not configured on the server`,
             };
           } else {
-            const modelClassification = classifyModelRequest(nodeModel);
-            // PUSH 1 — same correction as POST /api/generate above: this
-            // branch calls generateViaGemini() with an already-resolved
-            // Gemini API key, so anything that is not GEMINI must stop here
-            // rather than be executed on the wrong provider. Graph nodes
-            // stay Gemini-only in this push; widening them is separate work
-            // with its own evidence.
-            if (modelClassification.provider !== "GEMINI") {
+            const nodeContract = nodeContracts.get(currentNode.id) || { mode: "NARRATIVE" as const };
+            const nodeSpendKey = `graph:${runId}:${currentNode.id}`;
+            const genResult = await graphRunCtx.invoke(`model.${route.providerId}`, async () => {
+              // A persona prompt may never override a LITERAL / JSON_OBJECT
+              // contract — same rule as the kernel.
+              const rolePrompt = nodeContract.mode === "NARRATIVE"
+                ? buildAgentRolePrompt({ assignedAgent: nodeAgent, taskTitle, description: nodeDescription, inputs: previousOutput })
+                : buildContractPrompt(nodeContract, taskTitle, nodeDescription);
+              // Keyed per run+node, so a graph resume cannot pay for the same node twice.
+              return route.adapter.call!({ providerId: route.providerId, modelId: route.modelId, apiKey: nodeCredential, baseUrl: route.baseUrl, contents: rolePrompt, spend: { callSite: 'graph.node', workspaceId, idempotencyKey: nodeSpendKey } });
+            });
+            if (!genResult.output) {
               nodeExecData = {
                 success: false,
                 status: "FAILED",
-                reason: modelClassification.provider === "UNSUPPORTED" ? modelClassification.reason : "MODEL_MAPPING_NOT_FOUND",
-                error: explainUnroutableModel(modelClassification, "native graph COMPUTE node execution"),
+                reason: genResult.hadProviderError ? "MODEL_PROVIDER_UNAVAILABLE" : "EMPTY_PROVIDER_RESPONSE",
+                error: genResult.lastProviderError || "Model provider returned an empty or unparseable response",
               };
             } else {
-              const normalizedModel = modelClassification.resolvedModel;
-              // NO_PAID_FALLBACK — one model per node.
-              const candidateModels = [normalizedModel];
-              const nodeContract = nodeContracts.get(currentNode.id) || { mode: "NARRATIVE" as const };
-              const genResult = await graphRunCtx.invoke("model.gemini", async () => {
-                // A persona prompt may never override a LITERAL / JSON_OBJECT
-                // contract — same rule as the kernel.
-                const rolePrompt = nodeContract.mode === "NARRATIVE"
-                  ? buildAgentRolePrompt({ assignedAgent: nodeAgent, taskTitle, description: nodeDescription, inputs: previousOutput })
-                  : buildContractPrompt(nodeContract, taskTitle, nodeDescription);
-                // Keyed per run+node, so a graph resume cannot pay for the same node twice.
-                return generateViaGemini({ apiKey, contents: rolePrompt, candidateModels, spend: { callSite: 'graph.node', workspaceId, idempotencyKey: `graph:${runId}:${currentNode.id}` } });
+              const termination: ProviderTermination = genResult.termination || { status: "NOT_REPORTED", providerStatus: null, reason: null };
+              const modelUsed = genResult.modelUsed || route.modelId;
+              const usageRow = listUsageForKey(nodeSpendKey).filter((r) => r.status === "SUCCESS").pop() ?? null;
+              const registry = { registryProviderId: route.providerId, canonicalModelId: route.modelId, priceVersion: usageRow?.price_version ?? null, usageId: usageRow?.usage_id ?? null };
+              const node = commitNodeArtifact({
+                taskId: `task-${runId}-${currentNode.id}`, workspaceId,
+                title: `Graph node — ${taskTitle}`, description: nodeDescription.slice(0, 2000),
+                assignedAgent: nodeAgent, modelUsed, output: genResult.output, termination, contract: nodeContract,
+                graphRunId: runId, graphNodeId: currentNode.id, registry,
               });
-              if (!genResult.output) {
-                nodeExecData = {
-                  success: false,
-                  status: "FAILED",
-                  reason: genResult.hadProviderError ? "MODEL_PROVIDER_UNAVAILABLE" : "EMPTY_PROVIDER_RESPONSE",
-                  error: genResult.lastProviderError || "Model provider returned an empty or unparseable response",
-                };
-              } else {
-                // SCOPED NODE GATE. Completion and instruction compliance are
-                // judged here, per node; integrity is audited on the one
-                // aggregate artifact for passing nodes (Step 4), and for real
-                // on the node's own evidence artifact when it fails.
-                const termination: ProviderTermination = genResult.termination || { status: "NOT_REPORTED", providerStatus: null, reason: null };
-                const gate = verifyContent({ integrityDecision: "VERIFIED", output: genResult.output, termination, contract: nodeContract });
-                const modelUsed = genResult.modelUsed || nodeModel;
-                if (gate.decision === "VERIFIED") {
-                  nodeExecData = {
+              const verification = { ...node.scoped.content.scopes, decision: node.scoped.content.decision, scopeStatement: node.scoped.content.scopeStatement };
+              nodeExecData = node.verified
+                ? {
                     success: true, status: "DONE", outputs: genResult.output, modelUsed, termination, outputContract: nodeContract,
-                    verification: { integrity: "AUDITED_ON_AGGREGATE", completion: gate.scopes.completion, instructionCompliance: gate.scopes.instructionCompliance, required: gate.scopes.required, decision: gate.decision, scopeStatement: gate.scopeStatement },
-                  };
-                } else {
-                  const evidence = commitFailedNodeEvidence({
-                    taskId: `task-${runId}-${currentNode.id}`, workspaceId,
-                    title: `Graph node — ${taskTitle}`, description: nodeDescription.slice(0, 2000),
-                    assignedAgent: nodeAgent, modelUsed, output: genResult.output, termination, contract: nodeContract,
-                    graphRunId: runId, graphNodeId: currentNode.id,
-                  });
-                  nodeExecData = {
-                    success: false, status: evidence.status, modelUsed, termination, outputContract: nodeContract,
-                    reason: evidence.status,
-                    error: `Aegis ${evidence.status}: ${evidence.scoped.content.scopeStatement}`,
-                    taskId: evidence.taskId,
-                    artifact: evidence.artifact,
-                    review: { reviewId: evidence.reviewId, decision: evidence.scoped.review.decision, score: evidence.scoped.review.score },
-                    receipt: evidence.receiptId ? { receiptId: evidence.receiptId, verified: true, outcome: evidence.status } : null,
+                    taskId: node.taskId, artifact: node.artifact, registry,
+                    review: { reviewId: node.reviewId, decision: node.scoped.review.decision, score: node.scoped.review.score },
+                    verification,
+                  }
+                : {
+                    success: false, status: node.status, modelUsed, termination, outputContract: nodeContract, registry,
+                    reason: node.status,
+                    error: `Aegis ${node.status}: ${node.scoped.content.scopeStatement}`,
+                    taskId: node.taskId,
+                    artifact: node.artifact,
+                    review: { reviewId: node.reviewId, decision: node.scoped.review.decision, score: node.scoped.review.score },
+                    receipt: node.receiptId ? { receiptId: node.receiptId, verified: true, outcome: node.status } : null,
                     quarantined: true,
-                    verification: { ...evidence.scoped.content.scopes, decision: evidence.scoped.content.decision, scopeStatement: evidence.scoped.content.scopeStatement },
+                    verification,
                   };
-                }
-              }
             }
           }
         }
@@ -2620,9 +2630,24 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         // Gate: EXTERNAL_ACTION keeps the exact pre-existing receipt-based
         // condition; COMPUTE's gate is real-output-produced, since COMPUTE
         // nodes never get a receipt to check by design (Step 4).
-        const isNodeVerified = isWindmillNode
+        const nodePassedOwnGate = isWindmillNode
           ? (nodeExecData.success && nodeExecData.status === "DONE" && nodeExecData.receipt?.verified === true)
           : (nodeExecData.success && nodeExecData.status === "DONE");
+
+        // BEFORE ADVANCEMENT — every node artifact this run has accepted so
+        // far (and this one) is re-verified against its recorded hash. The
+        // next node builds on those bytes, so they are checked again now, not
+        // only when they were written. A mismatch halts the run: the artifact
+        // is quarantined and an INTEGRITY_FAILED audit receipt is signed.
+        let integrityFailure: { nodeId: string; reason: string; receiptId: string | null; reviewId: string } | null = null;
+        if (nodePassedOwnGate && nodeExecData.artifact?.id && nodeExecData.taskId) {
+          const candidates = [...acceptedNodeArtifacts, { nodeId: currentNode.id, taskId: nodeExecData.taskId as string, artifact: { id: nodeExecData.artifact.id as string, contentHash: nodeExecData.artifact.contentHash as string } }];
+          for (const c of candidates) {
+            const r = reverifyNodeArtifact({ taskId: c.taskId, workspaceId, artifact: c.artifact });
+            if (!r.ok) { integrityFailure = { nodeId: c.nodeId, reason: r.reason, receiptId: r.receiptId, reviewId: r.reviewId }; break; }
+          }
+        }
+        const isNodeVerified = nodePassedOwnGate && !integrityFailure;
 
         // STEP 4 — the graph-run node trace: real, ordered, per-node
         // evidence that survives without any per-node task record. Every
@@ -2649,8 +2674,40 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
           termination: nodeExecData.termination || null,
           verification: nodeExecData.verification || null,
           quarantined: nodeExecData.quarantined === true,
+          reviewId: nodeExecData.review?.reviewId || null,
+          registry: nodeExecData.registry || null,
           failure: isNodeVerified ? null : { reason: nodeExecData.reason || nodeExecData.status || null, error: nodeExecData.error || null },
         };
+
+        if (integrityFailure) {
+          // The failing artifact may be an EARLIER node's: mark that node's
+          // trace failed, and record this node as verified-but-not-advanced.
+          for (const r of executionResults) {
+            if (r.nodeId === integrityFailure.nodeId) {
+              Object.assign(r, { status: "FAILED", gate: { passed: false, reason: integrityFailure.reason }, receiptId: integrityFailure.receiptId, receiptOutcome: "INTEGRITY_FAILED", quarantined: true, failure: { reason: "INTEGRITY_FAILED", error: integrityFailure.reason } });
+            }
+          }
+          if (integrityFailure.nodeId === currentNode.id) {
+            Object.assign(nodeTrace, { status: "FAILED", receiptId: integrityFailure.receiptId, receiptOutcome: "INTEGRITY_FAILED", quarantined: true, failure: { reason: "INTEGRITY_FAILED", error: integrityFailure.reason } });
+          } else {
+            Object.assign(nodeTrace, { status: "NOT_ADVANCED", gate: { passed: false, reason: `Not advanced: upstream node ${integrityFailure.nodeId} failed integrity.` }, failure: { reason: "UPSTREAM_INTEGRITY_FAILED", error: integrityFailure.reason } });
+          }
+          const completed = executionResults.filter((r) => r.status === "DONE");
+          const haltStatus = completed.length > 0 ? "PARTIAL" : "FAILED";
+          saveGraphRun({
+            runId, graphId, status: haltStatus, currentNodeId: currentNode.id,
+            state: {
+              graphId, failedNodeId: integrityFailure.nodeId, completedNodeIds: completed.map((r) => r.nodeId),
+              error: `Integrity failure before advancement: ${integrityFailure.reason}. Graph execution halted.`,
+              nodeResults: Object.fromEntries([...executionResults, nodeTrace].map(r => [r.nodeId, r])),
+            },
+          });
+          return res.json({
+            success: false, runId, status: haltStatus, failedAtNode: integrityFailure.nodeId, completedNodes: completed.length,
+            integrityFailure, nodeExecution: nodeExecData, nodeTrace,
+            nodes: [...executionResults, nodeTrace],
+          });
+        }
 
         if (!isNodeVerified) {
           // Halt execution DAG immediately on gate failure. Truthfully
@@ -2693,8 +2750,11 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         // unchanged propagation semantics.
         executionResults.push(nodeTrace);
         previousOutput = nodeExecData.outputs || nodeExecData.artifact?.content || "";
+        if (nodeExecData.artifact?.id && nodeExecData.taskId) {
+          acceptedNodeArtifacts.push({ nodeId: currentNode.id, taskId: nodeExecData.taskId, artifact: { id: nodeExecData.artifact.id, contentHash: nodeExecData.artifact.contentHash } });
+        }
         if (!isWindmillNode) {
-          nativeNodeOutputs.push({ nodeId: currentNode.id, nodeLabel: taskTitle, order: i, agent: nodeAgent, modelUsed: nodeExecData.modelUsed || null, output: nodeExecData.outputs || "", termination: nodeExecData.termination || null });
+          nativeNodeOutputs.push({ nodeId: currentNode.id, nodeLabel: taskTitle, order: i, agent: nodeAgent, modelUsed: nodeExecData.modelUsed || null, output: nodeExecData.outputs || "", termination: nodeExecData.termination || null, taskId: nodeExecData.taskId || null, artifactId: nodeExecData.artifact?.id || null, contentHash: nodeExecData.artifact?.contentHash || null, reviewId: nodeExecData.review?.reviewId || null });
         }
       }
 
@@ -2721,11 +2781,16 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
         const externalActionSection = externalActionRefs.length > 0
           ? `\n\n---\n\n## External Actions Referenced\n\n${externalActionRefs.map((r: any) => `- Node \`${r.nodeId}\`: execution \`${r.externalExecutionId}\`, receipt \`${r.receiptId}\``).join('\n')}\n`
           : '';
+        // Every node artifact, by id and content hash. The aggregate's own hash
+        // (signed into the receipt) therefore commits to each node artifact —
+        // this is what lets one receipt stand for N verified node artifacts.
+        const nodeArtifactSection = `\n\n---\n\n## Node artifacts (each hashed, individually verified, and re-verified before advancement)\n\n`
+          + nativeNodeOutputs.map((n) => `- Node \`${n.nodeId}\`: artifact \`${n.artifactId}\`, ${n.contentHash}, review \`${n.reviewId}\``).join('\n') + '\n';
         const artifactContent =
           `# Graph Run — ${name}\n\n` +
           `**Graph Run ID**: ${runId}\n**Graph ID**: ${graphId}\n**Correlation ID**: ${graphRunCorrelationId}\n` +
           `**Native COMPUTE nodes**: ${nativeNodeOutputs.length}\n**External-action nodes**: ${externalActionRefs.length}\n\n---\n\n` +
-          nodeSections + externalActionSection;
+          nodeSections + externalActionSection + nodeArtifactSection;
 
         createInitialTask({ taskId: graphRunTaskId, workspaceId, title: `Graph Run — ${name}`, description: `Aggregate evidence for graph run ${runId} (${nativeNodeOutputs.length} native COMPUTE node(s)).`, assignedAgent: "graph-runtime", assignedModel: "multi", createdAt: nowIso });
         recordActivityEvent({ taskId: graphRunTaskId, expectedWorkspaceId: workspaceId, eventType: "TASK_CREATED", agentId: "orchestrator", payload: { title: `Graph Run — ${name}`, status: "TODO" }, createdAt: nowIso });
@@ -2797,10 +2862,18 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
             } catch { /* non-blocking */ }
             try { indexVaultArtifact(workspaceId, persistedArtifact.artifact_id); } catch { /* non-blocking */ }
 
+            // Each node task is now covered by this receipt (its artifact hash
+            // is inside the signed aggregate).
+            for (const n of nativeNodeOutputs) {
+              if (!n.taskId) continue;
+              updateTaskStatus(n.taskId, "DONE", undefined, workspaceId);
+              recordActivityEvent({ taskId: n.taskId, expectedWorkspaceId: workspaceId, eventType: "TASK_COMPLETED", agentId: "graph-runtime", payload: { coveredByReceiptId: newReceiptId, aggregateTaskId: graphRunTaskId, artifactHash: n.contentHash }, createdAt: nowIso });
+            }
             graphRunReceipt = {
               taskId: graphRunTaskId,
               receiptId: newReceiptId,
               verified: true,
+              nodeArtifacts: nativeNodeOutputs.map((n) => ({ nodeId: n.nodeId, artifactId: n.artifactId, contentHash: n.contentHash })),
               outcome: "COMPLETED",
               verificationScope: scopedAggregate.content.scopeStatement,
               artifactId: persistedArtifact.artifact_id,
@@ -2882,6 +2955,28 @@ Ensure there are 4 to 6 sequential & parallel tasks covering Discovery, Analysis
       });
     } catch (err: any) {
       return res.status(500).json({ error: err?.message || "Failed to query task" });
+    }
+  });
+
+  // EXPLICIT MODEL EVALUATION — never automatic. Preview has no side effects;
+  // running requires confirmed:true and becomes its own guarded, receipted task.
+  app.post("/api/execution/tasks/:taskId/evaluations", requireWorkspaceMember(fromBody), rateLimit("EXPENSIVE_EXECUTION", byUserOrIp, "task-evaluation"), async (req, res) => {
+    try {
+      const { taskId } = req.params;
+      if (!enforceTaskWorkspaceAccess(req, res, taskId)) return;
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const model = String(req.body?.model || "").trim();
+      if (!model) return res.status(400).json({ success: false, error: "Select a model from the registry to evaluate with." });
+      if (req.body?.confirmed !== true) {
+        const preview = previewEvaluation({ parentTaskId: taskId, workspaceId, model });
+        return preview.ok ? res.json({ success: true, preview }) : res.status(preview.status).json({ success: false, code: preview.code, error: preview.error });
+      }
+      const ctx = createExecutionContext({ workspaceId });
+      const r = await runEvaluation({ parentTaskId: taskId, workspaceId, model, actorUserId: (req as AuthedRequest).authUser!.user_id, ctx });
+      if (!r.ok) return res.status(r.status).json({ success: false, code: r.code, error: r.error });
+      return res.status(r.status).json({ success: r.body?.success === true, evaluationTaskId: r.evaluationTaskId, evaluation: r.body });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Evaluation failed" });
     }
   });
 
@@ -6788,13 +6883,115 @@ Rules for spokenSummary specifically:
 
   // Operator-triggered catalog refresh. Admin-gated because it makes outbound
   // provider metadata calls. Spends no generation tokens.
-  app.post("/api/models/refresh", requireWorkspaceAdmin(fromBody), async (_req, res) => {
+  app.post("/api/models/refresh", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "models-refresh"), async (req, res) => {
     try {
-      const report = await refreshModelCatalog("MANUAL");
-      return res.json({ success: true, report });
+      // Manual, audited, OFF by default. Metadata only; discovered ids become
+      // UNQUALIFIED candidates and never enter the executable registry.
+      const r = await runManualDiscovery((req as AuthedRequest).authUser!.user_id);
+      if (!r.ok) return res.status(409).json({ success: false, code: r.code, error: r.error });
+      return res.json({ success: true, report: r.report, candidates: r.candidates });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Catalog refresh failed" });
     }
+  });
+
+  // ===========================================================================
+  // MODEL REGISTRY — the one local authority for providers and models.
+  //
+  // Every read below is served from the persisted local registry. None of them
+  // contacts a provider, polls a model list, spends an inference token, or
+  // places catalog data into any prompt. Opening a selector is free.
+  // ===========================================================================
+  app.get("/api/registry/models", requireWorkspaceMember(fromQuery), (req, res) => {
+    try {
+      const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+      const outputContract = ["NARRATIVE", "LITERAL", "JSON_OBJECT"].includes(String(req.query.outputContract)) ? String(req.query.outputContract) as any : undefined;
+      const requiredCapabilities = typeof req.query.capability === "string" && req.query.capability ? String(req.query.capability).split(",").filter(Boolean) : undefined;
+      return res.json({
+        success: true,
+        workspaceId,
+        source: "LOCAL_REGISTRY",
+        providerCallsMade: 0,
+        states: ALL_STATES,
+        providers: listProviderViews(),
+        models: listModelViews({ workspaceId, outputContract, requiredCapabilities }),
+        workspacePolicy: getWorkspacePolicy(workspaceId),
+        manualDiscoveryEnabled: isManualDiscoveryEnabled(),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Failed to read the model registry" });
+    }
+  });
+
+  app.get("/api/registry/history", requireWorkspaceMember(fromQuery), (req, res) => {
+    const providerId = String(req.query.providerId || ""); const modelId = String(req.query.modelId || "");
+    return res.json({ success: true, providerId, modelId, history: modelHistory(providerId, modelId) });
+  });
+
+  app.get("/api/registry/admin", requirePlatformAdmin, (_req, res) => {
+    return res.json({ success: true, imports: listImports(50), trustedKeys: listTrustedKeys(), discoveryCandidates: listDiscoveryCandidates(), manualDiscoveryEnabled: isManualDiscoveryEnabled() });
+  });
+
+  const registryAudit = (req: express.Request, targetId: string, detail: Record<string, any>) =>
+    recordAdminAuditEvent({ actorUserId: (req as AuthedRequest).authUser!.user_id, eventType: "MODEL_REGISTRY_CHANGED", targetType: "model_registry", targetId, detail });
+
+  // Signed JSON manifest import (Ed25519, trusted key required).
+  app.post("/api/registry/import", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-import"), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const r = importManifest(req.body?.manifest, { source: "SIGNED_IMPORT", actor });
+    registryAudit(req, r.providerId || "unknown", { action: "SIGNED_IMPORT", ok: r.ok, signature: r.signatureStatus, added: r.added, changed: r.changed, removed: r.removed, errors: r.errors });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, result: r });
+  });
+
+  // Admin registration of one model, same schema.
+  app.post("/api/registry/models", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-register"), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const r = registerModelViaAdmin(String(req.body?.providerId || ""), req.body?.model, actor);
+    registryAudit(req, `${req.body?.providerId}/${req.body?.model?.modelId}`, { action: "ADMIN_REGISTER", ok: r.ok, errors: (r as any).errors });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, result: r });
+  });
+
+  app.post("/api/registry/models/action", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-action"), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const { providerId, modelId, action, reason } = req.body || {};
+    const r = action === "QUALIFY" ? qualifyModel(String(providerId), String(modelId), actor)
+      : action === "ENABLE" ? enableModel(String(providerId), String(modelId), actor)
+      : action === "DISABLE" ? disableModel(String(providerId), String(modelId), actor, String(reason || ""))
+      : { ok: false as const, error: 'action must be QUALIFY, ENABLE or DISABLE' };
+    registryAudit(req, `${providerId}/${modelId}`, { action, ok: r.ok, error: r.ok ? null : (r as any).error });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, ...r });
+  });
+
+  app.post("/api/registry/trusted-keys", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-key"), (req, res) => {
+    try {
+      const actor = (req as AuthedRequest).authUser!.user_id;
+      addTrustedKey(String(req.body?.keyId || ""), String(req.body?.publicKeyPem || ""), String(req.body?.label || ""), actor);
+      registryAudit(req, String(req.body?.keyId), { action: "TRUSTED_KEY_ADDED" });
+      return res.json({ success: true, trustedKeys: listTrustedKeys() });
+    } catch (err: any) {
+      return res.status(400).json({ success: false, error: "The public key could not be parsed." });
+    }
+  });
+
+  app.post("/api/registry/discovery", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-discovery"), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    setManualDiscoveryEnabled(req.body?.enabled === true, actor);
+    registryAudit(req, "manual-discovery", { action: "MANUAL_DISCOVERY_SWITCH", enabled: req.body?.enabled === true });
+    return res.json({ success: true, manualDiscoveryEnabled: isManualDiscoveryEnabled() });
+  });
+
+  app.post("/api/registry/apply-catalog-prices", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "registry-prices"), (req, res) => {
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const r = applyCatalogPricesToRegistry(String(req.body?.providerId || ""), actor);
+    registryAudit(req, String(req.body?.providerId), { action: "APPLY_CATALOG_PRICES", ok: r.ok, changed: (r as any).changed, added: (r as any).added });
+    return res.status(r.ok ? 200 : 400).json({ success: r.ok, result: r });
+  });
+
+  app.put("/api/registry/workspace-policy", requireWorkspaceAdmin(fromBody), (req, res) => {
+    const workspaceId = (req as AuthedRequest).authWorkspaceId!;
+    const actor = (req as AuthedRequest).authUser!.user_id;
+    const policy = setWorkspacePolicy({ workspaceId, mode: req.body?.mode === "ALLOWLIST" ? "ALLOWLIST" : "INHERIT", allowed: Array.isArray(req.body?.allowed) ? req.body.allowed : [], denied: Array.isArray(req.body?.denied) ? req.body.denied : [] }, actor);
+    return res.json({ success: true, workspacePolicy: policy });
   });
 
   app.get("/api/status", requireAuth, (req, res) => {
@@ -7117,11 +7314,13 @@ Rules for spokenSummary specifically:
   app.post("/api/master-admin/pricing/refresh", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "pricing-refresh"), async (req, res) => {
     try {
       const actor = (req as AuthedRequest).authUser!.user_id;
-      const report = await refreshPricingCatalog("MANUAL");
+      const pr = await runManualPricingRefresh(actor);
+      if (!pr.ok) return res.status(409).json({ success: false, code: pr.code, error: pr.error });
+      const report = pr.report;
       let models: unknown = null;
       if (req.body?.includeModels === true) {
-        const { refreshModelCatalog } = await import("./lib/model-discovery");
-        models = await refreshModelCatalog("MANUAL");
+        const d = await runManualDiscovery(actor);
+        models = d.ok ? { report: d.report, candidates: d.candidates } : { error: d.error };
       }
       recordAdminAuditEvent({ actorUserId: actor, eventType: "SPEND_PRICING_CHANGED", targetType: "pricing_catalog", targetId: report.refreshId,
         detail: { trigger: "MANUAL", sources: report.sources.map((s) => ({ source: s.sourceId, status: s.status, added: s.added, changed: s.changed, removed: s.removed })) } });
@@ -8153,28 +8352,17 @@ Rules for spokenSummary specifically:
   // drives the time-gated model catalog refresh.
   startScheduler();
 
-  // MODEL CATALOG — refresh once at startup so the Admin opens with a current
-  // fleet rather than whatever was last stored. Deliberately fire-and-forget:
-  // a provider being unreachable must not delay or fail server startup, and a
-  // failed refresh preserves the last-known catalog and marks it stale.
-  //
-  // Metadata only. lib/model-discovery.ts issues GET model-list requests and
-  // spends no generation tokens, so booting the server never costs inference.
-  // Pricing catalog: GET-only documentation fetch, zero inference. A failure
-  // keeps last-known prices and marks them stale; it never blocks startup.
-  refreshPricingCatalog("STARTUP").catch((err) => console.warn("[Pricing] startup refresh failed:", err?.message || err));
-  refreshModelCatalog("STARTUP")
-    .then((report) => {
-      const live = report.providers.filter((p) => p.outcome === "LIVE").length;
-      const stale = report.providers.filter((p) => p.outcome === "FAILED_STALE").length;
-      console.log(
-        `[model-catalog] startup refresh: ${report.providers.length} provider(s), `
-        + `${live} live, ${stale} stale, 0 inference calls`,
-      );
-    })
-    .catch((err) => {
-      console.error("[model-catalog] startup refresh failed; last-known catalog preserved:", err?.message || err);
-    });
+  // MODEL REGISTRY — install bundled provider plugins from local manifest
+  // files. No network, no provider call, no inference. There is deliberately
+  // no startup model-list or pricing refresh any more: both are manual,
+  // audited Admin operations, OFF by default (lib/registry/discovery.ts).
+  try {
+    const installed = installBundledPlugins();
+    const counts = listProviderViews().map((p) => `${p.providerId}:${p.modelCount}`).join(" ");
+    console.log(`[registry] local registry ready (${installed.length} plugin update(s) applied) — ${counts} — 0 provider calls`);
+  } catch (err: any) {
+    console.error("[registry] bundled plugin install failed; the last persisted registry stands:", err?.message || err);
+  }
 
   // -------------------------------------------------------------------------
   // Graceful shutdown. Listed as a known deployment gap in

@@ -1,0 +1,2030 @@
+{
+  "schemaVersion": "synthos.registry/v1",
+  "manifestVersion": "2026.09.18-openai-1",
+  "provenance": {
+    "publisher": "synthos-core",
+    "generatedAt": "2026-09-18T07:06:56.363Z",
+    "notes": "Model ids and prices from https://platform.openai.com/docs/pricing.md, as stored by the SynthOS pricing catalog at 2026-09-18T05:24:20.399Z. Capabilities are recorded only where this repository has evidence; every other model is listed with empty metadata (METADATA_REQUIRED) rather than guessed. Lifecycle ACTIVE means \"listed in the provider's current pricing documentation\"."
+  },
+  "provider": {
+    "providerId": "openai",
+    "displayName": "OpenAI",
+    "protocol": "openai.responses",
+    "adapterVersion": "1.0.0",
+    "approvedHosts": [
+      "api.openai.com"
+    ],
+    "defaultBaseUrl": "https://api.openai.com/v1",
+    "baseUrlEnvVar": "OPENAI_BASE_URL",
+    "auth": {
+      "type": "BEARER",
+      "credentialSlot": "openai",
+      "envVars": [
+        "OPENAI_API_KEY"
+      ]
+    },
+    "billing": "METERED",
+    "restrictions": {
+      "regions": [],
+      "compliance": []
+    }
+  },
+  "models": [
+    {
+      "modelId": "babbage-002",
+      "aliases": [],
+      "displayName": "babbage-002",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.4,
+            "output": 0.4,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "davinci-002",
+      "aliases": [],
+      "displayName": "davinci-002",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 2,
+            "output": 2,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-3.5-turbo",
+      "aliases": [],
+      "displayName": "gpt-3.5-turbo",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.5,
+            "output": 1.5,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-3.5-turbo-0125",
+      "aliases": [],
+      "displayName": "gpt-3.5-turbo-0125",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.5,
+            "output": 1.5,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-3.5-turbo-1106",
+      "aliases": [],
+      "displayName": "gpt-3.5-turbo-1106",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 1,
+            "output": 2,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-3.5-turbo-instruct",
+      "aliases": [],
+      "displayName": "gpt-3.5-turbo-instruct",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 1.5,
+            "output": 2,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-4-0613",
+      "aliases": [],
+      "displayName": "gpt-4-0613",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 30,
+            "output": 60,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-4-turbo-2024-04-09",
+      "aliases": [],
+      "displayName": "gpt-4-turbo-2024-04-09",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 10,
+            "output": 30,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-4.1",
+      "aliases": [],
+      "displayName": "gpt-4.1",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 2,
+            "output": 8,
+            "cachedInput": 0.5
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-4.1-mini",
+      "aliases": [],
+      "displayName": "gpt-4.1-mini",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.4,
+            "output": 1.6,
+            "cachedInput": 0.1
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-4.1-nano",
+      "aliases": [],
+      "displayName": "gpt-4.1-nano",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.1,
+            "output": 0.4,
+            "cachedInput": 0.025
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-4o",
+      "aliases": [],
+      "displayName": "gpt-4o",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 2.5,
+            "output": 10,
+            "cachedInput": 1.25
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-4o-2024-05-13",
+      "aliases": [],
+      "displayName": "gpt-4o-2024-05-13",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 5,
+            "output": 15,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-4o-mini",
+      "aliases": [],
+      "displayName": "gpt-4o-mini",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.15,
+            "output": 0.6,
+            "cachedInput": 0.075
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-5",
+      "aliases": [],
+      "displayName": "gpt-5",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 1.25,
+            "output": 10,
+            "cachedInput": 0.125
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-5-mini",
+      "aliases": [],
+      "displayName": "gpt-5-mini",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.25,
+            "output": 2,
+            "cachedInput": 0.025
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-5-nano",
+      "aliases": [],
+      "displayName": "gpt-5-nano",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.05,
+            "output": 0.4,
+            "cachedInput": 0.005
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-5-pro",
+      "aliases": [],
+      "displayName": "gpt-5-pro",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 15,
+            "output": 120,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-5.1",
+      "aliases": [],
+      "displayName": "gpt-5.1",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 1.25,
+            "output": 10,
+            "cachedInput": 0.125
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-5.2",
+      "aliases": [],
+      "displayName": "gpt-5.2",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 1.75,
+            "output": 14,
+            "cachedInput": 0.175
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-5.2-pro",
+      "aliases": [],
+      "displayName": "gpt-5.2-pro",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 21,
+            "output": 168,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-5.4",
+      "aliases": [],
+      "displayName": "gpt-5.4",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 2.5,
+            "output": 15,
+            "cachedInput": 0.25
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [
+            {
+              "thresholdTokens": 272000,
+              "rates": {
+                "input": 5,
+                "output": 22.5,
+                "cachedInput": 0.5
+              }
+            }
+          ],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-5.4-mini",
+      "aliases": [],
+      "displayName": "gpt-5.4-mini",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.75,
+            "output": 4.5,
+            "cachedInput": 0.075
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-5.4-nano",
+      "aliases": [],
+      "displayName": "gpt-5.4-nano",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.2,
+            "output": 1.25,
+            "cachedInput": 0.02
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-5.4-pro",
+      "aliases": [],
+      "displayName": "gpt-5.4-pro",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 30,
+            "output": 180,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [
+            {
+              "thresholdTokens": 272000,
+              "rates": {
+                "input": 60,
+                "output": 270,
+                "cachedInput": null
+              }
+            }
+          ],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-5.5",
+      "aliases": [],
+      "displayName": "gpt-5.5",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 5,
+            "output": 30,
+            "cachedInput": 0.5
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [
+            {
+              "thresholdTokens": 272000,
+              "rates": {
+                "input": 10,
+                "output": 45,
+                "cachedInput": 1
+              }
+            }
+          ],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-5.5-pro",
+      "aliases": [],
+      "displayName": "gpt-5.5-pro",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 30,
+            "output": 180,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [
+            {
+              "thresholdTokens": 272000,
+              "rates": {
+                "input": 60,
+                "output": 270,
+                "cachedInput": null
+              }
+            }
+          ],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-5.6-luna",
+      "aliases": [],
+      "displayName": "gpt-5.6-luna",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 0.2,
+            "output": 1.2,
+            "cachedInput": 0.02
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [
+            {
+              "thresholdTokens": 272000,
+              "rates": {
+                "input": 0.4,
+                "output": 1.8,
+                "cachedInput": 0.04
+              }
+            }
+          ],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-5.6-sol",
+      "aliases": [],
+      "displayName": "gpt-5.6-sol",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "capabilities": [
+        {
+          "id": "text.input",
+          "supported": true,
+          "source": "Routed for text generation by this repository (lib/model-router.ts / lib/fabric)",
+          "verification": "DOCUMENTED",
+          "effectiveDate": null
+        },
+        {
+          "id": "text.output",
+          "supported": true,
+          "source": "Routed for text generation by this repository (lib/model-router.ts / lib/fabric)",
+          "verification": "DOCUMENTED",
+          "effectiveDate": null
+        }
+      ],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [
+        "NARRATIVE",
+        "LITERAL",
+        "JSON_OBJECT"
+      ],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 4,
+            "output": 20,
+            "cachedInput": 0.4
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [
+            {
+              "thresholdTokens": 272000,
+              "rates": {
+                "input": 8,
+                "output": 30,
+                "cachedInput": 0.8
+              }
+            }
+          ],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-5.6-terra",
+      "aliases": [],
+      "displayName": "gpt-5.6-terra",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "capabilities": [
+        {
+          "id": "text.input",
+          "supported": true,
+          "source": "SynthOS authorized live proof 2026-09-18 — ledger usage use-1789708234302-c6ec7634 (Responses API, text in / text out)",
+          "verification": "VERIFIED",
+          "effectiveDate": null
+        },
+        {
+          "id": "text.output",
+          "supported": true,
+          "source": "SynthOS authorized live proof 2026-09-18 — ledger usage use-1789708234302-c6ec7634 (Responses API, text in / text out)",
+          "verification": "VERIFIED",
+          "effectiveDate": null
+        }
+      ],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [
+        "NARRATIVE",
+        "LITERAL",
+        "JSON_OBJECT"
+      ],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 2,
+            "output": 12,
+            "cachedInput": 0.2
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [
+            {
+              "thresholdTokens": 272000,
+              "rates": {
+                "input": 4,
+                "output": 18,
+                "cachedInput": 0.4
+              }
+            }
+          ],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "gpt-6-astra",
+      "aliases": [],
+      "displayName": "gpt-6-astra",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 20,
+            "output": 75,
+            "cachedInput": 2
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "o1",
+      "aliases": [],
+      "displayName": "o1",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 15,
+            "output": 60,
+            "cachedInput": 7.5
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "o1-pro",
+      "aliases": [],
+      "displayName": "o1-pro",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 150,
+            "output": 600,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "o3",
+      "aliases": [],
+      "displayName": "o3",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 2,
+            "output": 8,
+            "cachedInput": 0.5
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "o3-mini",
+      "aliases": [],
+      "displayName": "o3-mini",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 1.1,
+            "output": 4.4,
+            "cachedInput": 0.55
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "o3-pro",
+      "aliases": [],
+      "displayName": "o3-pro",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 20,
+            "output": 80,
+            "cachedInput": null
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    },
+    {
+      "modelId": "o4-mini",
+      "aliases": [],
+      "displayName": "o4-mini",
+      "lifecycle": "ACTIVE",
+      "releaseDate": null,
+      "deprecationDate": null,
+      "shutdownDate": null,
+      "limits": {
+        "contextTokens": null,
+        "outputTokens": null
+      },
+      "modalities": {
+        "input": [],
+        "output": []
+      },
+      "capabilities": [],
+      "supportedParameters": [
+        "max_output_tokens"
+      ],
+      "outputContracts": [],
+      "pricing": [
+        {
+          "currency": "USD",
+          "unit": "tokens",
+          "rates": {
+            "input": 1.1,
+            "output": 4.4,
+            "cachedInput": 0.275
+          },
+          "reasoningTokens": "BILLED_AS_OUTPUT",
+          "tiers": [],
+          "toolCharges": [],
+          "modalityCharges": [],
+          "effectiveFrom": "2026-09-18T05:24:20.399Z",
+          "effectiveUntil": null,
+          "source": "https://platform.openai.com/docs/pricing.md",
+          "verifiedAt": "2026-09-18T05:24:20.399Z",
+          "staleAfter": "2026-11-17T05:24:20.399Z",
+          "approval": "APPROVED"
+        }
+      ],
+      "adapterCompatibility": {
+        "protocol": "openai.responses",
+        "minAdapterVersion": "1.0.0"
+      },
+      "restrictions": {
+        "regions": [],
+        "compliance": []
+      }
+    }
+  ]
+}
