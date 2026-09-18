@@ -288,8 +288,11 @@ async function dispatchAntigravityInteraction(
     workspaceId, taskId: spend.taskId ?? null, correlationId: spend.correlationId,
     idempotencyKey: `ag:${spend.correlationId}`, inputChars: instruction.length,
     approvalId: spend.approvalId, asyncSettlement: true,
-  }, async () => {
-    const r = await ctx.invoke('runtime.antigravity', () => antigravityClient.submitInteraction({ instruction, agent, tools, maxTotalTokens }));
+  }, async (grant) => {
+    // The guard's cap is sized so that even a 20% provider overshoot stays
+    // within the per-run ceiling at the catalog price; never send more.
+    const cap = Math.min(maxTotalTokens, grant.maxTotalTokens ?? maxTotalTokens);
+    const r = await ctx.invoke('runtime.antigravity', () => antigravityClient.submitInteraction({ instruction, agent, tools, maxTotalTokens: cap }));
     return { ok: r.ok, value: r, usage: r.remoteJobId ? { providerRequestId: r.remoteJobId } : null };
   });
   if (!guarded.permitted) return { ok: false, remoteJobId: null, error: `BLOCKED_BUDGET (${guarded.code}): ${guarded.reason}` };

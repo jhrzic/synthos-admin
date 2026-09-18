@@ -1,8 +1,11 @@
 // ---------------------------------------------------------------------------
 // SPEND POLICY — the one canonical definition of what paid execution may cost.
 //
-// Stored in platform_settings ('spend.policy', 'spend.pricing'), edited only by
-// a platform_admin from Master Admin → Spend Control, audited on every change.
+// Stored in platform_settings ('spend.policy'), edited only by a platform_admin
+// from Master Admin → Spend Control, audited on every change. Prices are NOT
+// part of the policy: they come from the automatic pricing catalog
+// (lib/pricing/catalog.ts), refreshed from each provider's own published
+// pricing document — nobody types a price.
 // There is deliberately NO environment override: a budget must be visible and
 // auditable in exactly one place.
 //
@@ -18,6 +21,8 @@
 // ---------------------------------------------------------------------------
 
 import { resolvePlatformSetting, setPlatformSetting } from '../platform-settings';
+import { getCatalogPrice } from '../pricing/catalog';
+import { ratesAt } from '../pricing/parse';
 
 export const PAID_PROVIDERS = ['openai', 'gemini', 'antigravity', 'openai_tts', 'elevenlabs', 'fish_audio'] as const;
 export type PaidProvider = (typeof PAID_PROVIDERS)[number];
@@ -57,6 +62,8 @@ export interface SpendPolicy {
   fallback: 'NO_PAID_FALLBACK';
   /** Output price per million tokens at or below which a model is LOW_COST / STANDARD. Above = PREMIUM. */
   tierThresholds: { lowCostMaxOutputPerMTok: number; standardMaxOutputPerMTok: number };
+  /** A price whose source has not refreshed successfully within this many hours is STALE and blocked. */
+  pricing: { maxAgeHours: number };
 }
 
 const limits = (dailyUsd: number, monthlyUsd: number, maxConcurrent = 1): ProviderLimits => ({ enabled: true, dailyUsd, monthlyUsd, maxConcurrent });
@@ -79,11 +86,14 @@ export const DEFAULT_SPEND_POLICY: SpendPolicy = {
   approvalThresholdUsd: 0.1,
   fallback: 'NO_PAID_FALLBACK',
   tierThresholds: { lowCostMaxOutputPerMTok: 2, standardMaxOutputPerMTok: 15 },
+  pricing: { maxAgeHours: 72 },
 };
 
 // ---------------------------------------------------------------------------
-// PRICING — entered by a platform_admin from the provider's own price page.
-// Nothing here is guessed: an absent entry is UNKNOWN, and UNKNOWN blocks.
+// PRICING — resolved from the automatic pricing catalog (lib/pricing/catalog.ts),
+// which refreshes from each provider's own published pricing document. There
+// is no manual price entry: a model the catalog does not price is UNKNOWN,
+// and UNKNOWN blocks.
 // ---------------------------------------------------------------------------
 
 export interface ModelPrice {
@@ -91,15 +101,15 @@ export interface ModelPrice {
   unit: 'tokens' | 'chars';
   inputPerMillion: number;
   outputPerMillion: number;
-  /** Optional. When a provider reports cached input and this is absent, actual cost is UNKNOWN rather than guessed. */
-  cachedInputPerMillion?: number;
-}
-
-/** Keyed `${provider}:${model}`. */
-export type PricingTable = Record<string, ModelPrice>;
-
-export function pricingKey(provider: string, model: string): string {
-  return `${provider}:${model}`;
+  /** When a provider reports cached input and this is absent, actual cost is UNKNOWN rather than guessed. */
+  cachedInputPerMillion?: number | null;
+  /** Prices above a prompt-size threshold. thresholdTokens null = threshold not published. */
+  long?: { thresholdTokens: number | null; inputPerMillion: number; outputPerMillion: number; cachedInputPerMillion?: number | null } | null;
+  /** Exactly which catalog price this is — stored on every usage row. */
+  versionKey: string;
+  /** Hours since the source last refreshed successfully; null = never. */
+  ageHours: number | null;
+  derivedFrom?: string | null;
 }
 
 const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
@@ -133,21 +143,7 @@ export function validateSpendPolicy(p: any): string[] {
   if (p.fallback !== 'NO_PAID_FALLBACK') errors.push('fallback must be NO_PAID_FALLBACK (no paid fallback policy is implemented)');
   num('tierThresholds.lowCostMaxOutputPerMTok', p.tierThresholds?.lowCostMaxOutputPerMTok);
   num('tierThresholds.standardMaxOutputPerMTok', p.tierThresholds?.standardMaxOutputPerMTok);
-  return errors;
-}
-
-export function validatePricing(t: any): string[] {
-  const errors: string[] = [];
-  if (!t || typeof t !== 'object' || Array.isArray(t)) return ['pricing must be an object keyed "provider:model"'];
-  for (const [key, v] of Object.entries(t)) {
-    const [prov, ...rest] = key.split(':');
-    if (!(PAID_PROVIDERS as readonly string[]).includes(prov) || rest.join(':').trim() === '') errors.push(`"${key}" must be "provider:model" with a known provider`);
-    const m = v as any;
-    if (m?.unit !== 'tokens' && m?.unit !== 'chars') errors.push(`${key}.unit must be tokens or chars`);
-    if (!finite(m?.inputPerMillion)) errors.push(`${key}.inputPerMillion must be a finite number ≥ 0`);
-    if (!finite(m?.outputPerMillion)) errors.push(`${key}.outputPerMillion must be a finite number ≥ 0`);
-    if (m?.cachedInputPerMillion !== undefined && !finite(m.cachedInputPerMillion)) errors.push(`${key}.cachedInputPerMillion must be a finite number ≥ 0`);
-  }
+  if (!finite(p.pricing?.maxAgeHours) || p.pricing.maxAgeHours <= 0) errors.push('pricing.maxAgeHours must be a finite number > 0');
   return errors;
 }
 
@@ -185,6 +181,7 @@ export function mergePolicy(partial: any): SpendPolicy {
     approvalThresholdUsd: partial?.approvalThresholdUsd ?? d.approvalThresholdUsd,
     fallback: partial?.fallback ?? d.fallback,
     tierThresholds: { ...d.tierThresholds, ...(partial?.tierThresholds || {}) },
+    pricing: { ...d.pricing, ...(partial?.pricing || {}) },
   };
 }
 
@@ -198,26 +195,28 @@ export function saveSpendPolicy(partial: any, actorUserId: string): { ok: true; 
   return { ok: true, policy: merged };
 }
 
-export function getPricingTable(): PricingTable {
-  const r = resolvePlatformSetting('spend.pricing', '');
-  if (!r.value) return {};
-  try {
-    const parsed = JSON.parse(r.value);
-    return validatePricing(parsed).length ? {} : parsed;
-  } catch {
-    return {};
-  }
-}
-
-export function savePricingTable(table: any, actorUserId: string): { ok: true } | { ok: false; errors: string[] } {
-  const errors = validatePricing(table);
-  if (errors.length) return { ok: false, errors };
-  setPlatformSetting('spend.pricing', JSON.stringify(table), actorUserId);
-  return { ok: true };
-}
-
-export function getModelPrice(provider: string, model: string): ModelPrice | null {
-  return getPricingTable()[pricingKey(provider, model)] ?? null;
+/**
+ * The price in force for provider:model at `atIso`, from the catalog. null
+ * when the catalog does not price the model, or has no window covering the date.
+ */
+export function getModelPrice(provider: string, model: string, atIso: string = new Date().toISOString()): ModelPrice | null {
+  let lookup;
+  try { lookup = getCatalogPrice(provider, model); } catch { return null; }
+  if (!lookup) return null;
+  const r = lookup.record;
+  const short = ratesAt(r.windows, atIso);
+  if (!short) return null;
+  const longRates = r.longContext ? ratesAt(r.longContext.windows, atIso) : null;
+  return {
+    unit: r.unit,
+    inputPerMillion: short.input,
+    outputPerMillion: short.output,
+    cachedInputPerMillion: short.cachedInput,
+    long: r.longContext && longRates ? { thresholdTokens: r.longContext.thresholdTokens, inputPerMillion: longRates.input, outputPerMillion: longRates.output, cachedInputPerMillion: longRates.cachedInput } : null,
+    versionKey: lookup.versionKey,
+    ageHours: lookup.ageHours,
+    derivedFrom: r.derivedFrom,
+  };
 }
 
 export function costTierFor(price: ModelPrice | null, policy: SpendPolicy = getSpendPolicy()): CostTier | 'UNKNOWN' {

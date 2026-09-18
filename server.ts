@@ -190,7 +190,8 @@ import { requireAuth, requireWorkspaceMember, requireWorkspaceAdmin, requirePlat
 import { recordAdminAuditEvent, listRecentAdminAuditEvents } from "./lib/audit";
 import { guardedGeminiGenerate, guardedSpeech, requestKey } from "./lib/spend/adapters";
 import { getSpendStatus } from "./lib/spend/status";
-import { getSpendPolicy, saveSpendPolicy, savePricingTable, PAID_PROVIDERS, type PaidProvider } from "./lib/spend/policy";
+import { getSpendPolicy, saveSpendPolicy, PAID_PROVIDERS, type PaidProvider } from "./lib/spend/policy";
+import { refreshPricingCatalog, listCatalogPrices, priceHistory } from "./lib/pricing/catalog";
 import { clearAmbiguousUsage } from "./lib/spend/guard";
 import { executeAgentTask, buildAgentRolePrompt } from "./lib/fabric/kernel";
 import { createExecutionContext } from "./lib/fabric/context";
@@ -7003,16 +7004,30 @@ Rules for spokenSummary specifically:
     }
   });
 
-  app.post("/api/master-admin/spend/pricing", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "spend-pricing"), (req, res) => {
+  // PRICING — automatic, from each provider's own published pricing document.
+  // There is no manual price entry. Refresh is metadata only: GET requests for
+  // documentation pages, zero inference, nothing written to provider_usage.
+  app.post("/api/master-admin/pricing/refresh", requirePlatformAdmin, rateLimit("PRIVILEGED_ADMIN", byUserOrIp, "pricing-refresh"), async (req, res) => {
     try {
       const actor = (req as AuthedRequest).authUser!.user_id;
-      const result = savePricingTable(req.body?.pricing ?? {}, actor);
-      if (!result.ok) return res.status(400).json({ success: false, error: "Invalid pricing.", errors: result.errors });
-      recordAdminAuditEvent({ actorUserId: actor, eventType: "SPEND_PRICING_CHANGED", targetType: "platform_setting", targetId: "spend.pricing", detail: { pricing: req.body?.pricing ?? {} } });
-      return res.json({ success: true, status: getSpendStatus() });
+      const report = await refreshPricingCatalog("MANUAL");
+      let models: unknown = null;
+      if (req.body?.includeModels === true) {
+        const { refreshModelCatalog } = await import("./lib/model-discovery");
+        models = await refreshModelCatalog("MANUAL");
+      }
+      recordAdminAuditEvent({ actorUserId: actor, eventType: "SPEND_PRICING_CHANGED", targetType: "pricing_catalog", targetId: report.refreshId,
+        detail: { trigger: "MANUAL", sources: report.sources.map((s) => ({ source: s.sourceId, status: s.status, added: s.added, changed: s.changed, removed: s.removed })) } });
+      return res.json({ success: true, report, models, status: getSpendStatus() });
     } catch (err: any) {
-      return res.status(500).json({ success: false, error: String(err?.message || "Failed to save pricing").slice(0, 200) });
+      return res.status(500).json({ success: false, error: String(err?.message || "Pricing refresh failed").slice(0, 200) });
     }
+  });
+
+  app.get("/api/master-admin/pricing", requirePlatformAdmin, (req, res) => {
+    const provider = typeof req.query.provider === "string" ? req.query.provider : undefined;
+    const model = typeof req.query.model === "string" ? req.query.model : undefined;
+    return res.json({ success: true, prices: listCatalogPrices(), history: priceHistory(provider, model, 100) });
   });
 
   // Operator decision on an ambiguous paid call (timeout after dispatch /
@@ -8038,6 +8053,9 @@ Rules for spokenSummary specifically:
   //
   // Metadata only. lib/model-discovery.ts issues GET model-list requests and
   // spends no generation tokens, so booting the server never costs inference.
+  // Pricing catalog: GET-only documentation fetch, zero inference. A failure
+  // keeps last-known prices and marks them stale; it never blocks startup.
+  refreshPricingCatalog("STARTUP").catch((err) => console.warn("[Pricing] startup refresh failed:", err?.message || err));
   refreshModelCatalog("STARTUP")
     .then((report) => {
       const live = report.providers.filter((p) => p.outcome === "LIVE").length;

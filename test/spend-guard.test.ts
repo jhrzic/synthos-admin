@@ -21,7 +21,8 @@ import { getDatabase, createOrchestratedTask, getOrchestratorTask } from '../lib
 import { ensureWorkspace } from '../lib/workspaces';
 import { generateViaOpenAI } from '../lib/fabric/model-openai';
 import { guardedPaidCall, clearAmbiguousUsage, previewPaidCall } from '../lib/spend/guard';
-import { saveSpendPolicy, savePricingTable, DEFAULT_SPEND_POLICY, getSpendPolicy } from '../lib/spend/policy';
+import { saveSpendPolicy, DEFAULT_SPEND_POLICY, getSpendPolicy } from '../lib/spend/policy';
+import { seedFixturePrices } from './helpers/spend';
 import { listUsageForKey, reconcileStaleUsage, insertUsageRow, listSpendAlerts, ensureUsageTable } from '../lib/spend/ledger';
 import { PaidEndpointBlockedError, isPaidRequest, liveProviderTestsAllowed } from '../lib/spend/network-guard';
 import { submitExternalExecution } from '../lib/external-executions';
@@ -101,11 +102,11 @@ beforeEach(() => {
   ensureUsageTable();
   getDatabase().exec('DELETE FROM provider_usage; DELETE FROM spend_alerts;');
   try { getDatabase().exec('DELETE FROM platform_settings'); } catch { /* created on first write */ }
-  savePricingTable({
-    'openai:gpt-test-standard': { unit: 'tokens', inputPerMillion: 1, outputPerMillion: 4 },
-    'openai:gpt-test-other': { unit: 'tokens', inputPerMillion: 1, outputPerMillion: 4 },
-    'openai:gpt-test-premium': { unit: 'tokens', inputPerMillion: 10, outputPerMillion: 60 },
-  }, 'test');
+  seedFixturePrices([
+    { provider: 'openai', modelId: 'gpt-test-standard', input: 1, output: 4 },
+    { provider: 'openai', modelId: 'gpt-test-other', input: 1, output: 4 },
+    { provider: 'openai', modelId: 'gpt-test-premium', input: 10, output: 60 },
+  ]);
 });
 
 describe('DEFAULTS — nothing is spendable until a platform admin says so', () => {
@@ -125,10 +126,10 @@ describe('DEFAULTS — nothing is spendable until a platform admin says so', () 
     expect(saveSpendPolicy({ global: { dailyUsd: -1, monthlyUsd: 1, maxConcurrent: 1 } }, 't').ok).toBe(false);
   });
 
-  it('a model with no configured price is BLOCKED (PRICING_UNKNOWN) — new models are not spendable by default', async () => {
+  it('a model the catalog does not price is BLOCKED (PRICE_UNKNOWN) — new models are not spendable by default', async () => {
     policy();
     const r = await call(key(), 'gpt-brand-new-model');
-    expect(r.lastProviderError).toMatch(/PRICING_UNKNOWN/);
+    expect(r.lastProviderError).toMatch(/PRICE_UNKNOWN/);
     expect(calls).toBe(0);
   });
 });
@@ -161,12 +162,21 @@ describe('THE NETWORK BOUNDARY', () => {
 });
 
 describe('TEST SUITE IS FREE', () => {
-  it('real provider hosts are unreachable under test — any method, with or without a permit', async () => {
-    delete process.env.SYNTHOS_LIVE_PROVIDER_TESTS;
-    delete process.env.SYNTHOS_LIVE_TEST_BUDGET_USD;
-    for (const url of ['https://api.openai.com/v1/models', 'https://generativelanguage.googleapis.com/v1beta/models', 'https://api.fish.audio/v1/tts']) {
-      await expect(fetch(url)).rejects.toMatchObject({ code: 'TEST_MODE_REAL_PROVIDER_BLOCKED' });
+  // Asserted WITHOUT disabling the guard: a refused request never leaves the
+  // process, so this test makes no external request whatever its outcome.
+  it('provider hosts are unreachable under test: metadata GETs and paid POSTs, docs pages included', async () => {
+    for (const k of ['SYNTHOS_LIVE_PROVIDER_TESTS', 'SYNTHOS_LIVE_TEST_BUDGET_USD', 'SYNTHOS_LIVE_METADATA_TESTS']) delete process.env[k];
+    for (const url of ['https://api.openai.com/v1/models', 'https://generativelanguage.googleapis.com/v1beta/models', 'https://platform.openai.com/docs/pricing.md', 'https://ai.google.dev/gemini-api/docs/pricing.md.txt']) {
+      await expect(fetch(url)).rejects.toMatchObject({ code: 'TEST_MODE_PROVIDER_METADATA_BLOCKED' });
     }
+    await expect(fetch('https://api.openai.com/v1/responses', { method: 'POST', body: '{}' })).rejects.toMatchObject({ code: 'TEST_MODE_REAL_PROVIDER_BLOCKED' });
+  });
+
+  it('the metadata flag never opens paid inference', async () => {
+    process.env.SYNTHOS_LIVE_METADATA_TESTS = 'true';
+    try {
+      await expect(fetch('https://api.openai.com/v1/responses', { method: 'POST', body: '{}' })).rejects.toMatchObject({ code: 'TEST_MODE_REAL_PROVIDER_BLOCKED' });
+    } finally { delete process.env.SYNTHOS_LIVE_METADATA_TESTS; }
   });
 
   it('the live-provider flag alone is not enough — a live-test budget is also required', () => {

@@ -68,6 +68,8 @@ export interface UsageRow {
   actual_cost_state: 'KNOWN' | 'ACTUAL_COST_UNKNOWN' | null;
   cost_tier: string | null;
   approval_id: string | null;
+  price_version: string | null;
+  price_snapshot_json: string | null;
   created_at: string;
   dispatched_at: string | null;
   completed_at: string | null;
@@ -108,6 +110,8 @@ export function ensureUsageTable(): void {
       actual_cost_state TEXT,
       cost_tier TEXT,
       approval_id TEXT,
+      price_version TEXT,
+      price_snapshot_json TEXT,
       created_at TEXT NOT NULL,
       dispatched_at TEXT,
       completed_at TEXT,
@@ -127,6 +131,10 @@ export function ensureUsageTable(): void {
       UNIQUE (scope, period_key, threshold)
     );
   `);
+  // Columns added after the table first shipped.
+  const cols = (db.prepare('PRAGMA table_info(provider_usage)').all() as any[]).map((c) => c.name);
+  if (!cols.includes('price_version')) db.exec('ALTER TABLE provider_usage ADD COLUMN price_version TEXT');
+  if (!cols.includes('price_snapshot_json')) db.exec('ALTER TABLE provider_usage ADD COLUMN price_snapshot_json TEXT');
   ensured = true;
 }
 

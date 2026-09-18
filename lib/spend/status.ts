@@ -7,7 +7,11 @@
 // ---------------------------------------------------------------------------
 
 import { getDatabase } from '../persistence';
-import { getSpendPolicy, getPricingTable, costTierFor, PAID_PROVIDERS } from './policy';
+import { getSpendPolicy, getModelPrice, costTierFor, PAID_PROVIDERS, type PaidProvider } from './policy';
+import { previewPaidCall } from './guard';
+import { listPricingSources, listCatalogPrices, priceHistory, lastPricingRefresh } from '../pricing/catalog';
+import { resolveDefaultOpenAiModel, resolveReviewSeatModel, normalizeGeminiModel } from '../model-router';
+import { resolveAntigravityAgent } from '../antigravity-client';
 import { ensureUsageTable, periodStarts, spentSince, inFlightCount, listSpendAlerts, COST_BEARING_STATUSES } from './ledger';
 import { unguardedAttemptCount } from './network-guard';
 
@@ -57,7 +61,6 @@ function breakdown(since: string, column: 'provider' | 'model') {
 
 export function getSpendStatus() {
   const policy = getSpendPolicy();
-  const pricing = getPricingTable();
   const { dayStart, monthStart } = periodStarts();
   const today = totals(dayStart);
   const month = totals(monthStart);
@@ -86,8 +89,11 @@ export function getSpendStatus() {
 
   return {
     policy,
-    pricing: Object.entries(pricing).map(([key, price]) => ({ key, ...price, tier: costTierFor(price, policy) })),
+    pricing: pricingView(policy),
     today, month,
+    // spentUsd already INCLUDES in-flight reservations (RESERVED / DISPATCHED
+    // rows at their estimate), so "remaining" is remaining after reservations.
+    reservations: reservationTotals(),
     remaining: {
       globalTodayUsd: Math.max(0, policy.global.dailyUsd - today.spentUsd),
       globalMonthUsd: Math.max(0, policy.global.monthlyUsd - month.spentUsd),
@@ -100,5 +106,63 @@ export function getSpendStatus() {
     recentBlocks,
     alerts: listSpendAlerts(20),
     unguardedPaidRequestsRefusedSinceStart: unguardedAttemptCount(),
+  };
+}
+
+
+function reservationTotals() {
+  ensureUsageTable();
+  const row = getDatabase().prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(estimated_cost_usd), 0) AS usd FROM provider_usage WHERE status IN ('RESERVED', 'DISPATCHED')`).get() as any;
+  const ambiguous = getDatabase().prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(estimated_cost_usd), 0) AS usd FROM provider_usage WHERE status IN ('TIMEOUT_AFTER_DISPATCH', 'UNKNOWN')`).get() as any;
+  return { inFlightCalls: Number(row.n), inFlightReservedUsd: Number(row.usd), heldForReconciliationCalls: Number(ambiguous.n), heldForReconciliationUsd: Number(ambiguous.usd) };
+}
+
+/** A representative task used to show what each selected model would cost right now. */
+const REPRESENTATIVE_INPUT_CHARS = 4_000;
+
+function pricingView(policy: ReturnType<typeof getSpendPolicy>) {
+  const sources = listPricingSources().map((s: any) => {
+    const age = s.last_success_at ? (Date.now() - new Date(s.last_success_at).getTime()) / 3_600_000 : null;
+    return {
+      sourceId: s.source_id, sourceUrl: s.source_url, lastAttemptAt: s.last_attempt_at, lastSuccessAt: s.last_success_at,
+      lastStatus: s.last_status, lastError: s.last_error, models: s.models_count,
+      state: age === null ? 'NEVER_REFRESHED' : age > policy.pricing.maxAgeHours ? 'STALE' : s.last_status === 'FAILED' ? 'CURRENT_LAST_REFRESH_FAILED' : 'CURRENT',
+      ageHours: age === null ? null : Math.round(age * 10) / 10,
+    };
+  });
+
+  // The models the router actually selects today. Pricing never changes this
+  // selection; it only decides whether the selection may spend.
+  const selected: Array<{ role: string; provider: PaidProvider; model: string }> = [
+    { role: 'OpenAI default', provider: 'openai', model: resolveDefaultOpenAiModel() },
+    { role: 'Development review seat', provider: 'openai', model: resolveReviewSeatModel() },
+    { role: 'Gemini default', provider: 'gemini', model: normalizeGeminiModel() },
+    { role: 'Antigravity agent', provider: 'antigravity', model: resolveAntigravityAgent() },
+    { role: 'OpenAI speech', provider: 'openai_tts', model: 'tts-1' },
+  ];
+  const selectedModels = selected.map((m) => {
+    const price = getModelPrice(m.provider, m.model);
+    const preview = previewPaidCall({
+      provider: m.provider, model: m.model, callSite: 'admin.preview', idempotencyKey: `preview:${m.provider}:${m.model}`,
+      inputChars: REPRESENTATIVE_INPUT_CHARS, maxOutputTokens: m.provider === 'antigravity' ? undefined : policy.task.maxOutputTokens,
+      approvalId: 'preview-assumes-approval',
+    });
+    return {
+      ...m,
+      priceState: !price ? 'PRICE_UNKNOWN' : price.ageHours === null || price.ageHours > policy.pricing.maxAgeHours ? 'PRICE_STALE' : 'CURRENT',
+      price: price ? { unit: price.unit, input: price.inputPerMillion, output: price.outputPerMillion, cachedInput: price.cachedInputPerMillion ?? null, long: price.long ?? null, versionKey: price.versionKey, derivedFrom: price.derivedFrom ?? null, tier: costTierFor(price, policy) } : null,
+      estimatedMaxUsd: preview.estimatedCostUsd,
+      eligibility: preview.permitted ? 'ELIGIBLE' : preview.code,
+      blockedReason: preview.permitted ? null : preview.reason,
+    };
+  });
+
+  return {
+    sources,
+    lastRefresh: lastPricingRefresh(),
+    selectedModels,
+    pricedModels: listCatalogPrices().length,
+    recentChanges: priceHistory(undefined, undefined, 20).map((h: any) => ({ provider: h.provider, modelId: h.model_id, changeType: h.change_type, oldVersion: h.old_version, newVersion: h.new_version, detectedAt: h.detected_at })),
+    maxAgeHours: policy.pricing.maxAgeHours,
   };
 }

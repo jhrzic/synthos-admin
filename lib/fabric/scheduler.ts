@@ -419,6 +419,10 @@ let schedulerTimer: ReturnType<typeof setInterval> | null = null;
  * notice a new or retired model and infrequent enough to be nearly free.
  */
 const CATALOG_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+/** Pricing refresh cadence. Well inside the 72h staleness limit, so one or two failed refreshes do not block spending. */
+export const PRICING_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000;
+// Set at start so the scheduler's first refresh is 12h after the startup refresh in server.ts, not a duplicate of it.
+let lastPricingRefreshAt = Date.now();
 
 /** Epoch of the last catalog refresh attempt. 0 so the first tick runs one. */
 let lastCatalogRefreshAt = 0;
@@ -598,6 +602,15 @@ export function startScheduler(intervalMs = 10000): void {
     import('../spend/ledger')
       .then((m) => m.reconcileStaleUsage())
       .catch(() => { /* bookkeeping must never stop scheduled work */ });
+
+    // PRICING CATALOG — time-gated like the model catalog; GET-only
+    // documentation fetch, zero inference.
+    if (Date.now() - lastPricingRefreshAt >= PRICING_REFRESH_INTERVAL_MS) {
+      lastPricingRefreshAt = Date.now();
+      import('../pricing/catalog')
+        .then((m) => m.refreshPricingCatalog('SCHEDULED'))
+        .catch((err) => console.error('[scheduler] pricing refresh failed:', err?.message || err));
+    }
 
     import('./orchestrator')
       .then((m) => m.orchestrationTickForScheduler())

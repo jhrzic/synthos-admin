@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Power, Wallet, AlertTriangle, Loader2, Gauge, ListChecks, ShieldAlert, Plus, Trash2 } from 'lucide-react';
+import { Power, Wallet, AlertTriangle, Loader2, Gauge, ListChecks, ShieldAlert } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
 // Master Admin → Spend Control.
@@ -45,7 +45,6 @@ export function SpendControlPanel() {
   const [draft, setDraft] = useState<Policy | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [priceDraft, setPriceDraft] = useState({ provider: 'openai', model: '', unit: 'tokens', inputPerMillion: 0, outputPerMillion: 0, cachedInputPerMillion: '' as string | number });
 
   const apply = (json: any) => { if (json?.status) { setStatus(json.status); setDraft(JSON.parse(JSON.stringify(json.status.policy))); } };
 
@@ -158,34 +157,54 @@ export function SpendControlPanel() {
         </div>
       </Card>
 
-      <Card icon={ListChecks} title="Pricing — from each provider's own price page">
-        <p className="text-[11px] text-[#6A7097]">A model with no price here cannot be estimated, so it is blocked. That is also why a newly discovered model never becomes spendable on its own.</p>
-        {status.pricing.length === 0 && <p className="text-[11px] font-mono text-[#7E8BB5]">NO PRICES CONFIGURED — every paid call is blocked with PRICING_UNKNOWN.</p>}
-        {status.pricing.map((p: any) => (
-          <div key={p.key} className="flex items-center justify-between text-[11px] font-mono text-[#C9CCE3] border-b border-[#11142A] py-1">
-            <span>{p.key} <span className="text-[#6A7097]">({p.unit}) {p.tier}</span></span>
-            <span>in ${p.inputPerMillion}/M · out ${p.outputPerMillion}/M{typeof p.cachedInputPerMillion === 'number' ? ` · cached $${p.cachedInputPerMillion}/M` : ''}
-              <button className="ml-2 text-[#FF6B6B]" onClick={() => {
-                const table = Object.fromEntries(status.pricing.filter((x: any) => x.key !== p.key).map((x: any) => [x.key, { unit: x.unit, inputPerMillion: x.inputPerMillion, outputPerMillion: x.outputPerMillion, ...(typeof x.cachedInputPerMillion === 'number' ? { cachedInputPerMillion: x.cachedInputPerMillion } : {}) }]));
-                void post('/api/master-admin/spend/pricing', { pricing: table }, 'pricing');
-              }}><Trash2 className="w-3 h-3 inline" /></button>
-            </span>
+      <Card icon={ListChecks} title="Pricing catalog — automatic, from each provider's own published pricing">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <p className="text-[11px] text-[#6A7097]">Refreshed at startup and every 12h (GET-only, zero inference). Prices older than {status.pricing.maxAgeHours}h are STALE and blocked. There is no manual price entry.</p>
+          <div className="flex gap-2">
+            <button disabled={busy === 'refresh'} onClick={() => post('/api/master-admin/pricing/refresh', {}, 'refresh')} className="text-[11px] font-mono font-bold px-2.5 py-1.5 rounded-md bg-[#615EFF] text-white disabled:opacity-40">{busy === 'refresh' ? 'Refreshing…' : 'Refresh pricing'}</button>
+            <button disabled={busy === 'refresh-all'} onClick={() => post('/api/master-admin/pricing/refresh', { includeModels: true }, 'refresh-all')} className="text-[11px] font-mono font-bold px-2.5 py-1.5 rounded-md border border-[#2A2F52] text-white disabled:opacity-40">Refresh models &amp; pricing</button>
+          </div>
+        </div>
+        {status.pricing.sources.length === 0 && <p className="text-[11px] font-mono text-[#7E8BB5]">NEVER REFRESHED — every paid call is blocked with PRICE_UNKNOWN.</p>}
+        {status.pricing.sources.map((src: any) => (
+          <div key={src.sourceId} className="text-[11px] font-mono border-b border-[#11142A] py-1 flex flex-wrap justify-between gap-2">
+            <span className="text-white">{src.sourceId}</span>
+            <span className={src.state === 'CURRENT' ? 'text-[#5FE3A1]' : src.state === 'STALE' || src.state === 'NEVER_REFRESHED' ? 'text-[#FF6B6B]' : 'text-[#E8A845]'}>{src.state.replace(/_/g, ' ')}</span>
+            <span className="text-[#8E94B8]">{src.models ?? 0} priced · last success {src.lastSuccessAt ?? 'never'}{src.lastError ? ` · last error: ${src.lastError}` : ''}</span>
+            <a className="text-[#6A7097] underline" href={src.sourceUrl} target="_blank" rel="noreferrer">source</a>
           </div>
         ))}
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-2 items-end">
-          <select value={priceDraft.provider} onChange={(e) => setPriceDraft({ ...priceDraft, provider: e.target.value })} className="bg-[#090A16] border border-[#1E223D] rounded-md px-2 py-1 text-xs text-white">
-            {Object.keys(PROVIDER_LABEL).map((p) => <option key={p} value={p}>{p}</option>)}
-          </select>
-          <input placeholder="model id" value={priceDraft.model} onChange={(e) => setPriceDraft({ ...priceDraft, model: e.target.value })} className="bg-[#090A16] border border-[#1E223D] rounded-md px-2 py-1 text-xs text-white font-mono" />
-          <select value={priceDraft.unit} onChange={(e) => setPriceDraft({ ...priceDraft, unit: e.target.value })} className="bg-[#090A16] border border-[#1E223D] rounded-md px-2 py-1 text-xs text-white"><option value="tokens">per M tokens</option><option value="chars">per M chars</option></select>
-          <input type="number" min={0} step={0.01} placeholder="input $/M" value={priceDraft.inputPerMillion} onChange={(e) => setPriceDraft({ ...priceDraft, inputPerMillion: Number(e.target.value) })} className="bg-[#090A16] border border-[#1E223D] rounded-md px-2 py-1 text-xs text-white font-mono" />
-          <input type="number" min={0} step={0.01} placeholder="output $/M" value={priceDraft.outputPerMillion} onChange={(e) => setPriceDraft({ ...priceDraft, outputPerMillion: Number(e.target.value) })} className="bg-[#090A16] border border-[#1E223D] rounded-md px-2 py-1 text-xs text-white font-mono" />
-          <button disabled={!priceDraft.model.trim() || busy === 'pricing'} onClick={() => {
-            const table = Object.fromEntries(status.pricing.map((x: any) => [x.key, { unit: x.unit, inputPerMillion: x.inputPerMillion, outputPerMillion: x.outputPerMillion, ...(typeof x.cachedInputPerMillion === 'number' ? { cachedInputPerMillion: x.cachedInputPerMillion } : {}) }]));
-            table[`${priceDraft.provider}:${priceDraft.model.trim()}`] = { unit: priceDraft.unit, inputPerMillion: priceDraft.inputPerMillion, outputPerMillion: priceDraft.outputPerMillion };
-            void post('/api/master-admin/spend/pricing', { pricing: table }, 'pricing');
-          }} className="text-[11px] font-mono font-bold px-2.5 py-1.5 rounded-md bg-[#615EFF] text-white disabled:opacity-40 flex items-center gap-1"><Plus className="w-3 h-3" /> Add price</button>
-        </div>
+        <div className="text-[10px] font-mono uppercase text-[#6A7097] pt-1">Selected models — routing is never changed by pricing</div>
+        {status.pricing.selectedModels.map((m: any) => (
+          <div key={m.role} className="text-[11px] font-mono border-b border-[#11142A] py-1.5">
+            <div className="flex flex-wrap justify-between gap-2">
+              <span className="text-white">{m.role}: {m.provider}:{m.model}</span>
+              {m.priceState === 'PRICE_UNKNOWN'
+                ? <span className="text-[#FF6B6B] font-bold">PRICE UNKNOWN — EXECUTION BLOCKED</span>
+                : m.priceState === 'PRICE_STALE'
+                  ? <span className="text-[#FF6B6B] font-bold">PRICE STALE — EXECUTION BLOCKED</span>
+                  : <span className="text-[#C9CCE3]">in ${m.price.input}/M · out ${m.price.output}/M{m.price.cachedInput !== null ? ` · cached $${m.price.cachedInput}/M` : ''}{m.price.unit === 'chars' ? ' (per M chars)' : ''} · {m.price.tier}</span>}
+            </div>
+            <div className="text-[10px] text-[#8E94B8]">
+              est. max {usd(m.estimatedMaxUsd)} for a 4,000-character task · {m.eligibility === 'ELIGIBLE' ? <span className="text-[#5FE3A1]">ELIGIBLE</span> : <span className="text-[#E8A845]">{m.eligibility}</span>}
+              {m.price?.derivedFrom ? ` · derived from ${m.price.derivedFrom}` : ''}{m.price?.versionKey ? ` · ${m.price.versionKey}` : ''}
+            </div>
+          </div>
+        ))}
+        {status.pricing.recentChanges.length > 0 && (
+          <div className="pt-1">
+            <div className="text-[10px] font-mono uppercase text-[#6A7097]">Recent price changes</div>
+            {status.pricing.recentChanges.slice(0, 10).map((c: any, i: number) => (
+              <p key={i} className="text-[10px] font-mono text-[#8E94B8]">{c.detectedAt} · {c.changeType} · {c.provider}:{c.modelId}{c.oldVersion ? ` v${c.oldVersion}→v${c.newVersion ?? '∅'}` : ''}</p>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card icon={Wallet} title="Budget reservations">
+        <p className="text-[11px] font-mono text-[#C9CCE3]">In flight: {status.reservations.inFlightCalls} call(s) holding {usd(status.reservations.inFlightReservedUsd)}</p>
+        <p className="text-[11px] font-mono text-[#C9CCE3]">Held for reconciliation (timeout / unknown): {status.reservations.heldForReconciliationCalls} call(s), {usd(status.reservations.heldForReconciliationUsd)} — never released automatically</p>
+        <p className="text-[11px] font-mono text-[#8E94B8]">Remaining after reservations: today {usd(status.remaining.globalTodayUsd)} · month {usd(status.remaining.globalMonthUsd)}</p>
       </Card>
 
       <Card icon={ShieldAlert} title="Needs an operator — ambiguous paid calls (never retried automatically)">

@@ -39,6 +39,13 @@ export const REAL_PAID_HOSTS = [
   'api.elevenlabs.io',
 ];
 
+/**
+ * Provider CONTROL-PLANE hosts: documentation and pricing pages the catalog
+ * reads. Free, but still external provider network — unreachable under test
+ * unless SYNTHOS_LIVE_METADATA_TESTS=true.
+ */
+export const PROVIDER_METADATA_HOSTS = ['platform.openai.com', 'developers.openai.com', 'openai.com', 'ai.google.dev'];
+
 export interface SpendPermit {
   usageId: string;
   provider: string;
@@ -70,6 +77,16 @@ export function currentPermit(): SpendPermit | undefined {
 
 export function isTestMode(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.VITEST === 'true' || env.NODE_ENV === 'test';
+}
+
+/** Free provider metadata/docs GETs under test. Separate from, and never implying, paid inference. */
+export function liveMetadataTestsAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.SYNTHOS_LIVE_METADATA_TESTS === 'true';
+}
+
+export function isProviderMetadataHost(host: string): boolean {
+  const h = host.toLowerCase().replace(/:\d+$/, '');
+  return PROVIDER_METADATA_HOSTS.some((p) => h === p || h.endsWith(`.${p}`));
 }
 
 export function liveProviderTestsAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -136,11 +153,25 @@ export function installPaidEndpointGuard(): void {
     }
     const method = String(init?.method || (typeof input === 'object' && input && 'method' in input ? (input as any).method : 'GET') || 'GET');
 
-    if (isTestMode() && isRealPaidHost(url.hostname) && !liveProviderTestsAllowed()) {
-      throw new PaidEndpointBlockedError(
-        'TEST_MODE_REAL_PROVIDER_BLOCKED',
-        `Real provider endpoint ${url.host} is unreachable under test. Set SYNTHOS_LIVE_PROVIDER_TESTS=true and SYNTHOS_LIVE_TEST_BUDGET_USD to run live-provider tests.`,
-      );
+    // UNDER TEST, NO EXTERNAL PROVIDER NETWORK BY DEFAULT.
+    //   paid inference on a real host  → SYNTHOS_LIVE_PROVIDER_TESTS + budget
+    //   free metadata on a provider host (GET /models, pricing docs)
+    //                                  → SYNTHOS_LIVE_METADATA_TESTS
+    // The two flags are independent: neither implies the other.
+    if (isTestMode() && (isRealPaidHost(url.hostname) || isProviderMetadataHost(url.hostname))) {
+      const paid = isRealPaidHost(url.hostname) && isPaidRequest(url, method);
+      if (paid && !liveProviderTestsAllowed()) {
+        throw new PaidEndpointBlockedError(
+          'TEST_MODE_REAL_PROVIDER_BLOCKED',
+          `Real provider endpoint ${url.host} is unreachable under test. Set SYNTHOS_LIVE_PROVIDER_TESTS=true and SYNTHOS_LIVE_TEST_BUDGET_USD to run live paid-provider tests.`,
+        );
+      }
+      if (!paid && !liveMetadataTestsAllowed()) {
+        throw new PaidEndpointBlockedError(
+          'TEST_MODE_PROVIDER_METADATA_BLOCKED',
+          `Provider host ${url.host} is unreachable under test. Set SYNTHOS_LIVE_METADATA_TESTS=true to run live metadata tests (free GETs only).`,
+        );
+      }
     }
 
     if (!isPaidRequest(url, method)) return original(input, init);

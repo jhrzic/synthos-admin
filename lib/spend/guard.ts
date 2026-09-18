@@ -104,36 +104,81 @@ function round6(n: number): number {
   return Math.round(n * 1e6) / 1e6;
 }
 
-/** Maximum cost of this call, before dispatch. null = cannot be estimated. */
-export function estimateMaxCostUsd(req: PaidCallRequest, price: ModelPrice | null, policy: SpendPolicy): { usd: number | null; inputTokens: number | null } {
-  if (req.provider === 'antigravity') {
-    // A managed agent's consumption is decided by the remote agent. The
-    // provider-side bound is max_total_tokens; the SynthOS-side bound is the
-    // per-run ceiling. With a configured token price the estimate is the
-    // smaller of the two; without one, the ceiling IS the reservation.
-    const byTokens = price && price.unit === 'tokens'
-      ? (policy.antigravity.maxTotalTokens * Math.max(price.inputPerMillion, price.outputPerMillion)) / 1e6
-      : null;
-    const ceiling = policy.antigravity.perRunCeilingUsd;
-    return { usd: round6(byTokens === null ? ceiling : Math.min(byTokens, ceiling)), inputTokens: estimateTokensFromChars(req.inputChars) };
-  }
+/**
+ * Provider overshoot allowance for managed-agent runs. Google documents
+ * max_total_tokens as best-effort ("actual usage may slightly exceed it"), so
+ * the reservation assumes up to 20% over.
+ */
+export const ANTIGRAVITY_OVERSHOOT_MARGIN = 1.2;
+/** Below this many tokens an Antigravity run cannot do useful work; refused rather than sent. */
+export const ANTIGRAVITY_MIN_TOKENS = 1_000;
+
+/** The price snapshot a call is reserved with, stored on its usage row. */
+export interface PriceSnapshot {
+  versionKey: string;
+  unit: 'tokens' | 'chars';
+  input: number;
+  output: number;
+  cachedInput: number | null;
+  long: { thresholdTokens: number | null; input: number; output: number; cachedInput: number | null } | null;
+  derivedFrom: string | null;
+}
+
+export function snapshotOf(price: ModelPrice): PriceSnapshot {
+  return {
+    versionKey: price.versionKey, unit: price.unit,
+    input: price.inputPerMillion, output: price.outputPerMillion, cachedInput: price.cachedInputPerMillion ?? null,
+    long: price.long ? { thresholdTokens: price.long.thresholdTokens, input: price.long.inputPerMillion, output: price.long.outputPerMillion, cachedInput: price.long.cachedInputPerMillion ?? null } : null,
+    derivedFrom: price.derivedFrom ?? null,
+  };
+}
+
+/**
+ * Maximum cost of this call, before dispatch, from the catalog price. null =
+ * cannot be estimated. For Antigravity it also returns the token cap to send,
+ * chosen so that even a 20% overshoot stays within the per-run ceiling.
+ */
+export function estimateMaxCostUsd(req: PaidCallRequest, price: ModelPrice | null, policy: SpendPolicy): { usd: number | null; inputTokens: number | null; maxTotalTokens?: number; code?: string } {
   if (!price) return { usd: null, inputTokens: null };
+  if (req.provider === 'antigravity') {
+    if (price.unit !== 'tokens') return { usd: null, inputTokens: null };
+    const rates = [price.inputPerMillion, price.outputPerMillion, price.long?.inputPerMillion ?? 0, price.long?.outputPerMillion ?? 0];
+    const maxRate = Math.max(...rates);
+    if (!(maxRate > 0)) return { usd: null, inputTokens: null };
+    const affordable = Math.floor((policy.antigravity.perRunCeilingUsd * 1e6) / (maxRate * ANTIGRAVITY_OVERSHOOT_MARGIN));
+    const cap = Math.min(policy.antigravity.maxTotalTokens, affordable);
+    if (cap < ANTIGRAVITY_MIN_TOKENS) return { usd: null, inputTokens: null, code: 'CEILING_TOO_LOW' };
+    return { usd: round6((cap * maxRate * ANTIGRAVITY_OVERSHOOT_MARGIN) / 1e6), inputTokens: estimateTokensFromChars(req.inputChars), maxTotalTokens: cap };
+  }
   if (price.unit === 'chars') return { usd: round6((req.inputChars * price.inputPerMillion) / 1e6), inputTokens: null };
   const inputTokens = estimateTokensFromChars(req.inputChars);
   const out = req.maxOutputTokens ?? policy.task.maxOutputTokens;
-  return { usd: round6((inputTokens * price.inputPerMillion + out * price.outputPerMillion) / 1e6), inputTokens };
+  // Long-context rates whenever the threshold is unknown or could be crossed.
+  const useLong = !!price.long && (price.long.thresholdTokens === null || inputTokens > price.long.thresholdTokens);
+  const inRate = useLong ? price.long!.inputPerMillion : price.inputPerMillion;
+  const outRate = useLong ? price.long!.outputPerMillion : price.outputPerMillion;
+  return { usd: round6((inputTokens * inRate + out * outRate) / 1e6), inputTokens };
 }
 
-/** Actual cost from provider-reported tokens only. null when it cannot be computed reliably. */
-export function actualCostUsd(provider: string, price: ModelPrice | null, u: NormalizedUsage | null | undefined): number | null {
-  if (!price || !u || price.unit !== 'tokens') return null;
-  if (provider === 'antigravity') return null; // no documented per-token split for managed-agent runs
+/**
+ * Actual cost from provider-reported tokens and the snapshot the call was
+ * reserved with — never from today's price, so a later price change does not
+ * rewrite history. null when it cannot be computed reliably.
+ */
+export function actualCostUsd(provider: string, snap: PriceSnapshot | null, u: NormalizedUsage | null | undefined): number | null {
+  if (!snap || !u || snap.unit !== 'tokens') return null;
   const input = u.inputTokens; const output = u.outputTokens;
   if (typeof input !== 'number' || typeof output !== 'number') return null;
+  let rates = { input: snap.input, output: snap.output, cachedInput: snap.cachedInput };
+  if (snap.long) {
+    if (snap.long.thresholdTokens === null) return null; // which rate applied is not knowable
+    if (input > snap.long.thresholdTokens) rates = { input: snap.long.input, output: snap.long.output, cachedInput: snap.long.cachedInput };
+  }
   const cached = typeof u.cachedTokens === 'number' ? u.cachedTokens : 0;
-  if (cached > 0 && typeof price.cachedInputPerMillion !== 'number') return null; // would be a guess
-  const cachedPrice = price.cachedInputPerMillion ?? price.inputPerMillion;
-  return round6(((input - cached) * price.inputPerMillion + cached * cachedPrice + output * price.outputPerMillion) / 1e6);
+  if (cached > 0 && rates.cachedInput === null) return null; // would be a guess
+  // Managed-agent runs also bill tool fees the usage block does not break out.
+  if (provider === 'antigravity') return null;
+  return round6(((input - cached) * rates.input + cached * (rates.cachedInput ?? rates.input) + output * rates.output) / 1e6);
 }
 
 let dryRunDepth = 0;
@@ -155,7 +200,7 @@ function block(req: PaidCallRequest, attempt: number, code: string, reason: stri
 }
 
 /** Pre-dispatch checks and reservation. Returns a refusal, or the reserved row id and estimate. */
-export function authorizePaidCall(req: PaidCallRequest): { permitted: false; usageId: string; status: 'BLOCKED'; code: string; reason: string; estimatedCostUsd: number | null } | { permitted: true; usageId: string; estimatedCostUsd: number; tier: string; attempt: number } {
+export function authorizePaidCall(req: PaidCallRequest): { permitted: false; usageId: string; status: 'BLOCKED'; code: string; reason: string; estimatedCostUsd: number | null } | { permitted: true; usageId: string; estimatedCostUsd: number; tier: string; attempt: number; maxTotalTokens?: number } {
   const policy = getSpendPolicy();
   const prior = listUsageForKey(req.idempotencyKey);
   const attempt = prior.length ? Math.max(...prior.map((r) => r.attempt)) + 1 : 1;
@@ -173,10 +218,18 @@ export function authorizePaidCall(req: PaidCallRequest): { permitted: false; usa
   }
 
   const price = getModelPrice(req.provider, req.model);
-  const tier = req.provider === 'antigravity' ? (price ? costTierFor(price, policy) : 'STANDARD') : costTierFor(price, policy);
+  if (!price) {
+    return block(req, attempt, 'PRICE_UNKNOWN', `The pricing catalog has no current price for ${req.provider}:${req.model}, so its cost cannot be bounded. PRICE UNKNOWN — EXECUTION BLOCKED.`);
+  }
+  if (price.ageHours === null || price.ageHours > policy.pricing.maxAgeHours) {
+    return block(req, attempt, 'PRICE_STALE', `The price for ${req.provider}:${req.model} was last confirmed ${price.ageHours === null ? 'never' : `${Math.round(price.ageHours)}h ago`}; prices older than ${policy.pricing.maxAgeHours}h are not trusted for a ceiling. Refresh pricing in Master Admin → Spend Control.`);
+  }
+  const tier = costTierFor(price, policy);
   const est = estimateMaxCostUsd(req, price, policy);
   if (est.usd === null) {
-    return block(req, attempt, 'PRICING_UNKNOWN', `No price is configured for ${req.provider}:${req.model}, so its cost cannot be bounded. Add it in Master Admin → Spend Control.`);
+    return est.code === 'CEILING_TOO_LOW'
+      ? block(req, attempt, 'CEILING_TOO_LOW', `At ${req.model}'s price the per-run ceiling of $${policy.antigravity.perRunCeilingUsd} allows fewer than ${ANTIGRAVITY_MIN_TOKENS} tokens.`)
+      : block(req, attempt, 'PRICE_UNKNOWN', `${req.provider}:${req.model} has no usable price for this kind of call. PRICE UNKNOWN — EXECUTION BLOCKED.`);
   }
   const maxTier = req.maxTier ?? policy.task.maxTier;
   if (tier === 'UNKNOWN' || tierRank(tier as CostTier) > tierRank(maxTier)) {
@@ -190,6 +243,12 @@ export function authorizePaidCall(req: PaidCallRequest): { permitted: false; usa
     return block(req, attempt, 'APPROVAL_REQUIRED_EXPENSIVE', `Estimated maximum $${est.usd.toFixed(4)} is above the $${policy.approvalThresholdUsd.toFixed(4)} approval threshold and no human approval accompanies it.`, { estimatedCostUsd: est.usd, tier });
   }
 
+  // Everything from here to the reservation insert is ONE atomic unit: under
+  // BEGIN IMMEDIATE no other writer — another process included — can reserve
+  // budget between this check and this insert.
+  const txn = dryRunDepth === 0;
+  if (txn) getDatabase().exec('BEGIN IMMEDIATE');
+  try {
   // --- NO_PAID_FALLBACK -----------------------------------------------------
   // One logical execution uses one model. A later attempt under the same key
   // on a different model is a fallback, and is refused whatever the reason.
@@ -231,7 +290,7 @@ export function authorizePaidCall(req: PaidCallRequest): { permitted: false; usa
   }
 
   const usageId = newUsageId();
-  if (dryRunDepth > 0) return { permitted: true, usageId, estimatedCostUsd: est.usd, tier, attempt };
+  if (dryRunDepth > 0) return { permitted: true, usageId, estimatedCostUsd: est.usd, tier, attempt, maxTotalTokens: est.maxTotalTokens };
   insertUsageRow({
     usage_id: usageId, provider: req.provider, model: req.model, call_site: req.callSite,
     workspace_id: req.workspaceId ?? null, task_id: req.taskId ?? null, correlation_id: req.correlationId ?? null,
@@ -239,9 +298,18 @@ export function authorizePaidCall(req: PaidCallRequest): { permitted: false; usa
     input_chars: req.inputChars, estimated_input_tokens: est.inputTokens,
     max_output_tokens: req.provider === 'antigravity' ? policy.antigravity.maxTotalTokens : (req.maxOutputTokens ?? policy.task.maxOutputTokens),
     estimated_cost_usd: est.usd, cost_tier: tier, approval_id: req.approvalId ?? null,
+    price_version: price.versionKey, price_snapshot_json: JSON.stringify(snapshotOf(price)),
     created_at: new Date().toISOString(),
   });
-  return { permitted: true, usageId, estimatedCostUsd: est.usd, tier, attempt };
+  if (txn) getDatabase().exec('COMMIT');
+  return { permitted: true, usageId, estimatedCostUsd: est.usd, tier, attempt, maxTotalTokens: est.maxTotalTokens };
+  } catch (err) {
+    if (txn) { try { getDatabase().exec('ROLLBACK'); } catch { /* not in a transaction */ } }
+    throw err;
+  } finally {
+    // A refusal returned from inside the block leaves the transaction open; close it.
+    if (txn) { try { getDatabase().exec('COMMIT'); } catch { /* already committed or rolled back */ } }
+  }
 }
 
 /**
@@ -277,7 +345,12 @@ function classify(permit: SpendPermit, outcome: PaidCallOutcome<unknown> | null,
  * Run one paid call through the guard. `fn` must make at most one paid
  * request; the network layer refuses a second.
  */
-export async function guardedPaidCall<T>(req: PaidCallRequest, fn: () => Promise<PaidCallOutcome<T>>): Promise<GuardResult<T>> {
+/** What the guard grants a call: for Antigravity, the token cap to send. */
+export interface PaidCallGrant {
+  maxTotalTokens?: number;
+}
+
+export async function guardedPaidCall<T>(req: PaidCallRequest, fn: (grant: PaidCallGrant) => Promise<PaidCallOutcome<T>>): Promise<GuardResult<T>> {
   const auth = authorizePaidCall(req);
   if (!auth.permitted) {
     recordGuardEvent(req, 'BLOCKED', auth.code, auth.reason);
@@ -297,15 +370,16 @@ export async function guardedPaidCall<T>(req: PaidCallRequest, fn: () => Promise
   let outcome: PaidCallOutcome<T> | null = null;
   let threw: unknown = null;
   try {
-    outcome = await runWithPermit(permit, fn);
+    outcome = await runWithPermit(permit, () => fn({ maxTotalTokens: auth.maxTotalTokens }));
   } catch (err) {
     threw = err;
   }
 
   const status = classify(permit, outcome, !!threw);
-  const price = getModelPrice(req.provider, req.model);
+  const reserved = getDatabase().prepare('SELECT price_snapshot_json FROM provider_usage WHERE usage_id = ?').get(auth.usageId) as any;
+  const snap: PriceSnapshot | null = reserved?.price_snapshot_json ? JSON.parse(reserved.price_snapshot_json) : null;
   const u = outcome?.usage ?? null;
-  const actual = status === 'SUCCESS' || status === 'KNOWN_FAILURE' ? actualCostUsd(req.provider, price, u) : null;
+  const actual = status === 'SUCCESS' || status === 'KNOWN_FAILURE' ? actualCostUsd(req.provider, snap, u) : null;
   const leaveInFlight = req.asyncSettlement && status === 'SUCCESS';
 
   patchUsageRow(auth.usageId, {
@@ -334,8 +408,8 @@ export function settleAsyncUsage(providerRequestId: string, status: 'SUCCESS' | 
   try {
     const row = getDatabase().prepare(`SELECT * FROM provider_usage WHERE provider_request_id = ? AND status = 'DISPATCHED'`).get(providerRequestId) as any;
     if (!row) return;
-    const price = getModelPrice(row.provider, row.model);
-    const actual = actualCostUsd(row.provider, price, usage);
+    const snap: PriceSnapshot | null = row.price_snapshot_json ? JSON.parse(row.price_snapshot_json) : null;
+    const actual = actualCostUsd(row.provider, snap, usage);
     patchUsageRow(row.usage_id, {
       status,
       input_tokens: usage?.inputTokens ?? row.input_tokens,
