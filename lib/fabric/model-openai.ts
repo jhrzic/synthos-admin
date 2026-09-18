@@ -42,6 +42,7 @@ const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 import { scrubSecrets as sharedScrubSecrets } from '../redact';
 import { guardedPaidCall, normalizeOpenAiUsage } from '../spend/guard';
 import { outputCeiling, requestKey, type SpendContext } from '../spend/adapters';
+import { openAiTermination, type ProviderTermination } from './output-contract';
 
 export const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 
@@ -78,6 +79,8 @@ export interface GenerateViaOpenAiResult {
   lastProviderError: string | null;
   /** Real wall-clock duration of the successful call, or of the last attempt when all failed. */
   latencyMs: number | null;
+  /** How the provider says the response ended (Responses API status / incomplete_details). */
+  termination?: ProviderTermination;
   /** The spend-guard outcome. `blocked` means nothing was sent. */
   spendGuard?: { usageId: string; status: string; blocked: boolean; code?: string; estimatedCostUsd: number | null };
 }
@@ -160,6 +163,7 @@ export async function generateViaOpenAI(params: GenerateViaOpenAiParams): Promis
   let hadProviderError = false;
   let lastProviderError: string | null = null;
   let latencyMs: number | null = null;
+  let termination: ProviderTermination = { status: 'NOT_REPORTED', providerStatus: null, reason: null };
 
   if (!m) {
     return { output, modelUsed, providerUsageMetadata, hadProviderError: true, lastProviderError: 'No model was selected for this OpenAI call.', latencyMs };
@@ -211,6 +215,7 @@ export async function generateViaOpenAI(params: GenerateViaOpenAiParams): Promis
         }
 
         if (payload?.usage) providerUsageMetadata = payload.usage;
+        termination = openAiTermination(payload, maxOutputTokens);
         const usage = normalizeOpenAiUsage(payload?.usage, typeof payload?.id === 'string' ? payload.id : null);
         const text = extractOpenAiText(payload);
         if (text && text.trim().length > 0) {
@@ -219,7 +224,7 @@ export async function generateViaOpenAI(params: GenerateViaOpenAiParams): Promis
           // These differ whenever an alias resolves to a dated snapshot, and
           // the receipt must attest to what actually executed.
           modelUsed = typeof payload?.model === 'string' && payload.model.trim() ? payload.model : m;
-          return { ok: true, usage };
+          return { ok: true, usage, termination: `${termination.status}${termination.providerStatus ? `:${termination.providerStatus}` : ''}${termination.reason ? `:${termination.reason}` : ''}` };
         }
         // A 200 with no text is a real outcome, not a silent success.
         lastProviderError = `OpenAI model "${m}" returned a successful response containing no text.`;
@@ -248,5 +253,5 @@ export async function generateViaOpenAI(params: GenerateViaOpenAiParams): Promis
 
   hadProviderError = !output;
   if (hadProviderError && lastProviderError) console.warn('[OpenAI]', lastProviderError);
-  return { output, modelUsed, providerUsageMetadata, hadProviderError, lastProviderError, latencyMs, spendGuard: guard };
+  return { output, modelUsed, providerUsageMetadata, hadProviderError, lastProviderError, latencyMs, termination, spendGuard: guard };
 }

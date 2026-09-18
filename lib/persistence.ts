@@ -88,6 +88,14 @@ export interface CanonicalReceiptPayload {
   aegisDecision: string;
   aegisMethod: string;
   createdAt: string;
+  /**
+   * What the task's outcome was, stated in the signed payload so a receipt
+   * can never be read as "completed" when content verification failed.
+   * Absent on receipts signed before this field existed.
+   */
+  outcome?: 'COMPLETED' | 'INCOMPLETE' | 'VERIFICATION_FAILED';
+  /** Exactly which verification scopes this receipt attests to, e.g. "integrity=PASS; completion=FAIL; …". */
+  verificationScope?: string;
 }
 
 export interface AegisCheckResult {
@@ -309,7 +317,12 @@ export function getDatabase(): any {
         disk_path TEXT NOT NULL,
         content_hash TEXT NOT NULL,
         size_bytes INTEGER NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        -- ACTIVE: may enter searchable memory. QUARANTINED: kept as evidence
+        -- (file, hash, receipts, events untouched) but never indexed.
+        retrieval_status TEXT NOT NULL DEFAULT 'ACTIVE',
+        retrieval_status_reason TEXT,
+        retrieval_status_at TEXT
       );
 
       CREATE TABLE IF NOT EXISTS quality_reviews (
@@ -857,6 +870,14 @@ export function getDatabase(): any {
     // states: the developer's live database already had these columns (added
     // out-of-band), while a fresh install created from the CREATE TABLE did
     // not have them at all. Both paths converge here.
+    // Artifact retrieval status (see the CREATE TABLE). Existing installs gain
+    // the columns; every existing artifact starts ACTIVE, as it effectively was.
+    const artifactCols = dbInstance.prepare("PRAGMA table_info(artifacts)").all() as Array<{ name: string }>;
+    if (artifactCols.length > 0 && !artifactCols.some((c) => c.name === 'retrieval_status')) {
+      dbInstance.exec("ALTER TABLE artifacts ADD COLUMN retrieval_status TEXT NOT NULL DEFAULT 'ACTIVE'");
+      dbInstance.exec("ALTER TABLE artifacts ADD COLUMN retrieval_status_reason TEXT");
+      dbInstance.exec("ALTER TABLE artifacts ADD COLUMN retrieval_status_at TEXT");
+    }
     const externalExecCols = dbInstance.prepare("PRAGMA table_info(external_executions)").all() as Array<{ name: string }>;
     if (externalExecCols.length > 0 && !externalExecCols.some((c) => c.name === 'next_poll_at')) {
       dbInstance.exec("ALTER TABLE external_executions ADD COLUMN next_poll_at TEXT");
@@ -1471,7 +1492,7 @@ export const ORCHESTRATOR_ELIGIBLE_STATUSES = ['TODO', 'READY'] as const;
  * or policy said no, and an unattended loop that retried either would be
  * converting a refusal into a delay.
  */
-export const TASK_TERMINAL_STATUSES = ['DONE', 'VERIFIED', 'FAILED', 'BLOCKED', 'REJECTED', 'CANCELLED'] as const;
+export const TASK_TERMINAL_STATUSES = ['DONE', 'VERIFIED', 'FAILED', 'INCOMPLETE', 'VERIFICATION_FAILED', 'BLOCKED', 'REJECTED', 'CANCELLED'] as const;
 
 export interface OrchestratorTaskRow {
   task_id: string;

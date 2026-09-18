@@ -584,6 +584,8 @@ export async function advanceTask(task: OrchestratorTaskRow): Promise<Orchestrat
       taskId: task.task_id,
       // Stable per task: a requeue, restart or approval resume can never pay twice.
       spendIdempotencyKey: `orchestration:${task.task_id}`,
+      // The task's own output contract, stored with the task (parameters_json).
+      outputContract: modelTaskContract(task),
       taskTitle: task.title ?? task.task_id,
       description: task.description ?? '',
       assignedAgent: task.assigned_agent ?? 'scribe',
@@ -593,6 +595,21 @@ export async function advanceTask(task: OrchestratorTaskRow): Promise<Orchestrat
 
     const body: any = kernelResult.body || {};
     const invoked = ctx.getInvocations().map((i) => i.name);
+    // ADVANCED only when the task really reached DONE — i.e. every
+    // verification its contract requires passed. A 200 whose content failed
+    // verification (INCOMPLETE / VERIFICATION_FAILED) is a terminal failure:
+    // the work happened and was paid for, and re-running it would pay again.
+    if (kernelResult.status === 200 && body?.status !== 'DONE') {
+      return finish({
+        ...base, outcome: 'FAILED',
+        reason: `Model task ended ${body?.status ?? 'without a status'}: ${body?.review?.evidence?.scopeStatement ?? 'verification did not pass'}.`,
+        providerOrTool: invoked[0] ?? body?.modelUsed ?? null,
+        artifactId: body?.artifact?.id ?? null,
+        receiptId: body?.receipt?.receiptId ?? null,
+        aegisDecision: body?.review?.decision ?? null,
+        finalStatus: body?.status ?? 'FAILED', brainContextNotes: brain.count,
+      });
+    }
     if (kernelResult.status === 200) {
       return finish({
         ...base, outcome: 'ADVANCED',
@@ -604,6 +621,12 @@ export async function advanceTask(task: OrchestratorTaskRow): Promise<Orchestrat
         finalStatus: body?.status ?? 'DONE',
         brainContextNotes: brain.count,
       });
+    }
+    // An invalid output contract is refused by the kernel before any task
+    // record or provider call; the task is closed here so it is not left RUNNING.
+    if (kernelResult.status === 400 && body?.reason === 'INVALID_OUTPUT_CONTRACT') {
+      updateTaskStatus(task.task_id, 'FAILED', undefined, workspaceId);
+      return finish({ ...base, outcome: 'FAILED', reason: String(body?.error), finalStatus: 'FAILED' });
     }
     // SPEND GUARD — a "not now" refusal (switch off, budget spent, concurrency
     // full) means nothing ran. The task waits for a later tick instead of
@@ -771,4 +794,16 @@ export async function orchestrationTickForScheduler(): Promise<OrchestrationTick
     health.lastError = { at: new Date().toISOString(), message: scrubSecrets(err?.message || String(err), 300) };
     return null;
   }
+}
+
+
+/** A model task's output contract, from its stored parameters. Absent → NARRATIVE (the kernel's default). */
+function modelTaskContract(task: OrchestratorTaskRow): unknown {
+  if (!task.parameters_json) return undefined;
+  // Passed through RAW: the kernel validates it and refuses a malformed
+  // contract. Silently treating a bad contract as NARRATIVE would run the
+  // persona on a task that asked for something else.
+  let p: unknown;
+  try { p = JSON.parse(task.parameters_json); } catch { return { mode: '__UNPARSEABLE_PARAMETERS__' }; }
+  return p && typeof p === 'object' ? (p as Record<string, unknown>).outputContract : undefined;
 }

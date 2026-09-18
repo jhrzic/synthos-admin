@@ -48,6 +48,8 @@
 // ---------------------------------------------------------------------------
 
 import crypto from 'node:crypto';
+import { normalizeOutputContract, buildContractPrompt, verifyContent, type OutputContract, type ProviderTermination } from './output-contract';
+import { quarantineArtifact } from '../memory-index';
 import {
   createInitialTask,
   updateTaskStatus,
@@ -249,7 +251,16 @@ export async function executeAgentTask(
       inputs = "",
       sourceUrl = "",
       spendIdempotencyKey,
+      outputContract: rawOutputContract,
     } = (rawBody || {}) as ExecuteAgentTaskInput;
+
+    // THE TASK CONTRACT decides the output's shape, never the persona. An
+    // invalid contract is refused before any provider call (no spend).
+    const contractCheck = normalizeOutputContract(rawOutputContract);
+    if (!contractCheck.ok) {
+      return { status: 400, body: { success: false, status: "FAILED", reason: "INVALID_OUTPUT_CONTRACT", error: contractCheck.error, taskId } };
+    }
+    const outputContract: OutputContract = contractCheck.contract;
 
     console.log(`[Agent Execution] Starting execution for Task "${taskTitle}" (${taskId}) via ${assignedAgent} / ${assignedModel}...`);
     const startTime = Date.now();
@@ -394,6 +405,7 @@ export async function executeAgentTask(
     let lastProviderError: string | null = null;
     let hadProviderError = false;
     let providerUsageMetadata: any = null;
+    let providerTermination: ProviderTermination = { status: 'NOT_REPORTED', providerStatus: null, reason: null };
 
     // Step 1: Execute tool/model logic based on role against the real,
     // classified provider.
@@ -432,7 +444,12 @@ export async function executeAgentTask(
     const invocationName = provider === "OPENAI" ? "model.openai" : "model.gemini";
 
     await ctx.invoke(invocationName, async () => {
-      const rolePrompt = buildAgentRolePrompt({ assignedAgent, taskTitle, description, sourceUrl, inputs });
+      // A LITERAL / JSON_OBJECT contract bypasses the persona template
+      // entirely: the persona brief is what overrode the literal instruction
+      // in the first live proof. NARRATIVE keeps the persona, as before.
+      const rolePrompt = outputContract.mode === 'NARRATIVE'
+        ? buildAgentRolePrompt({ assignedAgent, taskTitle, description, sourceUrl, inputs })
+        : buildContractPrompt(outputContract, taskTitle, description);
       // No exclude-list needed here: the provider identity gate above already
       // fixed the provider before this point, so every candidate in this
       // queue is guaranteed to belong to it.
@@ -453,6 +470,7 @@ export async function executeAgentTask(
       if (genResult.providerUsageMetadata) providerUsageMetadata = genResult.providerUsageMetadata;
       hadProviderError = genResult.hadProviderError;
       lastProviderError = genResult.lastProviderError;
+      if (genResult.termination) providerTermination = genResult.termination;
 
       // ---------------------------------------------------------------------
       // PROVIDER LEDGER TRUTH.
@@ -561,6 +579,10 @@ export async function executeAgentTask(
         provider: PROVIDER_RECEIPT_IDENTITY[provider],
         outputLength: executionOutput.length,
         usage: providerUsageMetadata || null,
+        // How the PROVIDER says the response ended — the fact that decides
+        // whether this output is complete, captured as reported.
+        termination: providerTermination,
+        outputContract: outputContract.mode,
       },
     });
 
@@ -614,8 +636,24 @@ export async function executeAgentTask(
     // Temporary state: AWAITING_VERIFICATION before Aegis inspection
     updateTaskStatus(taskId, "AWAITING_VERIFICATION", undefined, resolvedWorkspaceId);
 
-    // Run real deterministic Aegis verification against ledger and persisted disk artifact
-    const aegisResult = runDeterministicAegisVerification(taskId, executionOutput);
+    // AEGIS, three scopes. The deterministic audit is the INTEGRITY scope
+    // (artifact exists, hash matches, ledger sequence) and proves nothing
+    // about whether the answer is right. COMPLETION (did the provider finish)
+    // and INSTRUCTION_COMPLIANCE (does the output satisfy the task contract)
+    // are evaluated beside it. The recorded decision is VERIFIED only when
+    // every scope the contract requires passed, and the review states the
+    // scopes explicitly.
+    const integrity = runDeterministicAegisVerification(taskId, executionOutput);
+    const content = verifyContent({ integrityDecision: integrity.decision, output: executionOutput, termination: providerTermination, contract: outputContract });
+    const aegisResult = {
+      ...integrity,
+      decision: content.decision,
+      method: `${integrity.method}+COMPLETION+INSTRUCTION_COMPLIANCE`,
+      checks: [...integrity.checks.map((c) => ({ ...c, check: `integrity:${c.check}` })), ...content.checks],
+      evidence: { ...integrity.evidence, verificationScopes: content.scopes, scopeStatement: content.scopeStatement, termination: providerTermination, outputContract },
+      // Integrity's own score is kept, but a content failure is not a "100".
+      score: content.decision === 'VERIFIED' ? integrity.score : 0,
+    };
 
     // Persist quality review to SQLite quality_reviews table
     const persistedReview = recordQualityReview({
@@ -644,6 +682,7 @@ export async function executeAgentTask(
           reviewId: persistedReview.review_id,
           decision: "VERIFIED",
           score: aegisResult.score,
+          verificationScopes: content.scopes,
           checks: aegisResult.checks,
         },
         createdAt: nowIso,
@@ -677,6 +716,8 @@ export async function executeAgentTask(
         artifactHash: persistedArtifact.content_hash,
         aegisDecision: aegisResult.decision,
         aegisMethod: aegisResult.method,
+        outcome: 'COMPLETED',
+        verificationScope: content.scopeStatement,
         createdAt: nowIso,
       };
 
@@ -798,6 +839,57 @@ export async function executeAgentTask(
           createdAt: nowIso,
         });
       }
+    } else if (content.taskStatus === "INCOMPLETE" || content.taskStatus === "VERIFICATION_FAILED") {
+      // INTEGRITY PASSED, CONTENT DID NOT. The artifact is real and intact, so
+      // it gets an integrity/audit receipt — but the signed payload states the
+      // outcome, so the receipt can never be read as a completed task. The
+      // task ends INCOMPLETE / VERIFICATION_FAILED (terminal, never DONE), the
+      // artifact is QUARANTINED (kept as evidence, excluded from searchable
+      // memory), and there is no KIL/knowledge promotion.
+      const outcome = content.taskStatus;
+      recordActivityEvent({
+        taskId,
+        expectedWorkspaceId: resolvedWorkspaceId,
+        eventType: outcome === "INCOMPLETE" ? "AEGIS_INCOMPLETE" : "AEGIS_INSTRUCTION_FAILED",
+        agentId: "aegis",
+        payload: {
+          reviewId: persistedReview.review_id,
+          decision: aegisResult.decision,
+          verificationScopes: content.scopes,
+          checks: aegisResult.checks,
+        },
+        createdAt: nowIso,
+      });
+
+      receiptId = `rcpt-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+      const auditPayload: CanonicalReceiptPayload = {
+        receiptId, taskId, reviewId: persistedReview.review_id, workspaceId: resolvedWorkspaceId, assignedAgent,
+        provider: PROVIDER_RECEIPT_IDENTITY[provider], modelUsed,
+        artifactId: persistedArtifact.artifact_id, artifactHash: persistedArtifact.content_hash,
+        aegisDecision: aegisResult.decision, aegisMethod: aegisResult.method,
+        outcome, verificationScope: content.scopeStatement, createdAt: nowIso,
+      };
+      const auditPayloadStr = canonicalizePayload(auditPayload);
+      const signed = signReceiptPayload(auditPayloadStr);
+      if (verifyReceiptSignature(auditPayloadStr, signed.signature, signed.publicKeyPem)) {
+        recordReceipt({ receiptId, taskId, reviewId: persistedReview.review_id, algorithm: signed.algorithm, publicKey: signed.publicKeyPem, payloadJson: auditPayloadStr, signature: signed.signature, createdAt: nowIso });
+        recordActivityEvent({
+          taskId, expectedWorkspaceId: resolvedWorkspaceId, eventType: "AUDIT_RECEIPT_CREATED", agentId: "guardian",
+          payload: { receiptId, algorithm: signed.algorithm, fingerprint: signed.fingerprint, outcome, verified: true },
+          createdAt: nowIso,
+        });
+      }
+
+      try {
+        quarantineArtifact({
+          workspaceId: resolvedWorkspaceId, artifactId: persistedArtifact.artifact_id, actor: "aegis",
+          reason: `Aegis ${outcome}: ${content.scopeStatement}`,
+        });
+      } catch (qErr: any) {
+        console.warn("[Memory Index] Quarantine failed:", qErr?.message || qErr);
+      }
+
+      updateTaskStatus(taskId, outcome, undefined, resolvedWorkspaceId);
     } else if (aegisResult.decision === "FAILED") {
       updateTaskStatus(taskId, "FAILED", undefined, resolvedWorkspaceId);
       recordActivityEvent({

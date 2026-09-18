@@ -10,6 +10,7 @@
 import crypto from 'node:crypto';
 import { guardedPaidCall, SpendBlockedError, normalizeGeminiUsage, contentChars, type PaidCallRequest } from './guard';
 import { getSpendPolicy, type PaidProvider } from './policy';
+import { geminiTermination } from '../fabric/output-contract';
 
 export interface SpendContext {
   callSite: string;
@@ -48,7 +49,8 @@ export async function guardedGeminiGenerate(ai: any, args: { model: string; cont
   const r = await guardedPaidCall(req, async () => {
     const response = await ai.models.generateContent({ ...args, config: { ...(args.config || {}), maxOutputTokens } });
     const text = typeof response?.text === 'string' ? response.text : '';
-    return { ok: !!text.trim(), value: response, usage: normalizeGeminiUsage(response?.usageMetadata, response?.responseId ?? null) };
+    const t = geminiTermination(response, maxOutputTokens);
+    return { ok: !!text.trim(), value: response, usage: normalizeGeminiUsage(response?.usageMetadata, response?.responseId ?? null), termination: `${t.status}${t.providerStatus ? `:${t.providerStatus}` : ''}${t.reason ? `:${t.reason}` : ''}` };
   });
   if (!r.permitted) throw new SpendBlockedError(r.code, r.reason);
   return r.outcome.value;

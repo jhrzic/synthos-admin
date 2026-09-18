@@ -8,7 +8,7 @@
 // virtual table); this module is the read/write service over it.
 // ---------------------------------------------------------------------------
 
-import { getDatabase } from './persistence';
+import { recordActivityEvent, getDatabase } from './persistence';
 import { getWorkspaceVaultEntry, listWorkspaceVaultEntries } from './vault';
 
 export interface MemorySearchResult {
@@ -32,6 +32,15 @@ export function indexVaultArtifact(workspaceId: string, artifactId: string): boo
   if (!entry || entry.content === null) return false;
 
   const db = getDatabase();
+  // Only ACTIVE artifacts may enter searchable memory. A QUARANTINED artifact
+  // (failed or incomplete output) stays on disk and in the artifacts table as
+  // evidence, but no index path — including reindexWorkspaceMemory — can
+  // bring it back into retrieval.
+  const status = db.prepare('SELECT retrieval_status FROM artifacts WHERE artifact_id = ?').get(artifactId) as { retrieval_status?: string } | undefined;
+  if (status && status.retrieval_status && status.retrieval_status !== 'ACTIVE') {
+    db.prepare(`DELETE FROM memory_index WHERE artifact_id = ? AND workspace_id = ?`).run(artifactId, workspaceId);
+    return false;
+  }
   db.prepare(`DELETE FROM memory_index WHERE artifact_id = ? AND workspace_id = ?`).run(artifactId, workspaceId);
   db.prepare(`
     INSERT INTO memory_index (workspace_id, artifact_id, title, content, source_path, updated_at)
@@ -313,4 +322,41 @@ export function searchWorkspaceMemoryScoped(
   } catch {
     return [];
   }
+}
+
+
+/**
+ * Take an artifact out of active retrieval without destroying it.
+ *
+ * The file, its content hash, its artifact row, receipts, reviews and events
+ * are all left exactly as they are — the evidence of what happened is
+ * preserved. The artifact is marked QUARANTINED with the reason, removed from
+ * the searchable index, and the decision is appended to the task's activity
+ * trail. Idempotent.
+ */
+export function quarantineArtifact(params: { workspaceId: string; artifactId: string; reason: string; actor: string }): { quarantined: boolean; alreadyQuarantined: boolean } {
+  const db = getDatabase();
+  const row = db.prepare('SELECT artifact_id, task_id, retrieval_status FROM artifacts WHERE artifact_id = ?').get(params.artifactId) as { artifact_id: string; task_id: string; retrieval_status: string } | undefined;
+  if (!row) return { quarantined: false, alreadyQuarantined: false };
+  const already = row.retrieval_status === 'QUARANTINED';
+  const now = new Date().toISOString();
+  if (!already) {
+    db.prepare(`UPDATE artifacts SET retrieval_status = 'QUARANTINED', retrieval_status_reason = ?, retrieval_status_at = ? WHERE artifact_id = ?`)
+      .run(params.reason.slice(0, 1000), now, params.artifactId);
+  }
+  db.prepare(`DELETE FROM memory_index WHERE artifact_id = ? AND workspace_id = ?`).run(params.artifactId, params.workspaceId);
+  if (!already) {
+    try {
+      recordActivityEvent({
+        taskId: row.task_id, expectedWorkspaceId: params.workspaceId, eventType: 'ARTIFACT_QUARANTINED', agentId: params.actor,
+        payload: { artifactId: params.artifactId, reason: params.reason, removedFromMemoryIndex: true, evidencePreserved: true },
+      });
+    } catch { /* the quarantine itself stands even if the event cannot be written */ }
+  }
+  return { quarantined: !already, alreadyQuarantined: already };
+}
+
+export function getArtifactRetrievalStatus(artifactId: string): { status: string; reason: string | null; at: string | null } | null {
+  const row = getDatabase().prepare('SELECT retrieval_status, retrieval_status_reason, retrieval_status_at FROM artifacts WHERE artifact_id = ?').get(artifactId) as any;
+  return row ? { status: row.retrieval_status, reason: row.retrieval_status_reason ?? null, at: row.retrieval_status_at ?? null } : null;
 }

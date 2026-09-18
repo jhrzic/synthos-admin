@@ -70,6 +70,8 @@ export interface UsageRow {
   approval_id: string | null;
   price_version: string | null;
   price_snapshot_json: string | null;
+  /** How the provider said the response ended. A billed SUCCESS can still be an INCOMPLETE answer. */
+  provider_termination: string | null;
   created_at: string;
   dispatched_at: string | null;
   completed_at: string | null;
@@ -112,6 +114,7 @@ export function ensureUsageTable(): void {
       approval_id TEXT,
       price_version TEXT,
       price_snapshot_json TEXT,
+      provider_termination TEXT,
       created_at TEXT NOT NULL,
       dispatched_at TEXT,
       completed_at TEXT,
@@ -135,6 +138,7 @@ export function ensureUsageTable(): void {
   const cols = (db.prepare('PRAGMA table_info(provider_usage)').all() as any[]).map((c) => c.name);
   if (!cols.includes('price_version')) db.exec('ALTER TABLE provider_usage ADD COLUMN price_version TEXT');
   if (!cols.includes('price_snapshot_json')) db.exec('ALTER TABLE provider_usage ADD COLUMN price_snapshot_json TEXT');
+  if (!cols.includes('provider_termination')) db.exec('ALTER TABLE provider_usage ADD COLUMN provider_termination TEXT');
   ensured = true;
 }
 

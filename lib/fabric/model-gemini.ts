@@ -15,7 +15,8 @@
 // ---------------------------------------------------------------------------
 
 import { GoogleGenAI } from '@google/genai';
-import { guardedGeminiGenerate, type SpendContext } from '../spend/adapters';
+import { guardedGeminiGenerate, outputCeiling, type SpendContext } from '../spend/adapters';
+import { geminiTermination, type ProviderTermination } from './output-contract';
 import { SpendBlockedError } from '../spend/guard';
 
 export interface GenerateViaGeminiParams {
@@ -34,6 +35,8 @@ export interface GenerateViaGeminiResult {
   lastProviderError: string | null;
   /** Set when the spend guard refused the call; nothing was sent. */
   spendBlockedCode?: string | null;
+  /** How the provider says the response ended (candidates[0].finishReason). */
+  termination?: ProviderTermination;
 }
 
 export async function generateViaGemini(params: GenerateViaGeminiParams): Promise<GenerateViaGeminiResult> {
@@ -46,6 +49,7 @@ export async function generateViaGemini(params: GenerateViaGeminiParams): Promis
   let hadProviderError = false;
   let lastProviderError: string | null = null;
   let spendBlockedCode: string | null = null;
+  let termination: ProviderTermination = { status: 'NOT_REPORTED', providerStatus: null, reason: null };
 
   if (!m) return { output, modelUsed, providerUsageMetadata, hadProviderError: true, lastProviderError: 'No model was selected for this Gemini call.' };
 
@@ -55,6 +59,7 @@ export async function generateViaGemini(params: GenerateViaGeminiParams): Promis
       httpOptions: { headers: { "User-Agent": "aistudio-build" } },
     });
     const resp = await guardedGeminiGenerate(ai, { model: m, contents, config: { temperature: 0.2 } }, params.spend);
+    termination = geminiTermination(resp, outputCeiling(params.spend));
     if (resp?.text && resp.text.trim().length > 0) {
       output = resp.text;
       modelUsed = m;
@@ -70,5 +75,5 @@ export async function generateViaGemini(params: GenerateViaGeminiParams): Promis
     console.warn(`[Gemini] '${m}':`, lastProviderError);
   }
 
-  return { output, modelUsed, providerUsageMetadata, hadProviderError, lastProviderError, spendBlockedCode };
+  return { output, modelUsed, providerUsageMetadata, hadProviderError, lastProviderError, spendBlockedCode, termination };
 }

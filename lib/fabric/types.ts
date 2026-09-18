@@ -26,6 +26,12 @@ export interface ExecuteAgentTaskInput {
    * logical execution.
    */
   spendIdempotencyKey?: string;
+  /**
+   * The task's OUTPUT CONTRACT (lib/fabric/output-contract.ts). NARRATIVE by
+   * default. LITERAL / JSON_OBJECT bypass the agent persona and are verified
+   * in code (Aegis INSTRUCTION_COMPLIANCE scope) before the task can be DONE.
+   */
+  outputContract?: unknown;
   taskTitle?: string;
   description?: string;
   assignedAgent?: string;

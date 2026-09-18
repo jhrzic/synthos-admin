@@ -85,6 +85,8 @@ export interface PaidCallOutcome<T> {
   usage?: NormalizedUsage | null;
   /** When the adapter knows the failure was a timeout that the network layer could not see (e.g. body read). */
   failureHint?: 'TIMEOUT' | null;
+  /** The provider's own report of how the response ended, e.g. "INCOMPLETE:incomplete:max_output_tokens". */
+  termination?: string | null;
 }
 
 export type GuardResult<T> =
@@ -401,6 +403,7 @@ export async function guardedPaidCall<T>(req: PaidCallRequest, fn: (grant: PaidC
     cached_tokens: u?.cachedTokens ?? null,
     reasoning_tokens: u?.reasoningTokens ?? null,
     total_tokens: u?.totalTokens ?? null,
+    provider_termination: outcome?.termination ?? null,
     actual_cost_usd: status === 'PRE_DISPATCH_FAILURE' || status === 'PROVIDER_REJECTION' ? 0 : actual,
     actual_cost_state: status === 'PRE_DISPATCH_FAILURE' || status === 'PROVIDER_REJECTION' ? 'KNOWN' : actual === null ? 'ACTUAL_COST_UNKNOWN' : 'KNOWN',
     completed_at: leaveInFlight ? null : new Date().toISOString(),
