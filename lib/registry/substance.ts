@@ -221,3 +221,110 @@ export function auditLocalWeights(approved: LocalSubstance, dir = ollamaModelsDi
   const computed = `sha256:${h.digest('hex')}`;
   return { ok: computed === approved.weightsDigest, computed };
 }
+
+export interface LocalSubstanceAudit {
+  ok: boolean;
+  providerId: string;
+  modelId: string;
+  auditedAt: string;
+  actor: string;
+  approvedHash: string | null;
+  computedHash: string | null;
+  /** Each file read in full: its path relative to the models directory, byte size and SHA-256 of its content. */
+  files: Array<{ role: 'manifest' | 'config' | 'weights'; relPath: string; bytes: number; sha256: string }>;
+  /** The chain: manifest → the config and weights digests it names → the blobs' actual content. */
+  chain: { manifestNamesConfig: string | null; manifestNamesWeights: string | null; configContentMatches: boolean; weightsContentMatches: boolean; weightsSizeMatchesManifest: boolean };
+  mismatches: string[];
+  eventId: string | null;
+}
+
+const hashFile = (p: string): { bytes: number; sha256: string } => {
+  const h = crypto.createHash('sha256');
+  let bytes = 0;
+  const fd = fs.openSync(p, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(8 * 1024 * 1024);
+    let n: number;
+    while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) { h.update(buf.subarray(0, n)); bytes += n; }
+  } finally { fs.closeSync(fd); }
+  return { bytes, sha256: `sha256:${h.digest('hex')}` };
+};
+
+/**
+ * FULL OFFLINE SUBSTANCE AUDIT of a local route, run deliberately (it reads
+ * the whole weights blob — minutes for a multi-GB model). No inference, no
+ * network. Re-hashes the manifest, the config blob and the ENTIRE weights blob
+ * from disk, checks the manifest → blob chain, recomputes the substance hash
+ * and compares it with the route's approved record.
+ *
+ * Always appends one LOCAL_SUBSTANCE_AUDITED registry event (the audit record).
+ * It never rewrites a qualification on success; on any mismatch it goes
+ * through the existing MODEL_SUBSTANCE_CHANGED path (append-only event +
+ * qualifications INVALIDATED), so a failed audit blocks the route.
+ */
+export function auditLocalRouteSubstance(providerId: string, modelId: string, actor: string, dir = ollamaModelsDir()): LocalSubstanceAudit {
+  const auditedAt = new Date().toISOString();
+  const approved = approvedSubstance(providerId, modelId);
+  const out: LocalSubstanceAudit = {
+    ok: false, providerId, modelId, auditedAt, actor, approvedHash: approved?.hash ?? null, computedHash: null, files: [],
+    chain: { manifestNamesConfig: null, manifestNamesWeights: null, configContentMatches: false, weightsContentMatches: false, weightsSizeMatchesManifest: false },
+    mismatches: [], eventId: null,
+  };
+  const rel = (p: string) => path.relative(dir, p);
+  const done = () => {
+    out.ok = out.mismatches.length === 0;
+    out.eventId = `rev-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+    getDatabase().prepare("INSERT INTO registry_events (event_id, event_type, provider_id, model_id, actor, detail_json, created_at) VALUES (?, 'LOCAL_SUBSTANCE_AUDITED', ?, ?, ?, ?, ?)")
+      .run(out.eventId, providerId, modelId, actor, JSON.stringify({ ok: out.ok, approvedHash: out.approvedHash, computedHash: out.computedHash, files: out.files, chain: out.chain, mismatches: out.mismatches, networkRequests: 0, inference: false }), auditedAt);
+    if (!out.ok && approved) recordSubstanceChange(providerId, modelId, approved.hash, out.computedHash ?? 'UNREADABLE', out.mismatches, null);
+    return out;
+  };
+
+  if (!approved) { out.mismatches.push(`${providerId}/${modelId} has no approved substance record`); return done(); }
+  const s = approved.substance;
+  if (s.tag !== modelId) out.mismatches.push(`tag: the approved record names ${s.tag}, the route is ${modelId}`);
+  const mp = ollamaManifestPath(s.tag, dir);
+  if (!mp || !fs.existsSync(mp)) { out.mismatches.push(`no manifest for ${s.tag} in ${dir}`); return done(); }
+
+  const mf = hashFile(mp);
+  out.files.push({ role: 'manifest', relPath: rel(mp), ...mf });
+  if (mf.sha256 !== s.manifestDigest) out.mismatches.push(`manifestDigest: approved ${s.manifestDigest}, computed ${mf.sha256}`);
+  let m: any = null;
+  try { m = JSON.parse(fs.readFileSync(mp, 'utf8')); } catch { out.mismatches.push('the manifest is not valid JSON'); return done(); }
+  const cfgDigest = String(m?.config?.digest ?? '');
+  const layer = (m?.layers ?? []).find((l: any) => /\.model$/.test(String(l?.mediaType ?? '')));
+  out.chain.manifestNamesConfig = cfgDigest || null;
+  out.chain.manifestNamesWeights = layer ? String(layer.digest) : null;
+  if (cfgDigest !== s.configDigest) out.mismatches.push(`configDigest: approved ${s.configDigest}, the manifest names ${cfgDigest || 'none'}`);
+  if (!layer || String(layer.digest) !== s.weightsDigest) out.mismatches.push(`weightsDigest: approved ${s.weightsDigest}, the manifest names ${layer?.digest ?? 'none'}`);
+
+  const cp = blobPath(s.configDigest, dir);
+  if (!fs.existsSync(cp)) out.mismatches.push(`config blob ${s.configDigest} is missing`);
+  else {
+    const cf = hashFile(cp);
+    out.files.push({ role: 'config', relPath: rel(cp), ...cf });
+    out.chain.configContentMatches = cf.sha256 === s.configDigest;
+    if (!out.chain.configContentMatches) out.mismatches.push(`config blob content hashes to ${cf.sha256}, not its address ${s.configDigest}`);
+  }
+
+  const wp = blobPath(s.weightsDigest, dir);
+  if (!fs.existsSync(wp)) out.mismatches.push(`weights blob ${s.weightsDigest} is missing`);
+  else {
+    const wf = hashFile(wp);
+    out.files.push({ role: 'weights', relPath: rel(wp), ...wf });
+    out.chain.weightsContentMatches = wf.sha256 === s.weightsDigest;
+    out.chain.weightsSizeMatchesManifest = !layer || !Number.isInteger(layer.size) || layer.size === wf.bytes;
+    if (!out.chain.weightsContentMatches) out.mismatches.push(`weights blob content hashes to ${wf.sha256}, not its address ${s.weightsDigest}`);
+    if (wf.bytes !== s.weightsBytes) out.mismatches.push(`weightsBytes: approved ${s.weightsBytes}, found ${wf.bytes}`);
+    if (!out.chain.weightsSizeMatchesManifest) out.mismatches.push(`weights blob is ${wf.bytes} bytes; the manifest declares ${layer.size}`);
+  }
+
+  // The final substance hash, recomputed from what was read (not from the approved record).
+  const read = readOllamaSubstance(s.tag, dir);
+  if (!read.ok) out.mismatches.push(`substance unreadable: ${read.reason}`);
+  else {
+    out.computedHash = substanceHash(read.substance);
+    if (out.computedHash !== approved.hash) out.mismatches.push(...substanceDiff(s, read.substance), `substanceHash: approved ${approved.hash}, computed ${out.computedHash}`);
+  }
+  return done();
+}

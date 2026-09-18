@@ -80,14 +80,15 @@ describe('queued-task review', () => {
 });
 
 describe('runtime version report', () => {
-  it('reports UNKNOWN for anything not stamped, never a guess; the database schema has a live fingerprint', () => {
+  it('reports UNKNOWN for anything not stamped, never a guess; the database schema has a version and a live fingerprint', () => {
     const saved = { ...process.env };
     for (const k of ['SYNTHOS_BUILD_SHA', 'SYNTHOS_BUILD_TIME', 'SYNTHOS_BUILD_REF', 'SYNTHOS_BUILD_TREE', 'SYNTHOS_BUILD_SOURCE']) delete process.env[k];
     try {
       const v = runtimeVersionReport(getDatabase());
-      expect(v).toMatchObject({ commit: 'UNKNOWN', buildTime: 'UNKNOWN', ref: 'UNKNOWN', tree: 'UNKNOWN', source: 'UNKNOWN', node: process.version, registrySchema: 'synthos.registry/v1', databaseSchema: { version: 'UNKNOWN' } });
+      expect(v).toMatchObject({ commit: 'UNKNOWN', buildTime: 'UNKNOWN', ref: 'UNKNOWN', tree: 'UNKNOWN', source: 'UNKNOWN', node: process.version, registrySchema: 'synthos.registry/v1', databaseSchema: { version: 2, supported: 'UNKNOWN' } });
+      expect(runtimeVersionReport(getDatabase(), 2).databaseSchema).toMatchObject({ version: 2, supported: 2 });
       expect(v.databaseSchema.fingerprint).toMatch(/^sha256:[0-9a-f]{64}$/);
-      expect(runtimeVersionReport(null).databaseSchema.fingerprint).toBe('UNKNOWN');
+      expect(runtimeVersionReport(null).databaseSchema).toEqual({ version: 'UNKNOWN', supported: 'UNKNOWN', fingerprint: 'UNKNOWN' });
       process.env.SYNTHOS_BUILD_SHA = 'a'.repeat(40); process.env.SYNTHOS_BUILD_TREE = 'CLEAN';
       expect(runtimeVersionReport(getDatabase()).commit).toBe('a'.repeat(40));
     } finally { process.env = saved; }
@@ -95,7 +96,8 @@ describe('runtime version report', () => {
 
   it('the diagnostics authority and the UI read the same report; git is never run per request', () => {
     const server = fs.readFileSync(path.join(process.cwd(), 'server.ts'), 'utf8');
-    expect(server).toContain('runtimeVersion: runtimeVersionReport(getDatabase()),');
+    expect(server).toContain('runtimeVersion: runtimeVersionReport(getDatabase(), SCHEMA_VERSION),');
+    expect(server).toContain('databaseSchema: runtimeVersionReport(getDatabase(), SCHEMA_VERSION).databaseSchema,');
     expect(server).toContain('version: readBuildInfo(),');
     const lib = fs.readFileSync(path.join(process.cwd(), 'lib/build-info.ts'), 'utf8');
     expect(lib).not.toMatch(/child_process|execSync|spawn/);

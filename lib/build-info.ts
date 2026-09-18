@@ -48,17 +48,25 @@ export function readBuildInfo(env: Record<string, string | undefined> = process.
 /**
  * The full running-version report for diagnostics: the stamped build
  * (above), the Node runtime, the registry manifest schema, and the database
- * schema. There is no versioned-migration scheme for the database, so its
- * VERSION is reported as UNKNOWN, with a fingerprint of the live schema
- * (SHA-256 of sqlite_master) so a change is still visible.
+ * schema — its monotonic VERSION (SQLite `user_version`, advanced only by the
+ * numbered migrations in lib/persistence.ts), the version this build SUPPORTS
+ * (passed in by the caller, so this module never imports the database layer),
+ * and a FINGERPRINT of the live schema (SHA-256 of sqlite_master) so drift
+ * that no migration accounts for is still visible. UNKNOWN when unreadable.
  */
-export function runtimeVersionReport(db?: { prepare(sql: string): { all(): unknown[] } } | null): BuildInfo & { node: string; registrySchema: string; databaseSchema: { version: 'UNKNOWN'; fingerprint: string } } {
+export function runtimeVersionReport(db?: { prepare(sql: string): { all(): unknown[] } } | null, supportedSchemaVersion?: number): BuildInfo & { node: string; registrySchema: string; databaseSchema: { version: number | 'UNKNOWN'; supported: number | 'UNKNOWN'; fingerprint: string } } {
   let fingerprint = 'UNKNOWN';
+  let version: number | 'UNKNOWN' = 'UNKNOWN';
   if (db) {
     try {
       const rows = db.prepare("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name").all() as Array<{ type: string; name: string; sql: string }>;
       fingerprint = `sha256:${createHash('sha256').update(rows.map((r) => `${r.type}|${r.name}|${r.sql}`).join('\n')).digest('hex')}`;
     } catch { /* stays UNKNOWN */ }
+    try {
+      const v = Number((db.prepare('PRAGMA user_version').all() as Array<{ user_version: number }>)[0]?.user_version);
+      if (Number.isInteger(v) && v >= 0) version = v;
+    } catch { /* stays UNKNOWN */ }
   }
-  return { ...readBuildInfo(), node: process.version, registrySchema: REGISTRY_SCHEMA_VERSION, databaseSchema: { version: 'UNKNOWN', fingerprint } };
+  const supported = Number.isInteger(supportedSchemaVersion) ? (supportedSchemaVersion as number) : 'UNKNOWN';
+  return { ...readBuildInfo(), node: process.version, registrySchema: REGISTRY_SCHEMA_VERSION, databaseSchema: { version, supported, fingerprint } };
 }

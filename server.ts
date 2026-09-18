@@ -53,6 +53,7 @@ import {
   resumeSchedule,
   getScheduleOccurrences,
   closeDatabase,
+  SCHEMA_VERSION,
   type ScheduleStatus
 } from "./lib/persistence";
 import { hermesAdapter } from "./src/services/hermesAdapter";
@@ -6633,6 +6634,9 @@ Rules for spokenSummary specifically:
         // Exactly which commit this process runs — stamped outside the
         // process when the code was fixed; UNKNOWN when not stamped.
         version: readBuildInfo(),
+        // Database schema: monotonic version, the version this build
+        // supports, and a fingerprint of the live schema.
+        databaseSchema: runtimeVersionReport(getDatabase(), SCHEMA_VERSION).databaseSchema,
       });
     } catch (err: any) {
       res.status(503).json({ ready: false, error: "Readiness check failed to run.", timestamp: new Date().toISOString(), version: readBuildInfo() });
@@ -7297,7 +7301,7 @@ Rules for spokenSummary specifically:
         // RUNNING VERSION — the same authority as /api/ready (lib/build-info.ts:
         // stamped at build/launch, UNKNOWN when unstamped; git is never run
         // per request), plus runtime and schema versions.
-        runtimeVersion: runtimeVersionReport(getDatabase()),
+        runtimeVersion: runtimeVersionReport(getDatabase(), SCHEMA_VERSION),
         aegis: {
           status: "LIVE",
           mode: "DETERMINISTIC_VERIFICATION",

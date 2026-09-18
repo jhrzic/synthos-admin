@@ -266,6 +266,16 @@ export function getDatabase(): any {
       PRAGMA foreign_keys = ON;
     `);
 
+    // SCHEMA VERSION — fail closed BEFORE touching the schema if the database
+    // was written by newer code than this build supports.
+    const onDisk = Number((dbInstance.prepare('PRAGMA user_version').get() as any)?.user_version ?? 0);
+    if (onDisk > SCHEMA_VERSION) {
+      const bad = dbInstance;
+      dbInstance = null;
+      try { bad.close(); } catch { /* already closed */ }
+      throw new SchemaVersionUnsupportedError(onDisk, SCHEMA_VERSION, dbPath);
+    }
+
     // Initialize required SQLite schema
     dbInstance.exec(`
       CREATE TABLE IF NOT EXISTS tasks (
@@ -1328,8 +1338,82 @@ export function getDatabase(): any {
         updated_at TEXT NOT NULL
       );
     `);
+    // Advance the schema version transactionally (additive, idempotent).
+    applySchemaMigrations(dbInstance);
   }
   return dbInstance;
+}
+
+// ---------------------------------------------------------------------------
+// SCHEMA VERSION — one monotonic number (SQLite `user_version`) owned by this
+// database authority. The provisioning above stays idempotent and additive;
+// every change from here on is ALSO a numbered migration below, applied in its
+// own transaction together with the version bump, so the version never
+// advances without the change and a failed migration leaves both untouched.
+//
+//   * newer on disk than SCHEMA_VERSION → refuse to open (fail closed);
+//   * older → apply each pending migration once, in order;
+//   * migrations are additive (CREATE … IF NOT EXISTS / ADD COLUMN) — none
+//     drops or rewrites data — so re-running one is a no-op.
+// There is no second migration system; this list is it.
+// ---------------------------------------------------------------------------
+
+export interface SchemaMigration {
+  version: number;
+  description: string;
+  up: (db: any) => void;
+}
+
+export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = Object.freeze([
+  {
+    version: 1,
+    description: 'Baseline: the self-provisioned schema as of 2026-09-18 (every table and additive column provisioned by getDatabase). Recorded, not changed.',
+    up: () => { /* the provisioning above already guarantees it */ },
+  },
+  {
+    version: 2,
+    description: 'artifact_purpose_events — append-only artifact purpose / retrieval policy (lib/memory-index.ts).',
+    up: (db: any) => db.exec(`CREATE TABLE IF NOT EXISTS artifact_purpose_events (
+        event_id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+        purpose TEXT NOT NULL, retrieval_policy TEXT NOT NULL, reason TEXT NOT NULL, actor TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_artifact_purpose_events_artifact ON artifact_purpose_events (artifact_id, created_at);`),
+  },
+]);
+
+/** The schema version this build supports (the last migration). */
+export const SCHEMA_VERSION = SCHEMA_MIGRATIONS[SCHEMA_MIGRATIONS.length - 1].version;
+
+export class SchemaVersionUnsupportedError extends Error {
+  constructor(public onDisk: number, public supported: number, dbPath: string) {
+    super(`Database schema version ${onDisk} at ${dbPath} is newer than this build supports (${supported}). Refusing to open it: running older code against a newer schema could corrupt data. Deploy the newer build, or restore a backup taken at version ${supported} or lower.`);
+    this.name = 'SchemaVersionUnsupportedError';
+  }
+}
+
+/** Apply pending migrations, each in its own transaction with its version bump. Returns what ran. */
+export function applySchemaMigrations(db: any, migrations: readonly SchemaMigration[] = SCHEMA_MIGRATIONS): { from: number; to: number; applied: number[] } {
+  const from = Number((db.prepare('PRAGMA user_version').get() as any)?.user_version ?? 0);
+  const supported = migrations.length ? migrations[migrations.length - 1].version : 0;
+  if (from > supported) throw new SchemaVersionUnsupportedError(from, supported, '(open database)');
+  const applied: number[] = [];
+  let current = from;
+  for (const m of [...migrations].sort((a, b) => a.version - b.version)) {
+    if (m.version <= current) continue;
+    if (m.version !== current + 1) throw new Error(`schema migrations must be contiguous: at ${current}, next is ${m.version}`);
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      m.up(db);
+      db.exec(`PRAGMA user_version = ${m.version}`);
+      db.exec('COMMIT');
+    } catch (err) {
+      try { db.exec('ROLLBACK'); } catch { /* not in a transaction */ }
+      throw new Error(`schema migration ${m.version} (${m.description}) failed and was rolled back; the database stays at version ${current}: ${(err as any)?.message || err}`);
+    }
+    current = m.version;
+    applied.push(m.version);
+  }
+  return { from, to: current, applied };
 }
 
 // Graphs are workspace-owned. saveGraph() requires a resolved workspaceId on

@@ -135,11 +135,11 @@ describe('runtime version on the diagnostic screen', () => {
   const diag = (runtimeVersion: any) => new Proxy({ database: { status: 'LIVE', tables: { tasks: 0, activity: 0, artifacts: 0, quality: 0, receipts: 0, graphs: 0 } }, platform: { status: 'LIVE', runtime: 'node', nodeVersion: 'v22', port: 3000, platform: 'darwin', arch: 'arm64', uptimeSec: 1, memory: { heapUsedMB: 0, heapTotalMB: 0, rssMB: 0 } }, guardian: { status: 'LIVE' }, aegis: { status: 'LIVE', signingAlgorithm: 'Ed25519' }, ...(runtimeVersion ? { runtimeVersion } : {}) } as Record<string, unknown>, { get: (t, k) => (typeof k !== 'string' || k === 'then' || k === 'toJSON' ? undefined : k in t ? t[k] : (k === 'runtimeVersion' ? undefined : { status: 'UNKNOWN' })) });
 
   it('shows the authoritative commit, ref, tree, build time and schema versions', async () => {
-    routes['/api/master-admin/diagnostics'] = () => diag({ commit: 'c'.repeat(40), buildTime: '2026-09-18T16:00:00.000Z', ref: 'checkpoint/x', tree: 'CLEAN', source: 'LAUNCHER_GIT', node: 'v22.23.0', registrySchema: 'synthos.registry/v1', databaseSchema: { version: 'UNKNOWN', fingerprint: `sha256:${'d'.repeat(64)}` } });
+    routes['/api/master-admin/diagnostics'] = () => diag({ commit: 'c'.repeat(40), buildTime: '2026-09-18T16:00:00.000Z', ref: 'checkpoint/x', tree: 'CLEAN', source: 'LAUNCHER_GIT', node: 'v22.23.0', registrySchema: 'synthos.registry/v1', databaseSchema: { version: 2, supported: 2, fingerprint: `sha256:${'d'.repeat(64)}` } });
     render(<MasterAdminView {...props} />);
     await waitFor(() => expect(screen.getByTestId('runtime-version-commit').textContent).toBe(`commit ${'c'.repeat(40)}`));
     expect(screen.getByTestId('runtime-version-meta').textContent).toBe('ref checkpoint/x · tree CLEAN · built 2026-09-18T16:00:00.000Z · source LAUNCHER_GIT');
-    expect(screen.getByTestId('runtime-version-schema').textContent).toMatch(/registry schema synthos\.registry\/v1 · database schema version UNKNOWN \(fingerprint sha256:d{64}\)/);
+    expect(screen.getByTestId('runtime-version-schema').textContent).toMatch(/registry schema synthos\.registry\/v1 · database schema version 2 of 2 supported \(fingerprint sha256:d{64}\)/);
   });
 
   it('reads UNKNOWN when the version is not reported — never a guessed SHA', async () => {

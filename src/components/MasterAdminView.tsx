@@ -63,7 +63,7 @@ interface LiveDiagnostics {
   /** The running build/runtime/schema version — same authority as /api/ready (lib/build-info.ts). */
   runtimeVersion?: {
     commit: string; buildTime: string; ref: string; tree: string; source: string;
-    node: string; registrySchema: string; databaseSchema: { version: string; fingerprint: string };
+    node: string; registrySchema: string; databaseSchema: { version: number | string; supported?: number | string; fingerprint: string };
   };
   platform: {
     runtime: string;
@@ -1512,7 +1512,7 @@ export const MasterAdminView: React.FC<MasterAdminViewProps> = ({
               ref {diagnostics?.runtimeVersion?.ref ?? 'UNKNOWN'} · tree {diagnostics?.runtimeVersion?.tree ?? 'UNKNOWN'} · built {diagnostics?.runtimeVersion?.buildTime ?? 'UNKNOWN'} · source {diagnostics?.runtimeVersion?.source ?? 'UNKNOWN'}
             </div>
             <div className="text-slate-500 break-all" data-testid="runtime-version-schema">
-              node {diagnostics?.runtimeVersion?.node ?? 'UNKNOWN'} · registry schema {diagnostics?.runtimeVersion?.registrySchema ?? 'UNKNOWN'} · database schema version {diagnostics?.runtimeVersion?.databaseSchema?.version ?? 'UNKNOWN'} (fingerprint {diagnostics?.runtimeVersion?.databaseSchema?.fingerprint ?? 'UNKNOWN'})
+              node {diagnostics?.runtimeVersion?.node ?? 'UNKNOWN'} · registry schema {diagnostics?.runtimeVersion?.registrySchema ?? 'UNKNOWN'} · database schema version {diagnostics?.runtimeVersion?.databaseSchema?.version ?? 'UNKNOWN'} of {diagnostics?.runtimeVersion?.databaseSchema?.supported ?? 'UNKNOWN'} supported (fingerprint {diagnostics?.runtimeVersion?.databaseSchema?.fingerprint ?? 'UNKNOWN'})
             </div>
           </div>
 
