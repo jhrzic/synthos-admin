@@ -14,9 +14,10 @@ import { Layers, Check, HelpCircle, Ban, Info } from 'lucide-react';
 // UI is never the authority on what models exist.
 // ---------------------------------------------------------------------------
 
-type Availability =
-  | 'LIVE_VERIFIED' | 'CONFIGURED' | 'NOT_CONFIGURED'
-  | 'UNAVAILABLE' | 'DEPRECATED' | 'UNKNOWN';
+type Lifecycle = 'DISCOVERED' | 'DEPRECATED' | 'REMOVED';
+type Execution = 'SUPPORTED' | 'EXECUTION_UNAVAILABLE';
+type Routing = 'ROUTABLE' | 'NOT_ROUTABLE';
+type Verification = 'LIVE_VERIFIED' | 'CONFIGURED' | 'NOT_CONFIGURED' | 'UNKNOWN';
 
 interface CatalogModelView {
   modelId: string;
@@ -24,9 +25,14 @@ interface CatalogModelView {
   family: string;
   capabilityTags: string[];
   modalities: string[];
+  aliases: string[];
+  source: 'PROVIDER_API' | 'DOCUMENTED_CATALOG';
   isProviderDefault: boolean;
-  deprecated: boolean;
-  availability: Availability;
+  /** The three axes, reported separately and never collapsed into one chip. */
+  lifecycle: Lifecycle;
+  execution: Execution;
+  routing: Routing;
+  verification: Verification;
   routesToRouterProvider: boolean;
 }
 
@@ -34,37 +40,49 @@ interface CatalogProviderView {
   providerId: string;
   displayName: string;
   family: string;
-  execution: 'EXECUTABLE' | 'RECOGNIZED';
+  execution: Execution;
   routerProvider: string | null;
   credentialEnvVar: string | null;
   credentialPresent: boolean;
+  hasDiscoveryEndpoint: boolean;
+  adapterNote: string;
   providerState: string;
   providerReason: string;
   lastVerifiedAt: string | null;
   acceptsUncataloguedIds: boolean;
-  note: string;
   defaultModelId: string | null;
-  modelCount: number;
+  /** The two counts that must appear side by side. */
+  discoveredCount: number;
+  executableCount: number;
+  routableCount: number;
+  refreshOutcome: string | null;
+  refreshError: string | null;
+  stale: boolean;
   models: CatalogModelView[];
 }
 
 /** Only a real successful call earns the success colour. */
-const AVAILABILITY_STYLE: Record<Availability, { fg: string; bg: string; label: string }> = {
-  LIVE_VERIFIED:  { fg: '#00D26A', bg: '#00D26A', label: 'LIVE VERIFIED' },
-  CONFIGURED:     { fg: '#E8A845', bg: '#E8A845', label: 'CONFIGURED' },
-  NOT_CONFIGURED: { fg: '#7E8BB5', bg: '#7E8BB5', label: 'NOT CONFIGURED' },
-  UNAVAILABLE:    { fg: '#7E8BB5', bg: '#7E8BB5', label: 'UNAVAILABLE' },
-  DEPRECATED:     { fg: '#E8A845', bg: '#E8A845', label: 'DEPRECATED' },
-  UNKNOWN:        { fg: '#7E8BB5', bg: '#7E8BB5', label: 'UNKNOWN' },
+const CHIP_STYLE: Record<string, { fg: string; label: string }> = {
+  LIVE_VERIFIED:         { fg: '#00D26A', label: 'LIVE VERIFIED' },
+  CONFIGURED:            { fg: '#E8A845', label: 'CONFIGURED' },
+  NOT_CONFIGURED:        { fg: '#7E8BB5', label: 'NOT CONFIGURED' },
+  UNKNOWN:               { fg: '#7E8BB5', label: 'UNVERIFIED' },
+  DISCOVERED:            { fg: '#7E8BB5', label: 'DISCOVERED' },
+  DEPRECATED:            { fg: '#E8A845', label: 'DEPRECATED' },
+  REMOVED:               { fg: '#7E8BB5', label: 'REMOVED' },
+  SUPPORTED:             { fg: '#00D26A', label: 'EXECUTABLE' },
+  EXECUTION_UNAVAILABLE: { fg: '#7E8BB5', label: 'NO ADAPTER' },
+  ROUTABLE:              { fg: '#00D26A', label: 'ROUTABLE' },
+  NOT_ROUTABLE:          { fg: '#7E8BB5', label: 'NOT ROUTABLE' },
 };
 
-function AvailabilityChip({ availability }: { availability: Availability }) {
-  const style = AVAILABILITY_STYLE[availability] ?? AVAILABILITY_STYLE.UNKNOWN;
-  const Icon = availability === 'LIVE_VERIFIED' ? Check : availability === 'UNAVAILABLE' ? Ban : HelpCircle;
+function Chip({ value }: { value: string }) {
+  const style = CHIP_STYLE[value] ?? { fg: '#7E8BB5', label: value };
+  const Icon = style.fg === '#00D26A' ? Check : value === 'EXECUTION_UNAVAILABLE' ? Ban : HelpCircle;
   return (
     <span
       className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] font-mono font-bold border"
-      style={{ color: style.fg, borderColor: `${style.bg}4D`, backgroundColor: `${style.bg}1A` }}
+      style={{ color: style.fg, borderColor: `${style.fg}4D`, backgroundColor: `${style.fg}1A` }}
     >
       <Icon className="h-2.5 w-2.5" />
       {style.label}
@@ -133,9 +151,14 @@ export const ProviderModelCatalog: React.FC<{
               <div className="flex items-center gap-2">
                 <span className="text-sm font-bold text-white">{provider.displayName}</span>
                 <span className="text-[9px] font-mono text-[#7E8BB5] uppercase">{provider.family}</span>
-                {provider.execution === 'RECOGNIZED' && (
+                {provider.execution === 'EXECUTION_UNAVAILABLE' && (
                   <span className="rounded border border-[#7E8BB5]/40 bg-[#7E8BB5]/10 px-1.5 py-0.5 text-[9px] font-mono font-bold text-[#7E8BB5]">
-                    NO EXECUTION MAPPING
+                    ADAPTER NOT CONFIGURED
+                  </span>
+                )}
+                {provider.stale && (
+                  <span className="rounded border border-[#E8A845]/40 bg-[#E8A845]/10 px-1.5 py-0.5 text-[9px] font-mono font-bold text-[#E8A845]">
+                    STALE
                   </span>
                 )}
               </div>
@@ -146,15 +169,34 @@ export const ProviderModelCatalog: React.FC<{
                 )}
               </div>
             </div>
-            <span className="text-[10px] font-mono text-[#7E8BB5]">
-              {provider.modelCount} model{provider.modelCount === 1 ? '' : 's'}
-            </span>
+            {/* BOTH counts, always together. "Anthropic: 4 discovered, 0
+                executable" is truthful; either number alone is not. */}
+            <div className="text-right font-mono text-[10px] leading-relaxed">
+              <div className="text-[#9C97B4]">
+                Models discovered: <strong className="text-white">{provider.discoveredCount}</strong>
+              </div>
+              <div className="text-[#9C97B4]">
+                Executable:{' '}
+                <strong className={provider.executableCount > 0 ? 'text-[#00D26A]' : 'text-[#7E8BB5]'}>
+                  {provider.executableCount}
+                </strong>
+              </div>
+              <div className="text-[#6A7196]">
+                Routable: {provider.routableCount}
+              </div>
+            </div>
           </div>
 
-          {provider.note && (
+          {provider.adapterNote && (
             <p className="flex items-start gap-2 text-[10px] leading-relaxed text-[#6A7196]">
               <Info className="mt-0.5 h-3 w-3 shrink-0 text-[#7E8BB5]" />
-              {provider.note}
+              {provider.adapterNote}
+            </p>
+          )}
+
+          {provider.refreshError && (
+            <p className="text-[10px] leading-relaxed text-[#E8A845]">
+              Last refresh failed ({provider.refreshError}). The list below is the last known catalog.
             </p>
           )}
 
@@ -164,8 +206,8 @@ export const ProviderModelCatalog: React.FC<{
                 No catalogued models
               </p>
               <p className="mx-auto mt-1 max-w-sm text-[10px] leading-relaxed text-[#6A7196]">
-                This build has no execution mapping for {provider.displayName}, so no model is listed. Naming
-                one here would claim a model that cannot be dispatched.
+                No documented model list is held for {provider.displayName} and no discovery endpoint here can
+                be called, so the catalog is empty rather than guessed.
               </p>
             </div>
           ) : (
@@ -183,18 +225,24 @@ export const ProviderModelCatalog: React.FC<{
                           ROUTED DEFAULT
                         </span>
                       )}
-                      {model.deprecated && (
-                        <span className="rounded border border-[#E8A845]/40 bg-[#E8A845]/10 px-1.5 py-0.5 text-[9px] font-mono font-bold text-[#E8A845]">
-                          DEPRECATED
-                        </span>
-                      )}
+                      {model.lifecycle !== 'DISCOVERED' && <Chip value={model.lifecycle} />}
                     </div>
                     <div className="mt-0.5 text-[9px] font-mono text-[#6A7196]">
                       {model.displayName !== model.modelId && <>{model.displayName} · </>}
                       {model.capabilityTags.join(' · ') || 'no capability tags'}
+                      {model.aliases.length > 0 && <> · alias: {model.aliases.join(', ')}</>}
+                      {' · '}
+                      {model.source === 'PROVIDER_API' ? 'from provider API' : 'from documented metadata'}
                     </div>
                   </div>
-                  <AvailabilityChip availability={model.availability} />
+                  {/* Execution, routing and verification are separate facts and
+                      are shown as separate chips. Collapsing them into one
+                      badge is how "catalogued" started meaning "usable". */}
+                  <div className="flex shrink-0 flex-wrap items-center gap-1">
+                    <Chip value={model.execution} />
+                    <Chip value={model.routing} />
+                    <Chip value={model.verification} />
+                  </div>
                 </div>
               ))}
 

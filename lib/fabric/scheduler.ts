@@ -405,6 +405,16 @@ export async function runExternalExecutionReconciliation(nowIso: string = new Da
 
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
 
+/**
+ * How often the model catalog is refreshed from provider metadata. Provider
+ * line-ups move on the order of weeks, so six hours is frequent enough to
+ * notice a new or retired model and infrequent enough to be nearly free.
+ */
+const CATALOG_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+/** Epoch of the last catalog refresh attempt. 0 so the first tick runs one. */
+let lastCatalogRefreshAt = 0;
+
 // ---------------------------------------------------------------------------
 // ALWAYS-ON RUNTIME — the scheduler's own liveness, recorded rather than
 // claimed.
@@ -453,6 +463,10 @@ export interface SchedulerHealth {
   lastOrchestrationAdvanced: number | null;
   orchestrationErrors: number;
   lastOrchestrationError: { at: string; message: string } | null;
+  /** Model catalog sync — metadata only, no generation tokens. */
+  lastCatalogRefreshAt: string | null;
+  lastCatalogRefreshStale: boolean;
+  lastCatalogRefreshError: { at: string; message: string } | null;
   lastReconcileError: { at: string; message: string } | null;
 }
 
@@ -473,6 +487,9 @@ const schedulerHealth: SchedulerHealth = {
   lastOrchestrationAdvanced: null,
   orchestrationErrors: 0,
   lastOrchestrationError: null,
+  lastCatalogRefreshAt: null,
+  lastCatalogRefreshStale: false,
+  lastCatalogRefreshError: null,
 };
 
 /** The scheduler's real, recorded liveness in this process. Never a configuration read. */
@@ -537,6 +554,36 @@ export function startScheduler(intervalMs = 10000): void {
     // import inside the callback resolves after both modules are fully
     // initialised — the same technique lib/model-credentials.ts already uses
     // to reach the provider adapters.
+    // MODEL CATALOG SYNC — the fourth thing this ONE timer drives.
+    //
+    // Time-gated rather than given its own interval, for exactly the reason
+    // stated above about a second scheduler. A provider's model list changes
+    // on the order of weeks, so running it every 10s would be thousands of
+    // pointless metadata calls a day; CATALOG_REFRESH_INTERVAL_MS gates it.
+    //
+    // This spends NO generation tokens. lib/model-discovery.ts issues GET
+    // metadata requests only and never touches a generation path, so a
+    // catalog refresh cannot quietly become a billable inference call.
+    if (Date.now() - lastCatalogRefreshAt >= CATALOG_REFRESH_INTERVAL_MS) {
+      lastCatalogRefreshAt = Date.now();
+      import('../model-discovery')
+        .then((m) => m.refreshModelCatalog('SCHEDULED'))
+        .then((report) => {
+          schedulerHealth.lastCatalogRefreshAt = report.finishedAt;
+          schedulerHealth.lastCatalogRefreshStale = report.anyStale;
+        })
+        .catch((err) => {
+          // A failed refresh preserves the last-known catalog; it must never
+          // stop scheduled work or orchestration.
+          schedulerHealth.lastCatalogRefreshError = {
+            at: new Date().toISOString(),
+            message: err?.message || String(err),
+          };
+          // eslint-disable-next-line no-console
+          console.error('[scheduler] model catalog refresh failed:', err);
+        });
+    }
+
     import('./orchestrator')
       .then((m) => m.orchestrationTickForScheduler())
       .then((result) => {

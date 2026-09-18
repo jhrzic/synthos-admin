@@ -1,44 +1,42 @@
 // ---------------------------------------------------------------------------
 // CANONICAL MODEL CATALOG.
 //
-// THE DEFECT THIS EXISTS TO FIX
-// The Admin represented every provider as though it had exactly one model.
-// src/data/mockData.ts held one entry per *seat* — `claude`, `chatgpt`,
-// `gemini` — and smuggled model identity into the display name:
+// THREE SEPARATE CONCEPTS, AND KEEPING THEM SEPARATE IS THE WHOLE POINT
 //
-//     name: 'Claude 3.7 Sonnet / Opus'
-//     name: 'Gemini 3.7 / 3.6 Flash'
-//     name: 'ChatGPT o3 / GPT-4.5'
+//   1. CATALOG    — what models are known to exist for a provider.
+//   2. EXECUTION  — whether SynthOS has an adapter that can call them.
+//   3. ROUTING    — whether a model is selected/eligible for a task now.
 //
-// There was no `modelId` field at all. So "Claude" WAS "Claude 3.7 Sonnet",
-// structurally, and the only way to update a model was to edit a label. That
-// is why the Admin still showed a stale Claude version long after it meant
-// anything.
+// A model may legitimately be DISCOVERED, EXECUTION_UNAVAILABLE and
+// NOT_ROUTABLE all at once. That is not a contradiction; it is the truth about
+// every Claude model in this build today.
 //
-// PROVIDER AND MODEL ARE SEPARATE CONCEPTS HERE
-// A provider is a vendor plus an execution mapping. A model is an addressable
-// id belonging to a provider. One provider may expose many models, and the
-// model the router currently defaults to is a *selection*, not the provider's
-// whole surface.
+// TWO DEFECTS THIS MODULE HAS NOW CORRECTED, IN ORDER
 //
-// WHERE THE DATA COMES FROM — AND WHERE IT DOES NOT
-// Every model id below is sourced from lib/model-router.ts, which is the
-// routing authority and the only thing in this build that knows what can
-// actually be dispatched. Nothing here is invented:
+// First, the Admin represented each provider as though it had exactly one
+// model: the registry held one entry per SEAT and smuggled model identity into
+// the display name ('Claude 3.7 Sonnet / Opus', 'Gemini 3.7 / 3.6 Flash'),
+// with no modelId field anywhere. A provider structurally WAS one model.
 //
-//   * Gemini ids are the three `normalizeGeminiModel()` recognises.
-//   * OpenAI's default comes from `resolveDefaultOpenAiModel()`. The router is
-//     deliberately PREFIX-based for OpenAI (`gpt-*`, `o1`-`o9`) rather than an
-//     allowlist, because OpenAI retires snapshots faster than this file can be
-//     edited. So this catalog does not pretend to enumerate OpenAI's line-up —
-//     it lists the configured default and records that the prefix rule admits
-//     others. Listing invented snapshot names would be the original bug again.
-//   * Providers with no execution mapping come from the router's own
-//     RECOGNIZED_UNCONFIGURED_PROVIDERS list, and are marked UNAVAILABLE.
+// Second — and this was the first version of this file getting it wrong — the
+// fix showed ZERO models for any provider without an execution adapter. That
+// traded one untruth for another. A provider's model fleet is knowable whether
+// or not SynthOS can call it, and "Anthropic: 0 models" is false in a way that
+// "Anthropic: 4 models, 0 executable" is not.
+//
+// WHERE MODEL IDS COME FROM — NEVER INVENTION
+//
+//   PROVIDER_API       a live metadata call to the provider's own model-list
+//                      endpoint. Metadata only; see lib/model-discovery.ts for
+//                      the zero-inference guarantee.
+//   DOCUMENTED_CATALOG official provider documentation and this project's own
+//                      canonical model table (docs/synthos/CLAUDE.md). Used
+//                      when no credential or no discovery endpoint is
+//                      available — which is the Anthropic case today.
 //
 // THIS IS NOT A SECOND ROUTER
-// The catalog answers "what models exist and what is their real state". It
-// never decides where a call goes; lib/model-router.ts does that, unchanged.
+// The catalog answers "what exists and what is its state". lib/model-router.ts
+// decides where a call goes, and is unchanged.
 // ---------------------------------------------------------------------------
 
 import {
@@ -48,79 +46,83 @@ import {
   type ExecutableProvider,
 } from './model-router';
 
-/** Stable provider keys. Not display strings — those change. */
 export type CatalogProviderId =
   | 'openai'
   | 'google'
   | 'anthropic'
   | 'deepseek'
   | 'nousresearch'
-  | 'perplexity';
+  | 'perplexity'
+  | 'openrouter'
+  | 'ollama';
 
-/**
- * Whether this build can dispatch to a provider at all.
- *
- * `EXECUTABLE` means lib/model-router.ts has a real mapping (today: OpenAI and
- * Gemini). `RECOGNIZED` means the router knows the name well enough to refuse
- * precisely, but there is no execution mapping. Registry presence is never
- * execution proof, which is the distinction the old single-entry shape lost.
- */
-export type ProviderExecution = 'EXECUTABLE' | 'RECOGNIZED';
+/** Where a catalog entry's identity came from. Never "we made it up". */
+export type ModelSource = 'PROVIDER_API' | 'DOCUMENTED_CATALOG';
 
-/**
- * Truthful availability for one model.
- *
- * Extends the vocabulary already in lib/provider-state.ts rather than
- * introducing a parallel one — a second status vocabulary for the same
- * question is how two surfaces start disagreeing. Provider-level truth still
- * comes from resolveProviderState(); these add the model-level cases that a
- * provider state cannot express.
- */
-export type ModelAvailability =
-  /** A real call to this provider succeeded. The only "usable" reading. */
-  | 'LIVE_VERIFIED'
-  /** Provider is executable and a credential resolves. Not yet proven. */
-  | 'CONFIGURED'
-  /** Provider is executable but no credential resolves. */
-  | 'NOT_CONFIGURED'
-  /** No execution mapping in this build. Cannot be dispatched at all. */
-  | 'UNAVAILABLE'
-  /** Superseded upstream; kept so a stale reference is labelled, not silent. */
+/** AXIS 1 — catalog lifecycle. What is known about the model's existence. */
+export type CatalogLifecycle =
+  /** Present in the provider's current catalog. */
+  | 'DISCOVERED'
+  /** Still listed, but the provider marks it superseded. */
   | 'DEPRECATED'
-  /** Catalogued, but this build cannot determine its state. */
+  /** Was in a previous refresh and is no longer listed. Kept, not deleted. */
+  | 'REMOVED';
+
+/** AXIS 2 — can SynthOS call it? A property of THIS codebase, not the vendor. */
+export type ExecutionSupport =
+  /** An adapter exists in this build and the router dispatches to it. */
+  | 'SUPPORTED'
+  /** No adapter. Nothing here can call this model, credential or not. */
+  | 'EXECUTION_UNAVAILABLE';
+
+/** AXIS 3 — may a task route to it right now? */
+export type RoutingEligibility =
+  /** Executable, credentialed, and the router accepts the id. */
+  | 'ROUTABLE'
+  /** Known, but not eligible — no adapter, no credential, or removed. */
+  | 'NOT_ROUTABLE';
+
+/**
+ * Verification, kept as its own axis because a credential is not proof.
+ * Mirrors the vocabulary in lib/provider-state.ts rather than duplicating it.
+ */
+export type VerificationState =
+  | 'LIVE_VERIFIED'
+  | 'CONFIGURED'
+  | 'NOT_CONFIGURED'
   | 'UNKNOWN';
 
 export interface CatalogProvider {
   providerId: CatalogProviderId;
   /** Vendor display name. The provider, never a model. */
   displayName: string;
-  /** Vendor family, for grouping seats and models. */
   family: string;
-  execution: ProviderExecution;
-  /** Router's provider token, when this provider is executable. */
+  execution: ExecutionSupport;
+  /** Router's provider token when an adapter exists. */
   routerProvider: ExecutableProvider | null;
-  /** Env var carrying the credential, when one applies. */
   credentialEnvVar: string | null;
-  /**
-   * True when the router accepts ids beyond those catalogued, so the UI can
-   * say "and others" instead of implying the list is exhaustive.
-   */
+  /** True when the router accepts ids beyond those catalogued. */
   acceptsUncataloguedIds: boolean;
-  /** Why a provider is not executable. Empty when it is. */
-  note: string;
+  /** Whether the provider exposes a model-list endpoint this build can call. */
+  hasDiscoveryEndpoint: boolean;
+  /** Why execution is unavailable. Empty when it is available. */
+  adapterNote: string;
 }
 
 export interface CatalogModel {
   providerId: CatalogProviderId;
-  /** The id a caller passes to the router. Addressable, not a label. */
+  /** The id a caller would pass. Addressable, not a label. */
   modelId: string;
   displayName: string;
   family: string;
   capabilityTags: string[];
   modalities: string[];
-  /** The provider's default routed model. A selection, not its only model. */
+  lifecycle: CatalogLifecycle;
+  source: ModelSource;
+  /** Ids the provider treats as pointing at this model. */
+  aliases: string[];
+  /** The provider's default routed model, when this build routes to it. */
   isProviderDefault: boolean;
-  deprecated: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -132,225 +134,342 @@ export const CATALOG_PROVIDERS: readonly CatalogProvider[] = Object.freeze([
     providerId: 'openai',
     displayName: 'OpenAI',
     family: 'OpenAI',
-    execution: 'EXECUTABLE',
+    execution: 'SUPPORTED',
     routerProvider: 'OPENAI',
     credentialEnvVar: 'OPENAI_API_KEY',
-    // The router admits any `gpt-*` or `o1`-`o9` id on purpose.
     acceptsUncataloguedIds: true,
-    note: '',
+    hasDiscoveryEndpoint: true,
+    adapterNote: '',
   },
   {
     providerId: 'google',
     displayName: 'Google',
     family: 'Gemini',
-    execution: 'EXECUTABLE',
+    execution: 'SUPPORTED',
     routerProvider: 'GEMINI',
     credentialEnvVar: 'GEMINI_API_KEY',
     acceptsUncataloguedIds: false,
-    note: '',
+    hasDiscoveryEndpoint: true,
+    adapterNote: '',
   },
   {
     providerId: 'anthropic',
     displayName: 'Anthropic',
     family: 'Claude',
-    execution: 'RECOGNIZED',
+    execution: 'EXECUTION_UNAVAILABLE',
     routerProvider: null,
-    credentialEnvVar: null,
+    credentialEnvVar: 'ANTHROPIC_API_KEY',
     acceptsUncataloguedIds: false,
-    note: 'Recognized by the router so a request can be refused by name. No execution mapping exists in this build, so no Claude model can be dispatched.',
+    // Anthropic does publish a model-list endpoint, but this build holds no
+    // Anthropic credential, so it cannot be called. The catalog falls back to
+    // documented metadata — which is why models are still listed.
+    hasDiscoveryEndpoint: true,
+    adapterNote:
+      'No Anthropic execution adapter exists in this build, so no Claude model can be dispatched. '
+      + 'The models below are catalogued from documented provider metadata, not from a live call, and '
+      + 'none is routable.',
   },
   {
     providerId: 'deepseek',
     displayName: 'DeepSeek',
     family: 'DeepSeek',
-    execution: 'RECOGNIZED',
+    execution: 'EXECUTION_UNAVAILABLE',
     routerProvider: null,
-    credentialEnvVar: null,
+    credentialEnvVar: 'DEEPSEEK_API_KEY',
     acceptsUncataloguedIds: false,
-    note: 'Recognized by the router. No execution mapping in this build.',
+    hasDiscoveryEndpoint: true,
+    adapterNote: 'No DeepSeek execution adapter exists in this build. Catalogued from documented metadata only.',
   },
   {
     providerId: 'nousresearch',
     displayName: 'Nous Research',
     family: 'Hermes',
-    execution: 'RECOGNIZED',
+    execution: 'EXECUTION_UNAVAILABLE',
     routerProvider: null,
     credentialEnvVar: null,
     acceptsUncataloguedIds: false,
-    note: 'Local Hermes runtime is disabled (HERMES_LOCAL_ENABLED=false) and broken upstream. No model can be dispatched.',
+    hasDiscoveryEndpoint: false,
+    adapterNote:
+      'The local Hermes runtime is disabled (HERMES_LOCAL_ENABLED=false) and broken upstream. '
+      + 'Catalogued from documented metadata only.',
+  },
+  {
+    providerId: 'ollama',
+    displayName: 'Ollama (local)',
+    family: 'Local',
+    execution: 'EXECUTION_UNAVAILABLE',
+    routerProvider: null,
+    credentialEnvVar: null,
+    acceptsUncataloguedIds: false,
+    // Ollama exposes /api/tags locally, but no adapter here calls it.
+    hasDiscoveryEndpoint: true,
+    adapterNote: 'No Ollama adapter exists in this build. Catalogued from the project model table only.',
   },
   {
     providerId: 'perplexity',
     displayName: 'Perplexity',
     family: 'Sonar',
-    execution: 'RECOGNIZED',
+    execution: 'EXECUTION_UNAVAILABLE',
     routerProvider: null,
-    credentialEnvVar: null,
+    credentialEnvVar: 'PERPLEXITY_API_KEY',
     acceptsUncataloguedIds: false,
-    note: 'Recognized by the router. No execution mapping in this build.',
+    hasDiscoveryEndpoint: false,
+    adapterNote:
+      'No Perplexity execution adapter exists in this build, and no documented model list is held here, '
+      + 'so the catalog is empty rather than guessed.',
+  },
+  {
+    providerId: 'openrouter',
+    displayName: 'OpenRouter',
+    family: 'Aggregator',
+    execution: 'EXECUTION_UNAVAILABLE',
+    routerProvider: null,
+    credentialEnvVar: 'OPENROUTER_API_KEY',
+    acceptsUncataloguedIds: true,
+    // OpenRouter's /api/v1/models is public, but no adapter here calls it and
+    // its catalog is the union of other vendors' — listing it from static
+    // metadata would be stale the day it was written.
+    hasDiscoveryEndpoint: true,
+    adapterNote:
+      'No OpenRouter execution adapter exists in this build. Its catalog is an aggregate of other '
+      + 'vendors and is not mirrored here from static metadata; it would need live discovery to be true.',
   },
 ]);
-
-// ---------------------------------------------------------------------------
-// MODELS
-//
-// Only ids this build can actually name truthfully. A provider with no
-// execution mapping gets NO model entries rather than invented ones: listing
-// "Claude 3.7 Sonnet" here would recreate the exact defect this module exists
-// to remove, because nothing in this build can dispatch it.
-// ---------------------------------------------------------------------------
-
-const GEMINI_MODELS: readonly CatalogModel[] = Object.freeze([
-  {
-    providerId: 'google',
-    modelId: 'gemini-3.1-flash-lite',
-    displayName: 'Gemini 3.1 Flash Lite',
-    family: 'Gemini',
-    capabilityTags: ['text', 'fast', 'default'],
-    modalities: ['text'],
-    isProviderDefault: true,
-    deprecated: false,
-  },
-  {
-    providerId: 'google',
-    modelId: 'gemini-3.7-flash',
-    displayName: 'Gemini 3.7 Flash',
-    family: 'Gemini',
-    capabilityTags: ['text', 'fast'],
-    modalities: ['text'],
-    isProviderDefault: false,
-    deprecated: false,
-  },
-  {
-    providerId: 'google',
-    modelId: 'gemini-3.1-pro-preview',
-    displayName: 'Gemini 3.1 Pro (preview)',
-    family: 'Gemini',
-    capabilityTags: ['text', 'reasoning', 'preview'],
-    modalities: ['text'],
-    isProviderDefault: false,
-    deprecated: false,
-  },
-]);
-
-/**
- * OpenAI's configured default, read at call time rather than frozen, because
- * OPENAI_MODEL may override it. Built as a function so the catalog reflects
- * configuration instead of a literal captured at import.
- */
-function openAiModels(): CatalogModel[] {
-  const configured = resolveDefaultOpenAiModel();
-  const models: CatalogModel[] = [{
-    providerId: 'openai',
-    modelId: configured,
-    displayName: configured,
-    family: 'OpenAI',
-    capabilityTags: ['text', 'default'],
-    modalities: ['text'],
-    isProviderDefault: true,
-    deprecated: false,
-  }];
-  // When OPENAI_MODEL overrides the fallback, both are real and worth showing:
-  // the operator's selection, and the built-in fallback it replaced.
-  if (configured !== DEFAULT_OPENAI_MODEL) {
-    models.push({
-      providerId: 'openai',
-      modelId: DEFAULT_OPENAI_MODEL,
-      displayName: `${DEFAULT_OPENAI_MODEL} (built-in fallback)`,
-      family: 'OpenAI',
-      capabilityTags: ['text', 'fallback'],
-      modalities: ['text'],
-      isProviderDefault: false,
-      deprecated: false,
-    });
-  }
-  return models;
-}
-
-/** Every catalogued model, across providers. */
-export function catalogModels(): CatalogModel[] {
-  return [...openAiModels(), ...GEMINI_MODELS];
-}
-
-/** Models belonging to one provider. Empty is a truthful answer. */
-export function modelsForProvider(providerId: CatalogProviderId): CatalogModel[] {
-  return catalogModels().filter((m) => m.providerId === providerId);
-}
 
 export function getCatalogProvider(providerId: string): CatalogProvider | undefined {
   return CATALOG_PROVIDERS.find((p) => p.providerId === providerId);
 }
 
-/** The provider's default routed model id, or null when it has none. */
-export function defaultModelForProvider(providerId: CatalogProviderId): string | null {
-  return modelsForProvider(providerId).find((m) => m.isProviderDefault)?.modelId ?? null;
+// ---------------------------------------------------------------------------
+// DOCUMENTED CATALOG
+//
+// Used when a live model-list call is not possible. Every id below is taken
+// from official provider metadata or this project's own canonical model table
+// in docs/synthos/CLAUDE.md — the same table the cost tiers are derived from.
+// Nothing here is guessed, and a provider with no documented list gets no
+// entries rather than invented ones.
+// ---------------------------------------------------------------------------
+
+interface DocumentedModel {
+  modelId: string;
+  displayName: string;
+  capabilityTags: string[];
+  modalities?: string[];
+  aliases?: string[];
+  deprecated?: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// AVAILABILITY
-// ---------------------------------------------------------------------------
+const DOCUMENTED_MODELS: Partial<Record<CatalogProviderId, DocumentedModel[]>> = {
+  anthropic: [
+    {
+      modelId: 'claude-opus-5',
+      displayName: 'Claude Opus 5',
+      capabilityTags: ['text', 'reasoning', 'frontier'],
+    },
+    {
+      modelId: 'claude-sonnet-5',
+      displayName: 'Claude Sonnet 5',
+      capabilityTags: ['text', 'reasoning', 'default-worker'],
+    },
+    {
+      modelId: 'claude-haiku-4-5-20251001',
+      displayName: 'Claude Haiku 4.5',
+      capabilityTags: ['text', 'fast', 'bulk'],
+      // The project table refers to this model by its undated alias.
+      aliases: ['claude-haiku-4-5'],
+    },
+    {
+      modelId: 'claude-fable-5-1',
+      displayName: 'Claude Fable 5.1',
+      capabilityTags: ['text', 'reasoning', 'gated'],
+      aliases: ['claude-fable-5'],
+    },
+  ],
+  deepseek: [
+    {
+      modelId: 'deepseek-chat',
+      displayName: 'DeepSeek Chat',
+      capabilityTags: ['text', 'bulk'],
+    },
+  ],
+  nousresearch: [
+    {
+      modelId: 'hermes3:8b',
+      displayName: 'Hermes 3 (8B)',
+      capabilityTags: ['text', 'local', 'open-weights'],
+    },
+  ],
+  ollama: [
+    {
+      modelId: 'qwen2.5-coder:14b',
+      displayName: 'Qwen 2.5 Coder (14B)',
+      capabilityTags: ['text', 'code', 'local'],
+    },
+    {
+      modelId: 'hermes3:8b',
+      displayName: 'Hermes 3 (8B)',
+      capabilityTags: ['text', 'local'],
+    },
+  ],
+};
 
-export interface AvailabilityEvidence {
-  /** True when a credential resolves for this provider. */
-  credentialPresent: boolean;
-  /** True when a real call to this provider has succeeded. */
-  liveVerified: boolean;
+/** Gemini ids the router itself recognises — the authority for this provider. */
+const DOCUMENTED_GEMINI: DocumentedModel[] = [
+  { modelId: 'gemini-3.1-flash-lite', displayName: 'Gemini 3.1 Flash Lite', capabilityTags: ['text', 'fast'] },
+  { modelId: 'gemini-3.7-flash', displayName: 'Gemini 3.7 Flash', capabilityTags: ['text', 'fast'] },
+  { modelId: 'gemini-3.1-pro-preview', displayName: 'Gemini 3.1 Pro (preview)', capabilityTags: ['text', 'reasoning', 'preview'] },
+];
+
+function toCatalogModel(
+  providerId: CatalogProviderId,
+  doc: DocumentedModel,
+  source: ModelSource,
+  defaultModelId: string | null,
+): CatalogModel {
+  const provider = getCatalogProvider(providerId);
+  return {
+    providerId,
+    modelId: doc.modelId,
+    displayName: doc.displayName,
+    family: provider?.family ?? providerId,
+    capabilityTags: doc.capabilityTags,
+    modalities: doc.modalities ?? ['text'],
+    lifecycle: doc.deprecated ? 'DEPRECATED' : 'DISCOVERED',
+    source,
+    aliases: doc.aliases ?? [],
+    // A default only means anything for a provider this build can route to.
+    isProviderDefault: provider?.execution === 'SUPPORTED' && doc.modelId === defaultModelId,
+  };
 }
 
 /**
- * Resolve one model's availability from real evidence.
- *
- * Deliberately takes evidence as an argument rather than reading the database
- * itself: this keeps the catalog a pure module, and keeps the provider ledger
- * (lib/provider-state.ts) the single place that decides what "verified" means.
+ * The documented catalog for one provider. This is the fallback when live
+ * discovery is unavailable, and the baseline the discovery diff compares to.
  */
-export function resolveModelAvailability(
-  model: CatalogModel,
-  evidence: AvailabilityEvidence,
-): ModelAvailability {
-  if (model.deprecated) return 'DEPRECATED';
-  const provider = getCatalogProvider(model.providerId);
-  if (!provider) return 'UNKNOWN';
-  // No execution mapping outranks every other signal: a credential cannot make
-  // a provider dispatchable when nothing in this build calls it.
-  if (provider.execution !== 'EXECUTABLE') return 'UNAVAILABLE';
-  if (evidence.liveVerified) return 'LIVE_VERIFIED';
-  if (evidence.credentialPresent) return 'CONFIGURED';
-  return 'NOT_CONFIGURED';
+export function documentedModelsForProvider(providerId: CatalogProviderId): CatalogModel[] {
+  if (providerId === 'google') {
+    return DOCUMENTED_GEMINI.map((d) => toCatalogModel('google', d, 'DOCUMENTED_CATALOG', 'gemini-3.1-flash-lite'));
+  }
+  if (providerId === 'openai') {
+    const configured = resolveDefaultOpenAiModel();
+    const docs: DocumentedModel[] = [{
+      modelId: configured,
+      displayName: configured,
+      capabilityTags: ['text', 'default'],
+    }];
+    if (configured !== DEFAULT_OPENAI_MODEL) {
+      docs.push({
+        modelId: DEFAULT_OPENAI_MODEL,
+        displayName: `${DEFAULT_OPENAI_MODEL} (built-in fallback)`,
+        capabilityTags: ['text', 'fallback'],
+      });
+    }
+    return docs.map((d) => toCatalogModel('openai', d, 'DOCUMENTED_CATALOG', configured));
+  }
+  const docs = DOCUMENTED_MODELS[providerId] ?? [];
+  return docs.map((d) => toCatalogModel(providerId, d, 'DOCUMENTED_CATALOG', null));
 }
 
-/** Availability may be read as usable only when a real call has succeeded. */
-export function isModelUsable(availability: ModelAvailability): boolean {
-  return availability === 'LIVE_VERIFIED';
+/** The whole documented catalog, across providers. */
+export function documentedCatalog(): CatalogModel[] {
+  return CATALOG_PROVIDERS.flatMap((p) => documentedModelsForProvider(p.providerId));
+}
+
+/** Backwards-compatible alias used by existing callers. */
+export function modelsForProvider(providerId: CatalogProviderId): CatalogModel[] {
+  return documentedModelsForProvider(providerId);
+}
+
+export function catalogModels(): CatalogModel[] {
+  return documentedCatalog();
+}
+
+/** The provider's default routed model id, or null when it has none. */
+export function defaultModelForProvider(providerId: CatalogProviderId): string | null {
+  return documentedModelsForProvider(providerId).find((m) => m.isProviderDefault)?.modelId ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// RESOLVING THE THREE AXES
+// ---------------------------------------------------------------------------
+
+export interface ModelStateEvidence {
+  /** Does a credential resolve for this provider right now? */
+  credentialPresent: boolean;
+  /** Has a real call to this provider succeeded? */
+  liveVerified: boolean;
+}
+
+export interface ResolvedModelState {
+  lifecycle: CatalogLifecycle;
+  execution: ExecutionSupport;
+  routing: RoutingEligibility;
+  verification: VerificationState;
+}
+
+/**
+ * Resolve all three axes plus verification for one model.
+ *
+ * Execution is a property of this codebase and outranks every credential: a
+ * key cannot make a provider callable when nothing here calls it. Routing
+ * additionally requires a credential and a router that accepts the id.
+ * Verification stays separate because a credential is never proof.
+ */
+export function resolveModelState(
+  model: CatalogModel,
+  evidence: ModelStateEvidence,
+): ResolvedModelState {
+  const provider = getCatalogProvider(model.providerId);
+  const execution: ExecutionSupport = provider?.execution ?? 'EXECUTION_UNAVAILABLE';
+
+  const verification: VerificationState = execution !== 'SUPPORTED'
+    // Nothing here can call it, so there is nothing to verify — not "failed".
+    ? 'UNKNOWN'
+    : evidence.liveVerified
+      ? 'LIVE_VERIFIED'
+      : evidence.credentialPresent
+        ? 'CONFIGURED'
+        : 'NOT_CONFIGURED';
+
+  const routable = execution === 'SUPPORTED'
+    && evidence.credentialPresent
+    && model.lifecycle !== 'REMOVED'
+    && catalogAgreesWithRouter(model);
+
+  return {
+    lifecycle: model.lifecycle,
+    execution,
+    routing: routable ? 'ROUTABLE' : 'NOT_ROUTABLE',
+    verification,
+  };
+}
+
+/** Usable means a real call has succeeded. Nothing weaker counts. */
+export function isModelUsable(state: ResolvedModelState): boolean {
+  return state.verification === 'LIVE_VERIFIED' && state.execution === 'SUPPORTED';
 }
 
 /**
  * Does the router actually send this model id to the provider the catalog
- * claims? Guards against the catalog and the router drifting apart, which is
- * the failure mode a separate catalog introduces if nothing checks it.
+ * claims? Guards against catalog/router drift, which is the risk a separate
+ * catalog introduces if nothing checks it. Vacuously true for providers with
+ * no adapter, since the router has no opinion about them.
  */
 export function catalogAgreesWithRouter(model: CatalogModel): boolean {
   const provider = getCatalogProvider(model.providerId);
-  if (!provider || provider.execution !== 'EXECUTABLE') return true;
-  const classification = classifyModelRequest(model.modelId);
-  return classification.provider === provider.routerProvider;
+  if (!provider || provider.execution !== 'SUPPORTED') return true;
+  return classifyModelRequest(model.modelId).provider === provider.routerProvider;
 }
 
 // ---------------------------------------------------------------------------
 // SEATS
 //
-// A seat is an Admin tab / agent slot — `claude`, `chatgpt`, `gemini`,
-// `hermes`. It is NOT a model, and it is not quite a provider either: several
-// seats can belong to one provider (`claude` and `claudecode` are both
-// Anthropic; `chatgpt` and `codex` are both OpenAI).
-//
-// Kept deliberately separate so a seat can later select any model its provider
-// exposes, rather than being welded to one version the way the old registry
-// welded `claude` to "Claude 3.7 Sonnet". Nothing here hardwires a seat to a
-// model id.
+// A seat is an Admin tab / agent slot. It is not a model and not quite a
+// provider — several seats share one provider. Kept separate so a seat can
+// select any model its provider exposes rather than being welded to one
+// version, which is how the stale label survived.
 // ---------------------------------------------------------------------------
 
-/** Seat id (as used by the Admin registry) to the provider it belongs to. */
 const SEAT_PROVIDER: Record<string, CatalogProviderId> = {
   chatgpt: 'openai',
   codex: 'openai',
@@ -363,14 +482,12 @@ const SEAT_PROVIDER: Record<string, CatalogProviderId> = {
   perplexity: 'perplexity',
 };
 
-/** The provider a seat belongs to, or null for a seat with no provider. */
 export function providerForSeat(seatId: string): CatalogProvider | null {
   const providerId = SEAT_PROVIDER[seatId.toLowerCase()];
   return providerId ? getCatalogProvider(providerId) ?? null : null;
 }
 
-/** Models a seat may select, which is its provider's catalogued models. */
 export function modelsForSeat(seatId: string): CatalogModel[] {
   const provider = providerForSeat(seatId);
-  return provider ? modelsForProvider(provider.providerId) : [];
+  return provider ? documentedModelsForProvider(provider.providerId) : [];
 }

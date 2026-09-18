@@ -15,30 +15,48 @@ import { ProviderModelCatalog } from '../src/components/ProviderModelCatalog';
 // taken from the payload rather than inferred from the provider existing.
 // ---------------------------------------------------------------------------
 
+const model = (over: Record<string, unknown>) => ({
+  displayName: 'x', family: 'Gemini', capabilityTags: ['text'], modalities: ['text'],
+  aliases: [], source: 'DOCUMENTED_CATALOG', isProviderDefault: false,
+  lifecycle: 'DISCOVERED', execution: 'SUPPORTED', routing: 'ROUTABLE',
+  verification: 'CONFIGURED', routesToRouterProvider: true, ...over,
+});
+
 const PAYLOAD = {
   success: true,
   providers: [
     {
       providerId: 'google', displayName: 'Google', family: 'Gemini',
-      execution: 'EXECUTABLE', routerProvider: 'GEMINI',
+      execution: 'SUPPORTED', routerProvider: 'GEMINI',
       credentialEnvVar: 'GEMINI_API_KEY', credentialPresent: true,
+      hasDiscoveryEndpoint: true, adapterNote: '',
       providerState: 'CREDENTIAL_PRESENT', providerReason: 'configured, never attempted',
-      lastVerifiedAt: null, acceptsUncataloguedIds: false, note: '',
-      defaultModelId: 'gemini-3.1-flash-lite', modelCount: 3,
+      lastVerifiedAt: null, acceptsUncataloguedIds: false,
+      defaultModelId: 'gemini-3.1-flash-lite',
+      discoveredCount: 3, executableCount: 3, routableCount: 2,
+      refreshOutcome: 'LIVE', refreshError: null, stale: false,
       models: [
-        { modelId: 'gemini-3.1-flash-lite', displayName: 'Gemini 3.1 Flash Lite', family: 'Gemini', capabilityTags: ['text'], modalities: ['text'], isProviderDefault: true,  deprecated: false, availability: 'CONFIGURED',     routesToRouterProvider: true },
-        { modelId: 'gemini-3.7-flash',      displayName: 'Gemini 3.7 Flash',      family: 'Gemini', capabilityTags: ['text'], modalities: ['text'], isProviderDefault: false, deprecated: false, availability: 'CONFIGURED',     routesToRouterProvider: true },
-        { modelId: 'gemini-3.1-pro-preview',displayName: 'Gemini 3.1 Pro',        family: 'Gemini', capabilityTags: ['text'], modalities: ['text'], isProviderDefault: false, deprecated: false, availability: 'NOT_CONFIGURED', routesToRouterProvider: true },
+        model({ modelId: 'gemini-3.1-flash-lite', isProviderDefault: true }),
+        model({ modelId: 'gemini-3.7-flash' }),
+        model({ modelId: 'gemini-3.1-pro-preview', routing: 'NOT_ROUTABLE', verification: 'NOT_CONFIGURED' }),
       ],
     },
     {
+      // THE CORRECTION UNDER TEST: known models, zero executable.
       providerId: 'anthropic', displayName: 'Anthropic', family: 'Claude',
-      execution: 'RECOGNIZED', routerProvider: null,
-      credentialEnvVar: null, credentialPresent: false,
-      providerState: 'NO_CREDENTIAL', providerReason: 'no execution mapping',
+      execution: 'EXECUTION_UNAVAILABLE', routerProvider: null,
+      credentialEnvVar: 'ANTHROPIC_API_KEY', credentialPresent: false,
+      hasDiscoveryEndpoint: true,
+      adapterNote: 'No Anthropic execution adapter exists in this build, so no Claude model can be dispatched.',
+      providerState: 'NO_CREDENTIAL', providerReason: 'no adapter',
       lastVerifiedAt: null, acceptsUncataloguedIds: false,
-      note: 'Recognized by the router so a request can be refused by name. No execution mapping exists in this build.',
-      defaultModelId: null, modelCount: 0, models: [],
+      defaultModelId: null,
+      discoveredCount: 2, executableCount: 0, routableCount: 0,
+      refreshOutcome: 'DOCUMENTED_NO_CREDENTIAL', refreshError: null, stale: false,
+      models: [
+        model({ modelId: 'claude-opus-5', family: 'Claude', execution: 'EXECUTION_UNAVAILABLE', routing: 'NOT_ROUTABLE', verification: 'UNKNOWN' }),
+        model({ modelId: 'claude-sonnet-5', family: 'Claude', execution: 'EXECUTION_UNAVAILABLE', routing: 'NOT_ROUTABLE', verification: 'UNKNOWN' }),
+      ],
     },
   ],
 };
@@ -55,7 +73,7 @@ describe('one provider renders many models', () => {
     // The point: every model id appears, addressable and distinct.
     expect(screen.getByText('gemini-3.7-flash')).toBeTruthy();
     expect(screen.getByText('gemini-3.1-pro-preview')).toBeTruthy();
-    expect(document.body.textContent).toContain('3 models');
+    expect(document.body.textContent).toContain('Models discovered: 3');
   });
 
   it('marks the routed default distinctly from the others', async () => {
@@ -83,6 +101,8 @@ describe('availability is taken from evidence, never inferred', () => {
     // CONFIGURED means a key resolves — not that a call has ever worked.
     expect(text).toContain('CONFIGURED');
     expect(text).not.toContain('LIVE VERIFIED');
+    // And a model nothing can call reads UNVERIFIED, not "failed".
+    expect(text).toContain('UNVERIFIED');
   });
 
   it('per-model availability differs within the same provider', async () => {
@@ -92,16 +112,40 @@ describe('availability is taken from evidence, never inferred', () => {
     // provider would read identically. They must not.
     expect(screen.getAllByText('CONFIGURED').length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('NOT CONFIGURED')).toBeTruthy();
+    // Routing differs per model within one provider too.
+    expect(screen.getAllByText('ROUTABLE').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText('NOT ROUTABLE').length).toBeGreaterThanOrEqual(1);
   });
 
-  it('a provider with no execution mapping lists no models and says why', async () => {
+  it('a provider with no adapter still lists its known models, marked unexecutable', async () => {
+    // THE CORRECTION. Showing zero Claude models because execution is
+    // unavailable was its own untruth; the fleet is knowable either way.
     render(<ProviderModelCatalog workspaceId="ws-test" />);
     await waitFor(() => expect(screen.getByText('Anthropic')).toBeTruthy());
+
+    // The models are present and addressable...
+    expect(screen.getByText('claude-opus-5')).toBeTruthy();
+    expect(screen.getByText('claude-sonnet-5')).toBeTruthy();
+
     const text = document.body.textContent || '';
-    expect(text).toContain('NO EXECUTION MAPPING');
-    expect(text).toContain('No catalogued models');
-    // And critically: no invented Claude model id appears.
-    expect(text).not.toMatch(/claude-[\d.]/i);
+    // ...and plainly not executable, not routable, not verified.
+    expect(text).toContain('ADAPTER NOT CONFIGURED');
+    expect(text).toContain('NO ADAPTER');
+    expect(text).toContain('NOT ROUTABLE');
+    expect(text).not.toContain('No catalogued models');
+    // The stale version that started this is still absent.
+    expect(text).not.toMatch(/claude-3[.-]7/i);
+  });
+
+  it('shows discovered and executable counts side by side', async () => {
+    render(<ProviderModelCatalog workspaceId="ws-test" />);
+    await waitFor(() => expect(screen.getByText('Anthropic')).toBeTruthy());
+    const text = (document.body.textContent || '').replace(/\s+/g, ' ');
+    // Either number alone would mislead. Both, together.
+    expect(text).toContain('Models discovered: 2');
+    expect(text).toContain('Executable: 0');
+    expect(text).toContain('Models discovered: 3');
+    expect(text).toContain('Executable: 3');
   });
 });
 

@@ -63,9 +63,9 @@ import { tonGuardianViews, installTonGuardians } from "./lib/ton-guardians";
 import { listWorkspaceVaultEntries, getWorkspaceVaultEntry, previewWorkspaceVaultEntry, writeWorkspaceArtifact } from "./lib/vault";
 import { getVaultStatus, SYNTHOS_VAULT_SUBDIR } from "./lib/vault-config";
 import {
-  CATALOG_PROVIDERS, modelsForProvider, defaultModelForProvider,
-  resolveModelAvailability, catalogAgreesWithRouter,
+  CATALOG_PROVIDERS, defaultModelForProvider, resolveModelState, catalogAgreesWithRouter,
 } from "./lib/model-catalog";
+import { effectiveModelsForProvider, lastRefresh, refreshModelCatalog } from "./lib/model-discovery";
 import { listKnowledgeNotes, searchKnowledgeNotes, listKnowledgeNotesDetailed } from "./lib/knowledge-vault";
 import { indexVaultArtifact, reindexWorkspaceMemory, searchWorkspaceMemory, listWorkspaceMemory } from "./lib/memory-index";
 import { runAeoAudit, createAuditMissionTasks, resolveGeoProvider } from "./lib/aeo/service";
@@ -6282,34 +6282,32 @@ Rules for spokenSummary specifically:
   });
 
   // ---------------------------------------------------------------------------
-  // MODEL CATALOG — provider and model as separate concepts.
+  // MODEL CATALOG — catalog, execution and routing are three separate facts.
   //
-  // The Admin used to hold one registry entry per provider with the model
-  // smuggled into its display name ("Claude 3.7 Sonnet / Opus"), so a provider
-  // structurally WAS one model and a stale label was the only thing to update.
-  // This route serves the canonical catalog instead: providers, the models each
-  // exposes, which model the router defaults to, and each model's real
-  // availability.
+  // A model may be DISCOVERED while EXECUTION_UNAVAILABLE and NOT_ROUTABLE.
+  // That is the truth about every Claude model here: the fleet is known from
+  // documented provider metadata, and nothing in this build can call it.
   //
-  // Truth comes from the modules that already own it — lib/model-catalog.ts for
-  // identity, lib/model-credentials.ts for whether a key resolves, and
-  // lib/provider-state.ts for whether a real call has ever succeeded. Nothing
-  // is re-derived here, and catalog presence never implies usability.
+  // An earlier version of this route showed ZERO models for any provider
+  // without an adapter, which replaced one untruth with another —
+  // "Anthropic: 0 models" is false in a way "Anthropic: 4 known, 0 executable"
+  // is not.
   //
-  // Workspace-member gated: it reports which providers are configured, which is
-  // deployment information.
+  // Identity comes from lib/model-catalog.ts and the stored discovery catalog;
+  // credential state from lib/model-credentials.ts; verification from
+  // lib/provider-state.ts. Nothing is re-derived here.
   // ---------------------------------------------------------------------------
   app.get("/api/models/catalog", requireWorkspaceMember(fromQuery), (_req, res) => {
     try {
-      const providers = CATALOG_PROVIDERS.map((provider) => {
-        const executable = provider.execution === "EXECUTABLE";
+      const refresh = lastRefresh();
 
-        // Only the two executable providers have a credential concept here.
-        const credentialPresent = executable && isModelProvider(provider.providerId === "google" ? "gemini" : provider.providerId)
-          ? getModelCredentialStatus(provider.providerId === "google" ? "gemini" : (provider.providerId as any)).apiKeyPresent
+      const providers = CATALOG_PROVIDERS.map((provider) => {
+        const executable = provider.execution === "SUPPORTED";
+        const credentialKey = provider.providerId === "google" ? "gemini" : provider.providerId;
+        const credentialPresent = executable && isModelProvider(credentialKey)
+          ? getModelCredentialStatus(credentialKey).apiKeyPresent
           : false;
 
-        // Provider-level state from the existing ledger-backed resolver.
         const state = resolveProviderState({
           provider: provider.routerProvider ?? provider.providerId.toUpperCase(),
           implemented: executable,
@@ -6317,21 +6315,30 @@ Rules for spokenSummary specifically:
           brokenUpstream: provider.providerId === "nousresearch" ? true : undefined,
         });
 
-        const models = modelsForProvider(provider.providerId).map((model) => ({
-          modelId: model.modelId,
-          displayName: model.displayName,
-          family: model.family,
-          capabilityTags: model.capabilityTags,
-          modalities: model.modalities,
-          isProviderDefault: model.isProviderDefault,
-          deprecated: model.deprecated,
-          availability: resolveModelAvailability(model, {
+        const models = effectiveModelsForProvider(provider.providerId).map((model) => {
+          const resolved = resolveModelState(model, {
             credentialPresent,
             liveVerified: state.state === "LIVE_VERIFIED",
-          }),
-          // Proves the catalog and the router agree about where this id goes.
-          routesToRouterProvider: catalogAgreesWithRouter(model),
-        }));
+          });
+          return {
+            modelId: model.modelId,
+            displayName: model.displayName,
+            family: model.family,
+            capabilityTags: model.capabilityTags,
+            modalities: model.modalities,
+            aliases: model.aliases,
+            source: model.source,
+            isProviderDefault: model.isProviderDefault,
+            // The three axes, reported separately and never collapsed.
+            lifecycle: resolved.lifecycle,
+            execution: resolved.execution,
+            routing: resolved.routing,
+            verification: resolved.verification,
+            routesToRouterProvider: catalogAgreesWithRouter(model),
+          };
+        });
+
+        const providerRefresh = refresh?.providers?.find((r: any) => r.providerId === provider.providerId) ?? null;
 
         return {
           providerId: provider.providerId,
@@ -6341,16 +6348,20 @@ Rules for spokenSummary specifically:
           routerProvider: provider.routerProvider,
           credentialEnvVar: provider.credentialEnvVar,
           credentialPresent,
+          hasDiscoveryEndpoint: provider.hasDiscoveryEndpoint,
+          adapterNote: provider.adapterNote,
           providerState: state.state,
           providerReason: state.reason,
-          lastErrorCategory: state.lastErrorCategory,
-          lastModelUsed: state.lastModelUsed,
           lastVerifiedAt: state.lastVerifiedAt ?? null,
-          // So a UI can say "and others" rather than implying an exhaustive list.
           acceptsUncataloguedIds: provider.acceptsUncataloguedIds,
-          note: provider.note,
           defaultModelId: defaultModelForProvider(provider.providerId),
-          modelCount: models.length,
+          // The two counts the Admin must show side by side.
+          discoveredCount: models.filter((m) => m.lifecycle !== "REMOVED").length,
+          executableCount: models.filter((m) => m.execution === "SUPPORTED" && m.lifecycle !== "REMOVED").length,
+          routableCount: models.filter((m) => m.routing === "ROUTABLE").length,
+          refreshOutcome: providerRefresh?.outcome ?? null,
+          refreshError: providerRefresh?.error ?? null,
+          stale: providerRefresh?.outcome === "FAILED_STALE",
           models,
         };
       });
@@ -6358,16 +6369,32 @@ Rules for spokenSummary specifically:
       return res.json({
         success: true,
         providers,
-        // Stated explicitly so no caller has to infer it.
-        catalogPresenceImpliesUsability: false,
-        modelDiscoverySource: "CANONICAL_CATALOG_MODULE",
+        lastRefreshAt: refresh?.finishedAt ?? null,
+        lastRefreshTrigger: refresh?.trigger ?? null,
+        anyStale: refresh?.anyStale ?? false,
+        // Stated so no caller infers any of these.
+        catalogPresenceImpliesExecution: false,
+        catalogPresenceImpliesRouting: false,
+        inferenceCallsDuringRefresh: 0,
         discoveryNote:
-          "No provider API discovery is implemented. Model identity comes from lib/model-catalog.ts, "
-          + "whose ids are sourced from lib/model-router.ts — the only module here that knows what can be dispatched. "
-          + "Providers with no execution mapping carry zero models rather than invented ones.",
+          "Catalog identity comes from each provider's model-list endpoint where a credential exists, and from "
+          + "documented provider metadata otherwise. Discovery issues GET metadata requests only and spends no "
+          + "generation tokens. A provider with no execution adapter still lists its known models; none of them "
+          + "is executable or routable.",
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || "Failed to read the model catalog" });
+    }
+  });
+
+  // Operator-triggered catalog refresh. Admin-gated because it makes outbound
+  // provider metadata calls. Spends no generation tokens.
+  app.post("/api/models/refresh", requireWorkspaceAdmin(fromBody), async (_req, res) => {
+    try {
+      const report = await refreshModelCatalog("MANUAL");
+      return res.json({ success: true, report });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || "Catalog refresh failed" });
     }
   });
 
@@ -7565,8 +7592,29 @@ Rules for spokenSummary specifically:
 
   // STEP 7 — the one real in-process scheduler, started once per server
   // process. Ticks call runDueSchedules(), which only ever dispatches
-  // through executeEnvelope() — never a second execution pipeline.
+  // through executeEnvelope() — never a second execution pipeline. It also
+  // drives the time-gated model catalog refresh.
   startScheduler();
+
+  // MODEL CATALOG — refresh once at startup so the Admin opens with a current
+  // fleet rather than whatever was last stored. Deliberately fire-and-forget:
+  // a provider being unreachable must not delay or fail server startup, and a
+  // failed refresh preserves the last-known catalog and marks it stale.
+  //
+  // Metadata only. lib/model-discovery.ts issues GET model-list requests and
+  // spends no generation tokens, so booting the server never costs inference.
+  refreshModelCatalog("STARTUP")
+    .then((report) => {
+      const live = report.providers.filter((p) => p.outcome === "LIVE").length;
+      const stale = report.providers.filter((p) => p.outcome === "FAILED_STALE").length;
+      console.log(
+        `[model-catalog] startup refresh: ${report.providers.length} provider(s), `
+        + `${live} live, ${stale} stale, 0 inference calls`,
+      );
+    })
+    .catch((err) => {
+      console.error("[model-catalog] startup refresh failed; last-known catalog preserved:", err?.message || err);
+    });
 
   // -------------------------------------------------------------------------
   // Graceful shutdown. Listed as a known deployment gap in
