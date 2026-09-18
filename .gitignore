@@ -17,6 +17,21 @@ vault/Startup-Theses/Read-SynthOS-Admin-package-version.md
 
 # SynthOS Backups (real database + vault snapshots — never committed)
 backups/
+/backups/**
+
+# Any SQLite database, journal or archive anywhere in the tree is runtime
+# state, never source. (An early dev database was committed on 2026-09-01
+# and removed in 2bc5d79; these patterns stop it recurring.)
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.bak
+*.tar.gz
+*.tgz
 
 # Machine-local editor / agent configuration (per-developer, never shared)
 .claude/
