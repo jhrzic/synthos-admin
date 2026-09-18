@@ -120,7 +120,7 @@ export const ModelProviderCredentialsCard: React.FC<ModelProviderCredentialsCard
         </h3>
         <p className="text-xs text-[#8E94B8] mt-0.5">
           These are the credentials the Execution Fabric actually runs with. Stored encrypted on the server, never returned to the
-          browser. Distinct from the local BYOK fields below, which are browser settings only.
+          browser. This is the only place a model-provider key is entered.
         </p>
       </div>
 
@@ -129,6 +129,15 @@ export const ModelProviderCredentialsCard: React.FC<ModelProviderCredentialsCard
           <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
           <div className="flex-1">{error}</div>
           <button onClick={() => setError(null)} className="text-[10px] underline cursor-pointer shrink-0">dismiss</button>
+        </div>
+      )}
+
+      {/* Unreadable is not the same as absent. With no successful read there is
+          no provider state to show, so the card says so persistently rather
+          than rendering an empty list a reader could take for "none set". */}
+      {!loading && providers.length === 0 && (
+        <div className="p-4 rounded-xl border border-[#7E8BB5]/40 bg-[#7E8BB5]/10 text-[11px] font-mono text-[#8E94B8]">
+          {workspaceId ? 'SERVER STATE UNKNOWN — credential status could not be read.' : 'SERVER STATE UNKNOWN — no workspace selected.'}
         </div>
       )}
 

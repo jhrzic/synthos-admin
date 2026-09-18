@@ -112,11 +112,16 @@ describe('2. A BROWSER VALUE can never produce a configured/connected state', ()
     expect(APP).not.toMatch(/elevenlabs:\s*safeSettings/);
   });
 
-  it('no automatic migration of a previously stored provider secret exists', () => {
-    // A key the server never saw is not ours to move. The only migration in
-    // the app remains the pre-existing Fish Audio one.
-    expect(APP).not.toMatch(/customApiKeys\.openai/);
-    expect(APP).not.toMatch(/model-credentials/);
+  // Integrated onto the checkpoint, which DOES migrate a legacy browser key:
+  // to the server, and scrubbed only after the server confirms the save (see
+  // test/model-credential-authority.test.ts). The earlier "no migration"
+  // assertion passed only because its regex missed the singular route name.
+  // The real invariant: the only place a legacy key may go is the server.
+  it('a legacy provider secret may only move to the server credential route', () => {
+    const idx = APP.indexOf('synthos_model_credential_migrated');
+    expect(idx).toBeGreaterThan(-1);
+    expect(APP.slice(idx)).toContain('/api/business/model-credential');
+    expect(APP).not.toMatch(/localStorage\.setItem\([^)]*customApiKeys\.openai/);
   });
 });
 

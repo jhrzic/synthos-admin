@@ -132,13 +132,18 @@ describe('the browser cannot hold a model-provider credential', () => {
     expect(settings).toMatch(/openai:\s*'SERVER_MANAGED_KEY'/);
   });
 
+  // Integrated: SettingsView's own per-row presence display was merged into
+  // ModelProviderCredentialsCard, the one input for these credentials. The
+  // invariant is unchanged and now pinned where it is actually rendered.
   it('SettingsView renders provider state from the server, not from its own settings object', () => {
     const settings = readSource('src/components/SettingsView.tsx');
+    expect(settings).toContain('<ModelProviderCredentialsCard');
+    const card = readSource('src/components/ModelProviderCredentialsCard.tsx');
     // Presence is read from the real route...
-    expect(settings).toContain('/api/business/model-credentials');
+    expect(card).toContain('/api/platform/model-credentials');
     // ...and an unreadable server state is reported as unknown rather than
     // being quietly rendered as "not configured".
-    expect(settings).toContain('SERVER STATE UNKNOWN');
+    expect(card).toContain('SERVER STATE UNKNOWN');
   });
 
   it('a legacy browser key is migrated to the server and then scrubbed, never left in both places', () => {
